@@ -1,0 +1,25 @@
+[package]
+# Port of RFTools Storage 1.21-6.0.5 (McJtyMods/RFToolsStorage, MIT),
+# Minecraft Java 1.21.1 NeoForge; the port targets Horizon 26.3 at the build
+# pin in horizon-mod.toml. Clean-room Rust rewrite from the mod's behaviour
+# (FINDINGS.md); local-only until publishing is approved, publishable under MIT
+# with this source.
+#
+# Cargo's name and version are not the mod's identity: horizon-mod.toml is.
+name = "rftoolsstorage"
+version = "0.2.0"
+edition = "2024"
+license = "MIT"
+description = "RFTools Storage for Horizon: the modular storage block"
+publish = false
+
+[dependencies]
+# The pinned SDK's API crate, fetched into .horizon/sdk/ by any `cargo horizon-mod`
+# command (the launcher builds against its own copy of the same build). Any other
+# registry dependency must be pinned with `horizon-launcher native-lock .` first.
+horizon-mod-api = { path = ".horizon/sdk/api/crates/horizon-mod-api" }
+# The same SDK checkout's core crate, for `JavaString` (a saved compound's key
+# type): the API re-exports `Compound`/`Tag` but not the key, so a mod cannot
+# insert into a block entity's saved data without it. Same path as the API's own
+# dependency, so it is one crate instance.
+horizon-core = { path = ".horizon/sdk/api/crates/horizon-core" }

@@ -1,0 +1,8 @@
+{
+  "title": "itemGroup.rftoolsstorage",
+  "icon": "rftoolsstorage:modular_storage",
+  "items": [
+    "rftoolsstorage:modular_storage",
+    "rftoolsstorage:storage_module0"
+  ]
+}

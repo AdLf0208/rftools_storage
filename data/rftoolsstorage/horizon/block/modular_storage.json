@@ -1,0 +1,35 @@
+{
+  "template": "minecraft:end_rod",
+  "properties": {
+    "hardness": 2.0,
+    "explosion_resistance": 2.0,
+    "requires_tool": true,
+    "sounds": "minecraft:iron_block",
+    "occludes": true
+  },
+  "shapes": {
+    "default": [
+      [0.0, 0.0, 0.0, 1.0, 1.0, 1.0]
+    ]
+  },
+  "collision_shapes": {
+    "default": [
+      [0.0, 0.0, 0.0, 1.0, 1.0, 1.0]
+    ]
+  },
+  "state_properties": {
+    "type": {
+      "type": "enum",
+      "values": ["none", "ore", "generic"]
+    },
+    "amount": {
+      "type": "enum",
+      "values": ["none", "empty", "g0", "g1", "g2", "g3", "g4", "g5", "g6", "g7", "r0", "r1", "r2", "r3", "r4", "r5", "r6", "r7"]
+    }
+  },
+  "default_state": {
+    "type": "none",
+    "amount": "none"
+  },
+  "item": true
+}

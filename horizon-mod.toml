@@ -1,0 +1,28 @@
+id = "rftoolsstorage"
+name = "RFTools Storage"
+version = "0.2.0"
+description = """RFTools Storage for Horizon: the modular storage block. A storage module in the
+block sets its capacity (tier 1: 100 slots, one item kind a slot, 64 a slot); the block stores
+nothing until it is locked, an empty-hand click seals it, a held stack inserts, and an empty
+hand on a locked block gives a stack back. The action bar and /rftoolsstorage info|lock stand
+in for the GUI padlock and readout this slice does not carry."""
+authors = ["McJty"]
+# A native mod: Rust in src/, compiled by the launcher against the game build [native] pins,
+# beside data/ and assets/. The id is the resource namespace and the only identity: Cargo's
+# package name and version are not the mod's.
+api = "0.2"
+# "both" is the installation side, not a hook's: an integrated server belongs to the client
+# installation, so a LAN host or a single-player world needs both.
+side = "both"
+# The one shared value every manifest carries ("May add blocks, items, mob effects and entity
+# types"): the block, the storage module item, the creative tab and the recipes are content
+# this package registers.
+capabilities = ["registries"]
+license = "MIT"
+homepage = "https://github.com/McJtyMods/RFToolsStorage"
+issues = "https://github.com/McJtyMods/RFToolsStorage/issues"
+
+[native]
+game = "26.3"
+horizon = "0b14f8acfd97fa2c750e42795249dcc981178ca4"
+mixins = "e59da9094f0c2fdda6c627fe9eff22dec6a906f0"

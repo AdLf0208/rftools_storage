@@ -1,0 +1,19 @@
+{
+  "type": "minecraft:crafting_shaped",
+  "category": "misc",
+  "key": {
+    "C": "#c:chests",
+    "F": "rftoolsbase:machine_frame",
+    "q": "minecraft:quartz",
+    "r": "minecraft:redstone"
+  },
+  "pattern": [
+    "rCr",
+    "qFq",
+    "rqr"
+  ],
+  "result": {
+    "count": 1,
+    "id": "rftoolsstorage:modular_storage"
+  }
+}

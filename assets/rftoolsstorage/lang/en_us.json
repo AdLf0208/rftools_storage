@@ -1,0 +1,8 @@
+{
+  "item.rftoolsstorage.storage_module0": "Tier 1 Storage Module",
+  "block.rftoolsstorage.modular_storage": "Modular Storage",
+  "itemGroup.rftoolsstorage": "RFTools Storage",
+  "message.rftoolsstorage.modular_storage.header": "This modular storage system can store a lot of items and allows easy searching and filtering. You must first insert a storage module item before you can use it",
+  "message.rftoolsstorage.storage_module.header": "This storage module is for the Modular Storage block",
+  "message.rftoolsstorage.storage_module.info": "Supported stacks: "
+}

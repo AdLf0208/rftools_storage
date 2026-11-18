@@ -1,0 +1,512 @@
+// RFTools Storage for Horizon — the modular storage engine (pure).
+//
+// Ported from RFToolsStorage 1.21-6.0.5 (`McJtyMods/RFToolsStorage`, MIT),
+// Minecraft Java 1.21.1 NeoForge. The upstream source was read for behaviour
+// only; this is a clean-room Rust rewrite.
+//
+// Slice 1: `rftoolsstorage:modular_storage` with a tier-1 storage module.
+// Upstream's capacity is `StorageModuleItem.MAXSIZE` slots (100 for
+// `storage_module0`), each holding one item kind up to
+// `GlobalStorageItemWrapper.getSlotLimit()` = 64 (and never more than the
+// item's own stack size). The block stores nothing until a module is in its
+// slot *and* it is locked: `insertItem`/`extractItem` both start with
+// `if (!isLocked())` and the module slot's `mayPlace` is `if (isLocked())`.
+//
+// The block entity's container slots are the storage (the pin saves a mod
+// block entity's `Items` with its chunk), so the glue keeps the `ItemStack`s
+// and this module keeps the rules: how many fit, in which slot, in which
+// order, and what the readout says.
+
+/// The block this slice implements.
+pub const MODULAR_STORAGE: &str = "rftoolsstorage:modular_storage";
+
+/// `StorageModuleItem.MAXSIZE`: the slots each tier's module gives
+/// (`{100, 200, 300, 500, 0, 0, -1}`; the unused and remote entries are not
+/// carried).
+pub const TIER_SLOTS: [u32; 4] = [100, 200, 300, 500];
+
+/// `GlobalStorageItemWrapper.getSlotLimit()`: the most one slot holds, before
+/// the item's own stack size caps it (`getStackLimit`).
+pub const SLOT_LIMIT: u32 = 64;
+
+/// Whether `block` is the block this slice implements.
+#[must_use]
+pub fn is_modular_storage(block: &str) -> bool {
+    block == MODULAR_STORAGE
+}
+
+/// The tier a storage module item installs, from its id
+/// (`rftoolsstorage:storage_module0` is tier 1 → index 0).
+#[must_use]
+pub fn module_tier(item: &str) -> Option<u8> {
+    match item.strip_prefix("rftoolsstorage:storage_module")? {
+        "0" => Some(0),
+        "1" => Some(1),
+        "2" => Some(2),
+        "3" => Some(3),
+        _ => None,
+    }
+}
+
+/// How many items a store of `slots` slots holds when each holds a stack of
+/// `max_stack` (`min(64, the item's stack size)`, upstream's `getStackLimit`).
+#[must_use]
+pub fn capacity(slots: usize, max_stack: u32) -> u32 {
+    let per_slot = max_stack.clamp(1, SLOT_LIMIT);
+    u32::try_from(slots)
+        .unwrap_or(u32::MAX)
+        .saturating_mul(per_slot)
+}
+
+/// An item kind: `key` is its identity (item id, damage and components, as the
+/// glue builds it — upstream's `ItemStack.isSameItemSameComponents`), `label`
+/// the item id a readout shows.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Kind {
+    pub key: String,
+    pub label: String,
+}
+
+/// One slot's contents: which kind, and how many.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Slot {
+    pub kind: Kind,
+    pub count: u32,
+}
+
+/// A stack taken out of the store, by slot.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Taken {
+    pub slot: usize,
+    pub kind: Kind,
+    pub count: u32,
+}
+
+/// The modular storage's rules and contents. `slots` is empty while no module
+/// is installed (capacity 0).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Storage {
+    pub slots: Vec<Option<Slot>>,
+    pub tier: Option<u8>,
+    pub locked: bool,
+}
+
+impl Storage {
+    /// A storage with no module: it holds nothing.
+    #[must_use]
+    pub fn empty() -> Self {
+        Self::default()
+    }
+
+    /// A storage with `tier`'s module installed and no contents.
+    #[must_use]
+    pub fn with_tier(tier: u8) -> Self {
+        Self {
+            slots: vec![None; slots_of(tier)],
+            tier: Some(tier),
+            locked: false,
+        }
+    }
+
+    /// Installs a module: only while unlocked, and a module already in place is
+    /// not replaced. Resizes to the new tier, keeping what fits
+    /// (`StorageEntry.resize`: a smaller module may lose the tail).
+    pub fn install(&mut self, tier: u8) -> bool {
+        if self.locked || self.tier.is_some() {
+            return false;
+        }
+        self.slots.resize(slots_of(tier), None);
+        self.tier = Some(tier);
+        true
+    }
+
+    /// Takes the module out: only while unlocked. The contents stay, so the
+    /// same module (or another) finds them again. No gesture reaches it in this
+    /// slice (upstream pulls it from the GUI's module slot); the next slice's
+    /// module swap uses it.
+    #[allow(dead_code)]
+    pub fn remove_module(&mut self) -> Option<u8> {
+        if self.locked {
+            return None;
+        }
+        self.slots.clear();
+        self.tier.take()
+    }
+
+    /// Flips the lock. Needs a module; false when there is none.
+    pub fn toggle_lock(&mut self) -> bool {
+        if self.tier.is_none() {
+            return false;
+        }
+        self.locked = !self.locked;
+        true
+    }
+
+    /// Whether the store takes and gives items: a module is in and the block is
+    /// locked.
+    #[must_use]
+    pub fn accepts(&self) -> bool {
+        self.locked && self.tier.is_some()
+    }
+
+    /// The slot count the module gives.
+    #[must_use]
+    pub fn slot_count(&self) -> usize {
+        self.slots.len()
+    }
+
+    /// How many items are stored, all kinds together.
+    #[must_use]
+    pub fn total(&self) -> u32 {
+        self.slots
+            .iter()
+            .flatten()
+            .fold(0, |sum, slot| sum.saturating_add(slot.count))
+    }
+
+    /// How many slots hold something (upstream's `getNumStacks`, the module
+    /// tooltip's "Contents: n/m"). The next slice's tooltip reads it.
+    #[must_use]
+    #[allow(dead_code)]
+    pub fn stacks_used(&self) -> u32 {
+        u32::try_from(self.slots.iter().flatten().count()).unwrap_or(u32::MAX)
+    }
+
+    /// The first stored kind, in slot order.
+    #[must_use]
+    pub fn first_kind(&self) -> Option<&Kind> {
+        self.slots.iter().flatten().next().map(|slot| &slot.kind)
+    }
+
+    /// How many items the store holds when full, for an item of `max_stack`.
+    #[must_use]
+    pub fn capacity(&self, max_stack: u32) -> u32 {
+        capacity(self.slots.len(), max_stack)
+    }
+
+    /// Inserts up to `count` of `kind`, one slot at a time in slot order (what
+    /// `ItemHandlerHelper.insertItem` walks): a slot holding another kind is
+    /// skipped, a slot holding this kind is topped up, an empty one filled.
+    /// Returns how many were taken; the rest stays with the caller.
+    pub fn insert(&mut self, kind: &Kind, count: u32, max_stack: u32) -> u32 {
+        if !self.accepts() || count == 0 {
+            return 0;
+        }
+        let per_slot = max_stack.clamp(1, SLOT_LIMIT);
+        let mut left = count;
+        for slot in &mut self.slots {
+            if left == 0 {
+                break;
+            }
+            match slot {
+                Some(held) if held.kind.key == kind.key => {
+                    let room = per_slot.saturating_sub(held.count);
+                    let take = room.min(left);
+                    held.count += take;
+                    left -= take;
+                }
+                Some(_) => {}
+                None => {
+                    let take = per_slot.min(left);
+                    *slot = Some(Slot {
+                        kind: kind.clone(),
+                        count: take,
+                    });
+                    left -= take;
+                }
+            }
+        }
+        count - left
+    }
+
+    /// Takes up to `max_stack` (never more than 64) out of the first stored
+    /// slot, in slot order.
+    pub fn extract_first(&mut self, max_stack: u32) -> Option<Taken> {
+        if !self.accepts() {
+            return None;
+        }
+        let per_slot = max_stack.clamp(1, SLOT_LIMIT);
+        let index = self.slots.iter().position(Option::is_some)?;
+        let slot = self.slots[index].take()?;
+        let take = slot.count.min(per_slot);
+        if slot.count > take {
+            self.slots[index] = Some(Slot {
+                count: slot.count - take,
+                ..slot.clone()
+            });
+        }
+        Some(Taken {
+            slot: index,
+            kind: slot.kind,
+            count: take,
+        })
+    }
+
+    /// Whether the store refuses every further item of `kind` (full for it):
+    /// every slot is full, or holds another kind.
+    #[must_use]
+    pub fn is_full_for(&self, kind: &Kind, max_stack: u32) -> bool {
+        if self.slots.is_empty() {
+            return true;
+        }
+        let per_slot = max_stack.clamp(1, SLOT_LIMIT);
+        !self.slots.iter().any(|slot| match slot {
+            None => true,
+            Some(held) => held.kind.key == kind.key && held.count < per_slot,
+        })
+    }
+
+    /// The state word the readout and `/rftoolsstorage info` print.
+    #[must_use]
+    pub fn state_word(&self) -> &'static str {
+        if self.tier.is_none() {
+            "no module"
+        } else if self.locked {
+            "locked"
+        } else {
+            "unlocked"
+        }
+    }
+
+    /// `"<stored>/<capacity> <item>"`, or `"0/<capacity> empty"`.
+    #[must_use]
+    pub fn summary(&self, max_stack: u32) -> String {
+        let capacity = self.capacity(max_stack);
+        match self.first_kind() {
+            Some(kind) => format!("{}/{} {}", self.total(), capacity, kind.label),
+            None => format!("0/{capacity} empty"),
+        }
+    }
+}
+
+/// `TIER_SLOTS[tier]` as a slot count; 0 for a tier that is not carried.
+fn slots_of(tier: u8) -> usize {
+    TIER_SLOTS
+        .get(usize::from(tier))
+        .map_or(0, |n| usize::try_from(*n).unwrap_or(0))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A kind whose identity and label are the same item id.
+    fn plain(item: &str) -> Kind {
+        Kind {
+            key: item.to_owned(),
+            label: item.to_owned(),
+        }
+    }
+
+    fn stone() -> Kind {
+        plain("minecraft:stone")
+    }
+
+    fn dirt() -> Kind {
+        plain("minecraft:dirt")
+    }
+
+    fn locked(tier: u8) -> Storage {
+        let mut storage = Storage::with_tier(tier);
+        assert!(storage.toggle_lock(), "a module lets the storage lock");
+        storage
+    }
+
+    #[test]
+    fn the_tier_table_is_the_jars_maxsize() {
+        // StorageModuleItem.MAXSIZE = {100, 200, 300, 500, 0, 0, -1}.
+        assert_eq!(TIER_SLOTS, [100, 200, 300, 500]);
+        assert_eq!(module_tier("rftoolsstorage:storage_module0"), Some(0));
+        assert_eq!(module_tier("rftoolsstorage:storage_module3"), Some(3));
+        assert_eq!(module_tier("rftoolsstorage:storage_module6"), None);
+        assert_eq!(module_tier("minecraft:chest"), None);
+    }
+
+    #[test]
+    fn a_tier_one_storage_holds_six_thousand_four_hundred_stone() {
+        // 100 slots x min(64, the item's stack size).
+        assert_eq!(capacity(100, 64), 6_400);
+        assert_eq!(capacity(100, 16), 1_600);
+        assert_eq!(capacity(100, 1), 100);
+        assert_eq!(capacity(0, 64), 0);
+    }
+
+    #[test]
+    fn a_fresh_storage_has_no_module_and_stores_nothing() {
+        let mut storage = Storage::empty();
+        assert!(!storage.accepts());
+        assert_eq!(storage.slot_count(), 0);
+        assert_eq!(storage.insert(&stone(), 64, 64), 0);
+        assert_eq!(storage.total(), 0);
+        assert_eq!(storage.state_word(), "no module");
+    }
+
+    #[test]
+    fn a_module_goes_in_only_while_unlocked_and_only_once() {
+        let mut storage = Storage::empty();
+        assert!(!storage.toggle_lock(), "no module, no lock");
+        assert!(storage.install(0));
+        assert_eq!(storage.slot_count(), 100);
+        assert_eq!(storage.state_word(), "unlocked");
+        assert!(!storage.accepts(), "an unlocked storage is inert");
+        assert!(!storage.install(1), "a module is already in place");
+        assert!(storage.toggle_lock());
+        assert_eq!(storage.state_word(), "locked");
+        assert!(storage.accepts());
+        assert!(!storage.install(1), "a locked storage takes no module");
+        assert_eq!(storage.remove_module(), None, "a locked storage keeps it");
+    }
+
+    #[test]
+    fn an_unlocked_storage_refuses_insert_and_extract() {
+        let mut storage = Storage::with_tier(0);
+        assert_eq!(storage.insert(&stone(), 64, 64), 0);
+        assert_eq!(storage.extract_first(64), None);
+        assert!(storage.toggle_lock());
+        assert_eq!(storage.insert(&stone(), 64, 64), 64);
+        assert_eq!(storage.extract_first(64).map(|taken| taken.count), Some(64));
+    }
+
+    #[test]
+    fn a_full_slot_opens_the_next_one_and_one_kind_stays_together() {
+        let mut storage = locked(0);
+        assert_eq!(storage.insert(&stone(), 64, 64), 64);
+        assert_eq!(storage.insert(&stone(), 64, 64), 64);
+        assert_eq!(storage.total(), 128);
+        assert_eq!(storage.stacks_used(), 2, "two slots of one kind");
+        assert_eq!(storage.slots[0].as_ref().map(|s| s.count), Some(64));
+        assert_eq!(storage.slots[1].as_ref().map(|s| s.count), Some(64));
+        assert_eq!(storage.insert(&dirt(), 64, 64), 64);
+        assert_eq!(storage.stacks_used(), 3, "dirt takes the next slot");
+        assert_eq!(storage.insert(&stone(), 64, 64), 64, "stone tops up");
+        assert_eq!(
+            storage.slots[3].as_ref().map(|s| s.kind.label.as_str()),
+            Some("minecraft:stone")
+        );
+        assert_eq!(
+            storage.slots[2].as_ref().map(|s| s.kind.label.as_str()),
+            Some("minecraft:dirt")
+        );
+    }
+
+    #[test]
+    fn a_slot_never_holds_more_than_the_items_own_stack_size() {
+        let mut storage = locked(0);
+        assert_eq!(storage.insert(&stone(), 64, 16), 64);
+        assert_eq!(storage.stacks_used(), 4, "64 of a 16-stack item: 4 slots");
+        assert_eq!(storage.slots[3].as_ref().map(|s| s.count), Some(16));
+        assert_eq!(storage.insert(&stone(), 1, 16), 1);
+        assert_eq!(storage.stacks_used(), 5);
+    }
+
+    #[test]
+    fn two_kinds_with_the_same_item_id_but_other_components_stay_apart() {
+        let mut storage = locked(0);
+        let plain = plain("minecraft:diamond_sword");
+        let named = Kind {
+            key: "minecraft:diamond_sword|0|Some(compound)".to_owned(),
+            label: "minecraft:diamond_sword".to_owned(),
+        };
+        assert_eq!(storage.insert(&plain, 1, 1), 1);
+        assert_eq!(storage.insert(&named, 1, 1), 1);
+        assert_eq!(storage.stacks_used(), 2, "different components, two slots");
+        assert_eq!(
+            storage.insert(&plain, 1, 1),
+            1,
+            "the same kind opens another slot"
+        );
+        assert_eq!(storage.stacks_used(), 3);
+    }
+
+    #[test]
+    fn the_store_is_full_at_the_tier_capacity_and_refuses_more() {
+        let mut storage = locked(0);
+        for _ in 0..100 {
+            assert_eq!(storage.insert(&stone(), 64, 64), 64);
+        }
+        assert_eq!(storage.total(), 6_400);
+        assert_eq!(storage.capacity(64), 6_400);
+        assert!(storage.is_full_for(&stone(), 64));
+        assert_eq!(
+            storage.insert(&stone(), 64, 64),
+            0,
+            "a full block refuses more"
+        );
+        assert!(
+            storage.is_full_for(&dirt(), 64),
+            "no empty slot for a new kind"
+        );
+        assert_eq!(storage.stacks_used(), 100);
+    }
+
+    #[test]
+    fn a_part_full_store_takes_the_remainder_and_reports_it() {
+        let mut storage = locked(0);
+        for _ in 0..99 {
+            storage.insert(&stone(), 64, 64);
+        }
+        storage.insert(&stone(), 32, 64);
+        assert_eq!(storage.total(), 6_368);
+        assert!(!storage.is_full_for(&stone(), 64));
+        assert_eq!(storage.insert(&stone(), 64, 64), 32, "only 32 fit");
+        assert_eq!(storage.total(), 6_400);
+        assert_eq!(storage.insert(&stone(), 64, 64), 0);
+    }
+
+    #[test]
+    fn extract_takes_a_stack_from_the_first_slot_in_order() {
+        let mut storage = locked(0);
+        storage.insert(&stone(), 64, 64);
+        storage.insert(&dirt(), 32, 64);
+        assert_eq!(
+            storage.extract_first(64),
+            Some(Taken {
+                slot: 0,
+                kind: stone(),
+                count: 64
+            })
+        );
+        assert_eq!(storage.stacks_used(), 1, "the emptied slot is free again");
+        assert_eq!(
+            storage.extract_first(64),
+            Some(Taken {
+                slot: 1,
+                kind: dirt(),
+                count: 32
+            })
+        );
+        assert_eq!(storage.extract_first(64), None);
+        assert_eq!(storage.total(), 0);
+    }
+
+    #[test]
+    fn the_readout_names_the_amount_the_capacity_and_the_item() {
+        let mut storage = locked(0);
+        assert_eq!(storage.summary(64), "0/6400 empty");
+        storage.insert(&stone(), 64, 64);
+        assert_eq!(storage.summary(64), "64/6400 minecraft:stone");
+        assert_eq!(storage.summary(16), "64/1600 minecraft:stone");
+    }
+
+    #[test]
+    fn a_bigger_module_keeps_the_contents_and_a_smaller_one_truncates() {
+        let mut storage = locked(1);
+        assert_eq!(storage.slot_count(), 200);
+        for _ in 0..150 {
+            storage.insert(&stone(), 64, 64);
+        }
+        assert_eq!(storage.stacks_used(), 150);
+        assert!(storage.toggle_lock());
+        assert_eq!(storage.remove_module(), Some(1));
+        assert_eq!(storage.slot_count(), 0, "no module, no capacity");
+        assert_eq!(storage.total(), 0);
+        // The contents are the block's, so a smaller module finds what fits.
+        assert!(storage.install(0));
+        assert_eq!(storage.slot_count(), 100);
+        assert!(storage.toggle_lock());
+        for _ in 0..100 {
+            storage.insert(&stone(), 64, 64);
+        }
+        assert_eq!(storage.total(), 6_400);
+    }
+}
