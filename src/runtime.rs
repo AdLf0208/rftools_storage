@@ -534,6 +534,75 @@ pub fn no_power_line(stored: u32) -> String {
     format!("no power ({stored}/{SCANNER_MAX_ENERGY} FE)")
 }
 
+// --- the scanner's item slots and its inject tick (slice 6) ----------------
+
+/// `StorageScannerContainer.SLOT_IN`: the GUI's input slot, which a player fills
+/// and the tick pushes into the scanned inventories.
+pub const SCANNER_IN_SLOT: usize = 0;
+
+/// `StorageScannerContainer.SLOT_OUT`: where a GUI request puts what it pulled.
+/// The tick never writes it.
+pub const SCANNER_OUT_SLOT: usize = 1;
+
+/// `StorageScannerContainer.SLOT_IN_AUTO`: the automation input, which the GUI
+/// does not show and a hopper reaches (the jar's capability is
+/// `insertable(slot(SLOT_IN_AUTO))`).
+pub const SCANNER_AUTO_SLOT: usize = 2;
+
+/// `StorageScannerContainer.SLOTS`: the three slots above.
+pub const SCANNER_SLOTS: usize = 3;
+
+/// Which of the scanner's two input slots a tick's inject step drains.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InjectSlot {
+    /// `SLOT_IN`: the GUI's input, which a player fills.
+    In,
+    /// `SLOT_IN_AUTO`: the automation slot, which a hopper reaches.
+    Auto,
+}
+
+impl InjectSlot {
+    /// The container slot this step takes its stack from.
+    #[must_use]
+    pub fn index(self) -> usize {
+        match self {
+            Self::In => SCANNER_IN_SLOT,
+            Self::Auto => SCANNER_AUTO_SLOT,
+        }
+    }
+}
+
+/// The slots one tick tries, in upstream's order and with its early stop:
+/// `StorageScannerTileEntity.tickServer` takes the GUI's input first and the
+/// automation input second, each one `rfPerInsert` attempt, and a buffer that
+/// cannot pay for a step `return`s from the whole tick — so a poor buffer holds
+/// the automation slot back too rather than borrowing from the next tick's price.
+/// `stored` is the buffer at the start of the tick.
+#[must_use]
+pub fn inject_plan(stored: u32, in_filled: bool, auto_filled: bool) -> Vec<InjectSlot> {
+    let mut plan = Vec::new();
+    let mut budget = stored;
+    for (slot, filled) in [(InjectSlot::In, in_filled), (InjectSlot::Auto, auto_filled)] {
+        if !filled {
+            continue;
+        }
+        if budget < SCANNER_RF_PER_INSERT {
+            break;
+        }
+        budget -= SCANNER_RF_PER_INSERT;
+        plan.push(slot);
+    }
+    plan
+}
+
+/// Whether the scanner's inject walk may push into a scanned cell: never its own
+/// cell, and never another storage scanner — upstream's
+/// `!p.equals(getBlockPos())` and `!(te instanceof StorageScannerTileEntity)`.
+#[must_use]
+pub fn injectable_at(centre: [i32; 3], at: [i32; 3], scanner_there: bool) -> bool {
+    at != centre && !scanner_there
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1004,5 +1073,84 @@ mod tests {
             "an empty scan still says what it cost"
         );
         assert_eq!(no_power_line(99), "no power (99/50000 FE)");
+    }
+
+    #[test]
+    fn a_tick_drains_the_gui_slot_first_and_the_automation_slot_second_at_a_price_each() {
+        // `StorageScannerTileEntity.tickServer`: the GUI input first, then the auto
+        // input; each non-empty slot is one `rfPerInsert` attempt, and a buffer that
+        // cannot pay for a step returns from the whole tick.
+        assert_eq!(SCANNER_SLOTS, 3);
+        assert_eq!(
+            (SCANNER_IN_SLOT, SCANNER_OUT_SLOT, SCANNER_AUTO_SLOT),
+            (0, 1, 2),
+            "the jar's SLOT_IN, SLOT_OUT and SLOT_IN_AUTO"
+        );
+        assert_eq!(InjectSlot::In.index(), SCANNER_IN_SLOT);
+        assert_eq!(InjectSlot::Auto.index(), SCANNER_AUTO_SLOT);
+        assert_eq!(SCANNER_RF_PER_INSERT, 20, "one attempt costs rfPerInsert");
+        assert_eq!(
+            inject_plan(5_000, false, false),
+            Vec::new(),
+            "nothing to route costs nothing"
+        );
+        assert_eq!(
+            inject_plan(5_000, true, false),
+            vec![InjectSlot::In],
+            "the GUI slot is the tick's first step"
+        );
+        assert_eq!(
+            inject_plan(5_000, false, true),
+            vec![InjectSlot::Auto],
+            "with the GUI slot empty the auto slot gets the first price"
+        );
+        assert_eq!(
+            inject_plan(40, true, true),
+            vec![InjectSlot::In, InjectSlot::Auto],
+            "two filled slots are two attempts in one tick"
+        );
+        assert_eq!(
+            inject_plan(20, true, true),
+            vec![InjectSlot::In],
+            "one price buys one attempt: the auto slot waits for the next tick"
+        );
+        assert_eq!(
+            inject_plan(19, true, true),
+            Vec::new(),
+            "one short is no attempt at all"
+        );
+        assert_eq!(
+            inject_plan(0, true, false),
+            Vec::new(),
+            "an empty buffer routes nothing"
+        );
+        assert_eq!(
+            inject_plan(19, false, true),
+            Vec::new(),
+            "a buffer that cannot pay stops the tick before the auto slot"
+        );
+    }
+
+    #[test]
+    fn the_inject_walk_skips_its_own_cell_and_another_scanner() {
+        // Upstream's `injectStackInternal` filters `!p.equals(getBlockPos())`, and its
+        // `inventories` list holds no `StorageScannerTileEntity`.
+        let centre = [10, 64, -3];
+        assert!(
+            !injectable_at(centre, centre, false),
+            "the scanner never pushes into its own container"
+        );
+        assert!(
+            injectable_at(centre, [12, 64, -3], false),
+            "a chest two away is a target"
+        );
+        assert!(
+            !injectable_at(centre, [11, 64, -3], true),
+            "another storage scanner is skipped"
+        );
+        assert!(
+            injectable_at(centre, [11, 64, -3], false),
+            "the same cell is a target once no scanner stands there"
+        );
     }
 }

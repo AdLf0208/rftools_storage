@@ -24,9 +24,10 @@ use std::time::{Duration, Instant};
 
 use mod_api::item::containers::{ModBlockEntityFields, ModEnergyBuffer};
 use mod_api::{
-    self, BlockDropsEvent, BlockEntityEvent, BlockEntityPart, BlockEntityRef, BlockKey, BlockPart,
-    ClientHost, Command, CommandArgumentValue, CommandSource, Compound, Flow, Hand, Host, HostSide,
-    HostTransaction, ITEMS, Identifier, InteractionResult, ItemKey, ItemPart, ItemStack, LevelHost,
+    self, BlockDropsEvent, BlockEntityEvent, BlockEntityPart, BlockEntityRef, BlockEntityTickEvent,
+    BlockEntityTickReply, BlockEntityTicksEvent, BlockKey, BlockPart, ClientHost, Command,
+    CommandArgumentValue, CommandSource, Compound, Flow, Hand, Host, HostSide, HostTransaction,
+    ITEMS, Identifier, InteractionResult, ItemKey, ItemPart, ItemResource, ItemStack, LevelHost,
     LevelRef, LevelSide, MenuButtonEvent, MenuContainer, MenuPart, MenuSlotRulesEvent,
     ModContainer, OnBlockPlacedByEvent, OnDestroyedByPlayerEvent, PlayerContainerOpenEvent,
     RegisterCommandsEvent, Registrar, RegistrationContext, RightClickBlockEvent,
@@ -35,10 +36,12 @@ use mod_api::{
 };
 
 use crate::runtime::{
-    Found, Kind, LEVEL_ADMINS, LockPress, SCANNER_RECEIVE_PER_TICK, SLOT_LIMIT, STORAGE_SCANNER,
-    Slot, Storage, card_accepts, carried_slot_in, clamp_radius, is_storage_scanner, lock_press,
-    may_inspect, merge_counts, module_id, module_tier, no_power_line, restored_count, scan_line,
-    scan_positions, scanner_radius, slot_accepts, spend_power,
+    Found, Kind, LEVEL_ADMINS, LockPress, SCANNER_AUTO_SLOT, SCANNER_IN_SLOT, SCANNER_OUT_SLOT,
+    SCANNER_RECEIVE_PER_TICK, SCANNER_RF_PER_INSERT, SCANNER_SLOTS, SLOT_LIMIT, STORAGE_SCANNER,
+    Slot, Storage, card_accepts, carried_slot_in, clamp_radius, inject_plan, injectable_at,
+    is_storage_scanner, lock_press, may_inspect, merge_counts, module_id, module_tier,
+    no_power_line, restored_count, scan_line, scan_positions, scanner_radius, slot_accepts,
+    spend_power,
 };
 
 /// The block this slice implements, exactly as the content declares it.
@@ -181,10 +184,12 @@ pub(crate) fn register(registrar: &mut dyn Registrar, _cx: &RegistrationContext)
     register_scanner(registrar);
 }
 
-/// The scanner's declarations: its block-entity type and Part, and its FE buffer
-/// (`StorageScannerConfiguration`'s 50,000 / 500 a tick). It declares no container:
-/// the GUI's own item slots belong to the list widget this slice does not carry,
-/// and the scan reads its neighbours' capabilities, not a container of its own.
+/// The scanner's declarations: its block-entity type and Part, its FE buffer
+/// (`StorageScannerConfiguration`'s 50,000 / 500 a tick) and its container — the
+/// GUI's in and out slots and the automation slot the tick routes
+/// (`StorageScannerContainer`). The menu itself stays a gap: the pin's screen is a
+/// fixed slot layout and the list widget is the next slice's, so the slots' consumer
+/// here is the tick, not a screen.
 fn register_scanner(registrar: &mut dyn Registrar) {
     let scanner = registrar.block_key(STORAGE_SCANNER);
     let _ = SCANNER_KEY.set(scanner);
@@ -211,11 +216,34 @@ fn register_scanner(registrar: &mut dyn Registrar) {
         ..ModEnergyBuffer::default()
     };
     registrar.block_energy(&scanner, energy);
+    registrar.block_container(&scanner, scanner_container());
+}
+
+/// `StorageScannerContainer`: three slots — the GUI's input, the out slot a request
+/// fills and the automation input — with the jar's own capability policy:
+/// `GenericItemHandler…insertable(slot(SLOT_IN_AUTO))`, so automation inserts into
+/// the auto slot only, and McJtyLib's `extractable` default `(slot, stack) -> true`,
+/// so every slot may be pulled from. No menu: the GUI's list is a later slice, and
+/// the slots' consumer here is the tick.
+fn scanner_container() -> ModContainer {
+    let all = (0..SCANNER_SLOTS).collect::<Vec<_>>();
+    #[expect(
+        clippy::needless_update,
+        reason = "the update is for a field a later game build may add"
+    )]
+    ModContainer {
+        slots: SCANNER_SLOTS,
+        faces: std::array::from_fn(|_| all.clone()),
+        inputs: vec![SCANNER_AUTO_SLOT],
+        outputs: vec![SCANNER_IN_SLOT, SCANNER_OUT_SLOT, SCANNER_AUTO_SLOT],
+        menu: None,
+        ..ModContainer::default()
+    }
 }
 
 /// The scanner's Part: its block entity (the saved compound the FE buffer and the
-/// radius live in). Nothing per-block beyond that; the scan is a command, not a
-/// tick.
+/// radius live in) and the tick that routes its two input slots into the
+/// inventories its scan finds.
 struct ScannerBlock;
 
 #[mod_api::horizon_part]
@@ -224,13 +252,41 @@ impl BlockPart for ScannerBlock {}
 #[mod_api::horizon_part]
 impl BlockEntityPart for ScannerBlock {
     /// The scanner gets a block entity with empty saved data; `energy` and `radius`
-    /// are written by the game's energy handler and by `/rftoolsstorage radius`.
+    /// are written by the game's energy handler, by `/rftoolsstorage radius` and by
+    /// the inject tick.
     fn block_entity(
         &self,
         _level: LevelSide<'_>,
         _event: &mut BlockEntityEvent<'_>,
     ) -> Option<Compound> {
         Some(Compound::new())
+    }
+
+    /// `EntityBlock.getTicker`: the scanner ticks (upstream's `TickingTileEntity`),
+    /// which is what turns its input slots into pushes. Never clear a value an
+    /// earlier mod set.
+    fn block_entity_ticks(&self, _host: &dyn Host, event: &mut BlockEntityTicksEvent<'_>) {
+        event.ticks = true;
+    }
+
+    /// One server tick (`StorageScannerTileEntity.tickServer`): the GUI input, then
+    /// the automation input, each a `rfPerInsert` attempt into the scanned
+    /// inventories. The block entity is out of the world during the call, so its own
+    /// slots and the buffer go through the payload; the neighbours are written
+    /// through their `ITEMS` capability.
+    fn block_entity_tick(&self, host: &mut dyn ServerHost, event: &mut BlockEntityTickEvent<'_>) {
+        if event.entity.items.len() != SCANNER_SLOTS {
+            event.entity.items.resize(SCANNER_SLOTS, None);
+        }
+        let mut saved = Tag::Compound(std::mem::take(&mut event.entity.nbt));
+        let items = &mut event.entity.items;
+        let changed = tick_scanner(host, event.pos, &mut saved, items);
+        if let Tag::Compound(nbt) = saved {
+            event.entity.nbt = nbt;
+        }
+        if !changed {
+            *event.reply = BlockEntityTickReply::Unchanged;
+        }
     }
 }
 
@@ -1516,6 +1572,116 @@ fn set_radius(host: &mut dyn ServerHost, pos: [i32; 3], wanted: i32) -> Option<i
     Some(radius)
 }
 
+/// The level that is ticking: a block entity's tick runs with its own level in
+/// place, which is not necessarily the dimension a command would act in.
+fn ticking_level(host: &dyn ServerHost) -> Option<LevelRef> {
+    host.levels()
+        .list_levels()
+        .into_iter()
+        .find(|level| level.in_place(host))
+}
+
+/// Whether another storage scanner stands at `at` in `level`: the inject walk skips
+/// it, as upstream's `findInventories` keeps no `StorageScannerTileEntity`.
+fn scanner_stands(host: &dyn Host, level: LevelRef, at: [i32; 3]) -> bool {
+    level.block(host, at) == Some(scanner_key())
+}
+
+/// One scanner tick (`StorageScannerTileEntity.tickServer`): [`inject_plan`] decides
+/// which of the two input slots this tick drains, each attempt walks the scan in
+/// scan order and pushes the stack into the inventories that take it, and every
+/// attempt costs `rfPerInsert` — charged even when nothing accepted it, as upstream
+/// charges. True when the tick touched the buffer or a slot.
+fn tick_scanner(
+    host: &mut dyn ServerHost,
+    pos: [i32; 3],
+    saved: &mut Tag,
+    items: &mut [Option<ItemStack>],
+) -> bool {
+    let data = match &*saved {
+        Tag::Compound(nbt) => Some(nbt),
+        _ => None,
+    };
+    let stored = saved_count(data, KEY_ENERGY);
+    let radius = saved_radius(data);
+    let in_filled = items.get(SCANNER_IN_SLOT).is_some_and(Option::is_some);
+    let auto_filled = items.get(SCANNER_AUTO_SLOT).is_some_and(Option::is_some);
+    let plan = inject_plan(stored, in_filled, auto_filled);
+    if plan.is_empty() {
+        return false;
+    }
+    let Some(level) = ticking_level(&*host) else {
+        return false;
+    };
+    let mut left = stored;
+    for step in plan {
+        let Some(cell) = items.get_mut(step.index()) else {
+            continue;
+        };
+        let Some(stack) = cell.take() else {
+            continue;
+        };
+        if stack.count() == 0 {
+            continue;
+        }
+        *cell = inject_stack(host, level, pos, radius, stack);
+        left = left.saturating_sub(SCANNER_RF_PER_INSERT);
+    }
+    if let Tag::Compound(nbt) = saved
+        && let Ok(left) = i32::try_from(left)
+    {
+        nbt.insert(KEY_ENERGY.into(), Tag::Int(left));
+    }
+    true
+}
+
+/// Pushes one stack into the scanned inventories, in scan order, and answers what
+/// stayed: the cell keeps the remainder, `None` when the whole stack went in.
+/// Upstream's `injectStackInternal` walk — the own cell and another scanner are
+/// skipped, each inventory takes what it will and the next one gets the rest — with
+/// every neighbour's write in one transaction, so a refused write leaves each
+/// inventory as it was and the stack whole.
+fn inject_stack(
+    host: &mut dyn ServerHost,
+    level: LevelRef,
+    own: [i32; 3],
+    radius: i32,
+    stack: ItemStack,
+) -> Option<ItemStack> {
+    let resource = ItemResource::of(&stack);
+    let total = stack.count();
+    let targets: Vec<[i32; 3]> = scan_positions(own, radius)
+        .into_iter()
+        .filter(|at| injectable_at(own, *at, scanner_stands(&*host, level, *at)))
+        .collect();
+    let outcome = host.transaction(|host, tx| -> Result<Option<ItemStack>, ()> {
+        let mut moved = 0_u32;
+        for at in &targets {
+            if moved >= total {
+                break;
+            }
+            let Some(handler) = level.capability(host, &ITEMS, *at, None) else {
+                continue;
+            };
+            moved = moved.saturating_add(handler.insert_any(host, tx, &resource, total - moved));
+        }
+        if moved == 0 {
+            // Nothing accepted it: the slot keeps the stack it holds.
+            return Ok(Some(stack.clone()));
+        }
+        if moved >= total {
+            return Ok(None);
+        }
+        // A partial remainder must be buildable, or the whole move is undone rather
+        // than silently dropping what the inventories did take.
+        resource.to_stack(total - moved).map(Some).ok_or(())
+    });
+    match outcome {
+        Ok(rest) => rest,
+        Err(()) => Some(stack),
+    }
+}
+
 // --- the readout commands --------------------------------------------------
 
 /// `/rftoolsstorage info`, `lock`, `scan` and `radius` (`register_commands`).
@@ -1708,6 +1874,35 @@ mod tests {
         assert!(carried_payload(&plain, BE_TYPE).is_none());
         let emptied = Compound::from_iter([(KEY_CARRIED.into(), Tag::List(Vec::new()))]);
         assert!(carried_payload(&emptied, BE_TYPE).is_none());
+    }
+
+    #[test]
+    fn the_scanners_container_is_the_jars_three_slots() {
+        // `StorageScannerContainer`: SLOT_IN 0, SLOT_OUT 1, SLOT_IN_AUTO 2;
+        // `insertable(slot(SLOT_IN_AUTO))` and McJtyLib's extractable default true.
+        let container = scanner_container();
+        assert_eq!(container.slots, SCANNER_SLOTS);
+        assert_eq!(container.slots, 3);
+        assert_eq!(
+            container.inputs,
+            vec![SCANNER_AUTO_SLOT],
+            "automation inserts into the auto slot only"
+        );
+        assert_eq!(
+            container.outputs,
+            vec![SCANNER_IN_SLOT, SCANNER_OUT_SLOT, SCANNER_AUTO_SLOT],
+            "every slot may be pulled from"
+        );
+        let all = vec![SCANNER_IN_SLOT, SCANNER_OUT_SLOT, SCANNER_AUTO_SLOT];
+        assert_eq!(
+            container.faces,
+            std::array::from_fn(|_| all.clone()),
+            "every face reaches the three slots"
+        );
+        assert!(
+            container.menu.is_none(),
+            "the GUI's list is a later slice; the slots' consumer is the tick"
+        );
     }
 
     #[test]

@@ -13,7 +13,7 @@ differences, are in [`FINDINGS.md`](FINDINGS.md).
 publishing (ARCHITECTURE.md §8); the port carries the upstream MIT notice in
 [`LICENSE`](LICENSE) and its provenance in [`LICENSE-NOTICE.md`](LICENSE-NOTICE.md).
 
-**Format: the SDK package (2026-11-18), version 0.2.5.** One flat `.hmod` —
+**Format: the SDK package (2026-11-18), version 0.2.6.** One flat `.hmod` —
 `horizon-mod.toml` + `Cargo.toml` + `src/` + `assets/` + `data/` — built by the
 launcher against SDK nightly **`0a875da91dbb0fdcb7ba8c42c11341aa229af51a`** with
 horizon-mixins **`e59da9094f0c2fdda6c627fe9eff22dec6a906f0`** (see
@@ -21,7 +21,8 @@ horizon-mixins **`e59da9094f0c2fdda6c627fe9eff22dec6a906f0`** (see
 [`## Slice 2`](#slice-2--the-storages-menu-version-022),
 [`## Slice 3`](#slice-3--the-module-s-card-slot-version-023),
 [`## Slice 4`](#slice-4--the-contents-travel-on-the-item-version-024),
-[`## Slice 5`](#slice-5--the-storage-scanner-version-025)).
+[`## Slice 5`](#slice-5--the-storage-scanner-version-025),
+[`## Slice 6`](#slice-6--the-scanners-item-slots-and-the-inject-tick-version-026)).
 The retired `.hnmod` container pinned Horizon `1d63e0a5…` / mixins `5a64af93…`;
 `src/runtime.rs` was byte-identical to the retired
 `mixins/rftoolsstorage/runtime.rs` until the 2026-11-18 review fixes gave it the
@@ -32,11 +33,14 @@ storage module), slice 2 (its **menu**: a 100-slot grid opened by a right click,
 its slot rules and the padlock), slice 3 (the menu's **card slot**, where the
 module itself lives, so it can be taken back out), slice 4 (**a broken block's
 contents travel on its own item**, with the lock and the module, and come back on
-placement) and slice 5 (the **storage scanner**: its block, its block entity, its
-50,000 FE buffer and the inventory scan behind `/rftoolsstorage scan`) are
-implemented and verified in a launcher-built game at the pin (the legs are listed
-per slice below; `ports/_shared/evidence/rftoolsstorage-e2e/`).
-The gap list below is the rest of the mod.
+placement), slice 5 (the **storage scanner**: its block, its block entity, its
+50,000 FE buffer and the inventory scan behind `/rftoolsstorage scan`) and
+slice 6 (the scanner's **item slots and inject tick**: the GUI's in slot, the
+automation slot and the out slot, and the tick that pushes the first two into
+the scanned inventories for `rfPerInsert` each) are implemented and verified in a
+launcher-built game at the pin (the legs are listed per slice below;
+`ports/_shared/evidence/rftoolsstorage-e2e/`). The gap list below is the rest of
+the mod.
 
 ## Class + tier and the approach
 
@@ -169,11 +173,14 @@ None. The two candidates were checked and left alone, on purpose:
 
 - `crafting_manager` (the jar's own lang calls it "WIP! … not functional yet") and
   the **storage scanner's remaining half**: the GUI's list widget (search, sort,
-  compact, cycle, visible size), the scanner's own in/auto/out item slots and the
-  inject/request paths that use them, the **remote/tablet variant**, the XNet access
-  settings, and the claimed-land check (`scannerNoRestrictions`; the pin has no
-  `can_entity_destroy` **hook** exists at the pin, but it is a cancellable game
-  event, not a query a mod can ask for a fake player — `blocked(no permission query)`).
+  compact, cycle, visible size), the **request path** that fills the out slot and
+  the GUI's insert-from-screen path (`injectStackFromScreen`, `requestStack`,
+  `giveToPlayerFromScreen`), the **remote/tablet variant**, the XNet access
+  settings and its `routable` star list (the port treats every scanned inventory as
+  routable — slice 6's deviation 1), and the claimed-land check
+  (`scannerNoRestrictions`; the pin has no `can_entity_destroy` **hook** exists at
+  the pin, but it is a cancellable game event, not a query a mod can ask for a fake
+  player — `blocked(no permission query)`).
 - Storage tiers 2-4 (`storage_module1..3`; their recipes need McJtyLib's
   `mcjtylib:copy_components` recipe type, which the pin does not have), the
   remote module (`storage_module6`, "DO NOT USE" in the jar's lang) and the
@@ -205,6 +212,8 @@ retired helper files and their mapping are in
 | `right_click_block` (cancel) | install / insert / seal / withdraw, and the action-bar readout |
 | `register_commands` | `/rftoolsstorage info <pos>`, `lock <pos>`, `scan <pos>` and `radius <pos> <radius>` (typed `block_pos`/`integer`) |
 | `run_mod_command` | their answers (the scan costs `rfPerRequest`; the radius is the GUI slider's 1..20) |
+| `block_entity_ticks` / `block_entity_tick` (BlockEntityPart) | the scanner ticks: the GUI input, then the automation input, each an `rfPerInsert` attempt into the scanned inventories (slice 6) |
+| `Registrar::block_container` | the scanner's three slots (`SLOT_IN` 0, `SLOT_OUT` 1, `SLOT_IN_AUTO` 2): automation inserts into the auto slot only, every slot extractable, no menu |
 | `screen` / `screen_draw` / `screen_click` (BlockEntityPart, API 19/20) | the menu's 366 x 210 layout, the title, the inventory label and the padlock; a press on the padlock's rectangle answers button 0 |
 | `menu_button` (BlockEntityPart, API 20) | the padlock: flip the lock of a storage that has a module, answer on the action bar, push the state into the menu's data slot |
 | `menu_slot_rules` (MenuPart, API 130) | a grid slot takes a stack only while locked, and only when it is empty or holds that same kind; the card slot takes a storage module (and, once it holds one, anything — deviation 7) |
@@ -227,8 +236,15 @@ Slice 5: `modules/scanner/blocks/StorageScannerTileEntity.java` (the scan walk
 `scannerNoRestrictions`), `modules/scanner/data/StorageScannerData.java` (radius 1,
 `SortingMode.NAME`), `modules/scanner/StorageScannerModule.java`, and
 `modules/scanner/client/GuiStorageScanner.java` (the radius slider 1..20).
-The clone (`ports/_shared/upstream/rftoolsstorage`) was deleted after these
-findings were recorded.
+Slice 6: the same `StorageScannerTileEntity.java` (`tickServer`, `injectStackInternal`,
+`getInputMatcher`, `isInputFromAuto`, `isRoutable`, the `routable` set),
+`blocks/StorageScannerContainer.java` (`SLOT_IN`/`SLOT_OUT`/`SLOT_IN_AUTO`, `SLOTS`),
+`client/GuiStorageScanner.java` (the star toggle that fills `routable`), and
+**McJtyLib** `1.21_neo` @ `ef393e608eebc188a6e1decbf110506a55cc0725`
+(`container/GenericItemHandler.java`: the `Builder.insertable`/`extractable` defaults the
+container's policy is read from — a library read, not a port).
+The clones (`ports/_shared/upstream/rftoolsstorage`, `…/mcjtylib`) were deleted after
+these findings were recorded.
 
 ## Migration to the SDK format — version 0.2.0
 
@@ -987,6 +1003,158 @@ recipe is loaded and parsed, and that the frame's cell is what blocks it; the co
    assertion here pins the whole line (`^<block>: … (NNNN/50000 FE)$`), so a stale line fails
    loudly instead of passing.
 
+## Slice 6 — the scanner's item slots and the inject tick (version 0.2.6)
+
+The gap line slice 5 left, verbatim from [`## Gaps`](#gaps-the-rest-of-the-mod) and its own
+deviation 4:
+
+> `storage_scanner` (inventory scan, search, FE use, remote/tablet variant)
+> … **The scanner's own item slots are not declared.** `StorageScannerContainer` has an in, an
+> auto-in and an out slot, used by the GUI's insert/request paths and the automation; those belong
+> to the list slice, and a container with no consumer would be dead data.
+
+This slice gives the slots their consumer, the **tick**, and leaves the GUI list widget and the
+request path as the gap. It fits the **machines** tier: a block entity's saved data, a container
+and its rule, no renderer and no new vanilla hook.
+
+**Pin:** Horizon `0a875da91dbb0fdcb7ba8c42c11341aa229af51a`, horizon-mixins
+`e59da9094f0c2fdda6c627fe9eff22dec6a906f0`, mod API 0.2, game 26.3. **Version 0.2.6.**
+
+### What it does
+
+- **The container.** `register_scanner` declares three slots — `rftoolsstorage:storage_scanner`'s
+  `SLOT_IN` **0** (the GUI's input), `SLOT_OUT` **1** (where a request puts what it pulled) and
+  `SLOT_IN_AUTO` **2** (the automation slot the GUI does not show) — with the jar's own capability
+  policy: `GenericItemHandler.create(…).insertable(slot(SLOT_IN_AUTO))`, so automation inserts into
+  the auto slot only, and McJtyLib's `extractable` default `(slot, stack) -> true`, so every slot may
+  be pulled from. Every face reaches the three; there is no menu (the list widget is the gap).
+- **The tick.** `ScannerBlock` gains `block_entity_ticks` (`EntityBlock.getTicker` → true) and
+  `block_entity_tick` (`TickingTileEntity.tickServer`): the GUI input first, then the automation
+  input. Each non-empty slot is **one** `rfPerInsert` (20 FE) attempt: the stack leaves its slot,
+  `injectStackInternal`'s walk pushes it into the scanned inventories in scan order, the remainder
+  goes back into the slot, and the price is charged — **also when nothing accepted it**, as upstream
+  charges. A buffer that cannot pay for a step returns from the whole tick, so a poor buffer holds
+  the automation slot back too instead of borrowing.
+- **The walk.** `scan_positions` over the saved radius, minus the scanner's own cell and any other
+  storage scanner (upstream's `findInventories` keeps no `StorageScannerTileEntity`), each
+  neighbour's `ITEMS` capability asked with no side; each handler takes what it will
+  (`insert_any`) and the next one gets the rest while the stack is non-empty. Every neighbour write
+  is one transaction: a refused write leaves each inventory as it was and the stack whole, and a
+  partial remainder is built *inside* the transaction (an unbuildable remainder aborts the move
+  instead of dropping items).
+- **What the tick costs.** A scanner with empty input slots does no scan and no capability lookup at
+  all; the walk runs only when there is a stack to route. The buffer is the saved compound's
+  `energy` (the game's own key), written through the tick's payload.
+
+### Red → green (the rules)
+
+The two new rules were written first and stubbed (`inject_plan` answered an empty plan,
+`injectable_at` answered `true`), and the suite was run **before** implementing them
+(`ports/_shared/evidence/rftoolsstorage/slice6-red.log`, `TEST_EXIT:101`):
+
+```
+thread 'runtime::tests::a_tick_drains_the_gui_slot_first_and_the_automation_slot_second_at_a_price_each' (3089002) panicked at src/runtime.rs:1090:9:
+assertion `left == right` failed: the GUI slot is the tick's first step
+  left: []
+ right: [In]
+...
+thread 'runtime::tests::the_inject_walk_skips_its_own_cell_and_another_scanner' (3089008) panicked at src/runtime.rs:1132:9:
+the scanner never pushes into its own container
+...
+test result: FAILED. 29 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out
+```
+
+Implemented, then **32 passed, 0 failed** (`sdk-test.log`): the runtime's 28 (26 + the tick's plan
+and the walk's skip) and the four glue tests, one of them new
+(`the_scanners_container_is_the_jars_three_slots`).
+
+### In game (`ports/_shared/evidence/rftoolsstorage-e2e/`)
+
+| Leg | Log | Verdict |
+|---|---|---|
+| default, the launcher-built package | `e2e-inject.log` | **PASS** + `EXIT:0` |
+| control (the same Nightly without the package) | `e2e-inject-control.log` | **FAIL** + `EXIT:1` — `{"error":"unknown item rftoolsstorage:storage_scanner"}` |
+| counterfactual (a vanilla barrel where the scanner would be) | `e2e-inject-counterfactual.log` | **PASS** + `EXIT:0` — `scan`/`radius` answer `not a storage scanner` |
+| `SELFTEST=1` (asserts the tick did *not* move the stone) | `e2e-inject-selftest.log` | **FAIL** + `EXIT:1` — *"the tick moved 64 stone from the in-slot into the chest two blocks away (energy 4980), so this inverted assertion fails as it must"* |
+
+What `e2e-inject.log` asserts, in order (every number before and after; the earlier phases are slice
+5's and still pass): the scanner at radius **2** stands two blocks from an **empty** chest (two
+adjacent chests would be one double chest, so the chest is alone); 64 stone is merged into the
+in-slot (`Items[0]`, which read `Found no elements matching Items` before), and after **10 ticks**
+the scanner's in-slot is empty, the **chest's** `Items[0]` reads `64 x minecraft:stone` and the
+buffer reads **4980** — `5000 − rfPerInsert × 1`; with the buffer at **0** another 64 stone stays in
+the in-slot and the chest keeps its **64**; recharged, the same stack goes and the chest reads
+**128** — the stall was the power, not the walk; the **auto slot** (2) routes its 32 stone (chest
+**160**, buffer 4960 = −2×20); three stone put in through the game's own container path
+(`ctl container`, which the tick sees on its next pass) reach the chest (160 → **163**, buffer
+−20); a **full barrel** (27 × 64 stone) refuses, so `energy: 20` pays exactly one attempt and
+**0** is left while the dirt stays, and `energy: 19` pays **none** and stays 19; the walk passes
+that refusing barrel for the chest behind it (barrel `64..64` unchanged, the chest gets the dirt);
+and the **out slot** `Items[1]` is never written (`Found no elements matching Items`).
+
+The hopper leg was designed and then **dropped, because the artefact refuses it**: a hopper inside
+the scan box is itself an inventory in the box, so the walk pushes the item *into the hopper* and the
+hopper pushes it back into the scanner's auto slot — a loop that cost five attempts per item in the
+measurement. That is upstream's behaviour too (a hopper is a scanned inventory like any other); the
+container's automation policy is what a hopper exercises and that is pinned by
+`the_scanners_container_is_the_jars_three_slots` (`inputs == [SLOT_IN_AUTO]`), not by a scenario that
+would fight the machine.
+
+### Deviations this slice adds
+
+1. **Every scanned inventory is routable.** Upstream filters the walk with `isRoutable(p)`, the GUI's
+   **star** set (`GuiStorageScanner`'s "All routable inventories" toggle), which starts empty — so an
+   upstream scanner pushes nothing until the player stars an inventory. The port has no list widget
+   (the gap), so it treats every inventory the scan finds as starred. That is the only reading under
+   which the family is observable at all, and it matches the slice's brief.
+2. **The walk order is the scan's order** (`x`, then `y`, then `z`), not the GUI's reorderable list
+   order (up/down/top/bottom are list commands). Without the list there is nothing to reorder.
+3. **The GUI's insert/request paths are not carried**, only the tick. `injectStackFromScreen`,
+   `requestStack`, `giveToPlayerFromScreen` and the out slot's fill belong to the list slice; the out
+   slot is declared (the container must bind) and never written.
+4. **No XNet access settings** (`isInputFromAuto`/`isOutputFrom…`), so the auto slot and the GUI slot
+   route to the same inventories; and no claimed-land check (`blocked(no permission query)`, slice 5's
+   deviation 3, unchanged).
+
+### Coverage (the families this slice changes)
+
+| Family | State |
+|---|---|
+| the scanner's container: `SLOT_IN` 0, `SLOT_OUT` 1, `SLOT_IN_AUTO` 2 | **tested** — in game (the slots seed and read back, `e2e-inject.log`) and by `the_scanners_container_is_the_jars_three_slots` (inputs/outputs/faces/menu) |
+| the inject tick: in-slot → the scanned inventories, one `rfPerInsert` an attempt | **tested** — 64 stone reaches the chest's `Items[0]`, buffer 5000 → 4980 (`e2e-inject.log`); the plan and its early stop in `runtime` tests |
+| the automation slot (2) | **tested** — 32 stone routed, buffer −20; automation inserts there only (unit test) |
+| the walk: scan order, own cell and another scanner skipped, a refusing inventory passed | **tested** — a full barrel untouched while the chest behind it takes the stack; `injectable_at` in a unit test |
+| the price: charged per attempt, even when refused; 20 pays one, 19 none | **tested** — 20 → 0 with the dirt still in the slot, 19 → 19 (`e2e-inject.log`); `inject_plan` |
+| the no-power stall and the resume | **tested** — buffer 0 keeps the stack and the chest at 64; recharging moves it (chest 128) |
+| the out slot is never written by the tick | **tested** — `Items[1]` reads `Found no elements` after every phase |
+| the GUI list (search/sort/compact/cycle), the request path, the remote/tablet variant, XNet settings, the claimed-land check | **not ported** (later slices / `blocked(no permission query)`) |
+
+### Traps this slice paid for
+
+1. **Two adjacent chests are one double chest.** The walk phase first placed its "full" and "accepting"
+   chests side by side; the game answered a 54-slot double chest, the angles' counts crossed, and the
+   numbers looked like a port bug. Use a **barrel** for the refusing container (barrels never join) or
+   leave a gap.
+2. **`/data merge block … {Items: […]}` replaces the whole list.** It is the cheapest way to seed a mod
+   container's slot (the in-slot included) and to fill a barrel to 27 × 64, but every slot it does not
+   name is emptied — so a phase that seeds one slot also clears the others.
+3. **A hopper in the scan box is an inject target.** The walk treats it like any inventory; a hopper
+   that feeds the scanner makes a loop (measured: five attempts per item). Keep hoppers out of the box,
+   or expect the loop — upstream's star list is what would prevent it, and this port has none.
+4. **Every `data get` costs ticks.** A read helper with a `ctl wait` after it runs six-odd ticks, so
+   "wait 10 and expect ten charges" is wrong: assert tick-independent facts instead — `energy: 20`
+   pays exactly one attempt (→ 0), `energy: 19` pays none (→ 19).
+5. **A path that does not exist answers `Found no elements matching Items`**, and `ctl messages` lists
+   the newest line first, so `jq -r '.chat[0]'` is the reply. A helper that greps the whole message
+   list matches the *previous* command's answer (the first probe read the energy reply as the items
+   reply).
+6. **`ctl container` writes through the game's container path** and the tick routes what it lands
+   (160 → 163 stone, −20 FE), which is a free second proof that the container is declared — the slot
+   it picks is the engine's (`inputs`/first empty), not a mod decision.
+7. **The block entity is out of the world in its own tick.** `host.block_entity(pos)` cannot read it
+   there; the tick writes its slots and its buffer through `event.entity.items`/`nbt`, and the
+   neighbours through `level.capability`.
+
 ## Verification
 
 Skills: superpowers/using-superpowers, brainstorming, writing-plans, test-driven-development, systematic-debugging, verification-before-completion; BeautifulRust/rust-best-practices
@@ -994,6 +1162,28 @@ Skills: superpowers/using-superpowers, brainstorming, writing-plans, test-driven
 Full evidence in [`VALIDATION.md`](VALIDATION.md); the e2e logs are in
 `ports/_shared/evidence/rftoolsstorage-e2e/` (the game legs) and
 `ports/_shared/evidence/rftoolsstorage/` (the ladder, package and fits).
+
+**0.2.6 — the scanner's item slots and its inject tick (2026-11-22, pin `0a875da`)**
+
+| Step | Command | Result |
+|---|---|---|
+| Red proof | `cargo test` with `inject_plan`/`injectable_at` stubbed | **FAILED. 29 passed; 2 failed**, `TEST_EXIT:101` (`slice6-red.log`); quoted above |
+| Runtime + glue tests | `cargo test` | **32 passed**, 0 failed (`sdk-test.log`, `TEST_EXIT:0`) |
+| Lints | `cargo clippy --all-targets -- -D warnings` | `CLIPPY_EXIT:0`, 0 warnings (`sdk-clippy.log`) |
+| Formatting | `rustfmt --edition 2024 --check src/{lib,support,runtime}.rs` | `FMT_EXIT:0` (`sdk-test.log`) |
+| SDK gate | `cargo horizon-mod check` | EXIT 0 — *"…uses 524 items of the API (… 18 hooks …). Made for 0a875da."* (`sdk-check.log`) |
+| Package | `rm -f Cargo.lock && cargo horizon-mod build`, twice | **78,799 B**, SHA-256 `5a034f0ac023bb31dd107c98c439943842a8a722a6f94d9917006df43156996b`, **`cmp`-identical**; 67 entries, no `Cargo.lock` (`slice6-build.log`, `sdk-check.log`) |
+| Package check | `cargo horizon-mod check rftoolsstorage.hmod` | `rftoolsstorage 0.2.6 (native-mod, format native-1/0a875da…/e59da90…, for 26.3)`, **78,799 B**, `5a034f0a…996b`, `FILE_CHECK_EXIT:0` (`sdk-check.log`) |
+| Fits the pin | `cargo horizon-mod fits rftoolsstorage.hmod --build 0a875da91dbb…` | `0a875da  made for`, `FITS_PIN_EXIT:0`, sha `5a034f0a…996b` (`sdk-fits.log`) |
+| Fits another build | `cargo horizon-mod fits rftoolsstorage.hmod --build 0b14f8acfd…` | `0b14f8a  fits`, `FITS_OTHER_EXIT:0`, sha `5a034f0a…996b` (`sdk-fits.log`) |
+| Launcher build | `launcher-game.sh build rftoolsstorage` | `Compiling rftoolsstorage (1 of 1)`, EXIT 0 (`slice6-launcher-build.log`) |
+| In game | `build-slot.sh run --step e2e -- bash ports/rftoolsstorage/tools/e2e.sh` | **PASS** + `EXIT:0` (`e2e-inject.log`) |
+| Control | the same rig on the Nightly without the package | **FAIL** + `EXIT:1` (`e2e-inject-control.log`) |
+| Counterfactual | a vanilla barrel where the scanner would be | **PASS** + `EXIT:0` (`e2e-inject-counterfactual.log`) |
+| Selftest | `SELFTEST=1` (asserts the tick did not move the stone) | **FAIL** + `EXIT:1` (`e2e-inject-selftest.log`) |
+| e2e gate | `check-e2e-logs.py rftoolsstorage-e2e --strict` | `logs=12 ok=12`, exit 0 |
+| Package gate | `verify-sdk-package.py rftoolsstorage` | `1/1 package(s) verified`, exit 0 |
+| Skills gate | `check-skills.py --notes ports/rftoolsstorage --strict` | `Skills line present`, PASS |
 
 **0.2.5 — the storage scanner (2026-11-21, pin `0a875da`)**
 

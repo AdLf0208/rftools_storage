@@ -8,15 +8,15 @@ against the pinned game build, `assets/` and `data/` are the carried content.
 with the container — do not recreate them (the retired tree is preserved in
 `../_shared/evidence/rftoolsstorage/retired-hnmod-0.1.0/`).
 
-- `src/runtime.rs` — the pure engine (26 rules' tests: the tier table, the slot
+- `src/runtime.rs` — the pure engine (28 rules' tests: the tier table, the slot
   rules, the grid's `slot_accepts`, the padlock's `lock_press`, the reach rule, the
-  carried payload's clamp, the scanner's box/radius/price and its readout); keep
-  them green. It stopped being byte-identical to the retired
+  carried payload's clamp, the scanner's box/radius/price/readout and the inject
+  plan and walk); keep them green. It stopped being byte-identical to the retired
   `mixins/rftoolsstorage/runtime.rs` with the 2026-11-18 review fixes.
-- `src/support.rs` — the game glue (the block-entity Parts, the container, the
+- `src/support.rs` — the game glue (the block-entity Parts, the containers, the
   menu and its screen and padlock, the click, the carried payload, the scanner's
-  energy buffer and the readout commands). No business rules here: they belong in
-  `runtime.rs` with a test.
+  FE buffer, its container and its inject tick, and the readout commands). No
+  business rules here: they belong in `runtime.rs` with a test.
 - `src/lib.rs` — the one `#[mod_api::horizon_mod] impl Hooks`.
 
 Validation (see `VALIDATION.md` §0; every build/test step goes through the

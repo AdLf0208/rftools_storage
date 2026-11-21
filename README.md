@@ -25,6 +25,9 @@ the item capability of every inventory in the `pos ± radius` box and answers on
 entry a kind (`rftoolsstorage:storage_scanner: minecraft:stone 64 (4800/50000 FE)`).
 A scan costs 100 FE (`rfPerRequest`); below that it answers `no power`. The radius
 is the jar's GUI slider (1..20, default 1) as `/rftoolsstorage radius <x> <y> <z> <n>`.
+Its **tick** pushes the stack in its in slot (and the one automation puts in the
+auto slot) into the inventories that box finds, a stack a tick for 20 FE
+(`rfPerInsert`) — also when none of them takes it, as the jar charges.
 
 ## Commands
 
@@ -40,8 +43,9 @@ They need an operator or a player within 8 blocks of the block.
 ## What is not ported
 
 The crafting manager (a WIP in the jar itself), the storage scanner's GUI **list**
-(search, sort, compact, cycle, visible size), its own in/out item slots and the
-inject/request paths, the scanner's remote/tablet variant, the claimed-land check
+(search, sort, compact, cycle, visible size), its own request path (the out slot's
+fill and the screen's insert/request buttons) and the `routable` star list,
+the scanner's remote/tablet variant, the claimed-land check
 (the pin has no claim API), storage tiers 2-4, the remote module and block, the
 type/filter/dump/control modules, the tablet, the crafting grid, the comparator
 output, the compat layers (JEI, TOP, XNet, RFToolsUtility), the `list`/`restore`
@@ -84,7 +88,7 @@ Evidence and the exact commands: [`VALIDATION.md`](VALIDATION.md).
 ## Layout
 
 ```
-horizon-mod.toml        the only manifest: id, version 0.2.5, api "0.2", side "both",
+horizon-mod.toml        the only manifest: id, version 0.2.6, api "0.2", side "both",
                         capabilities, [native] game/horizon/mixins
 Cargo.toml              one crate; horizon-mod-api from .horizon/sdk
 src/lib.rs              the one #[mod_api::horizon_mod] impl Hooks (register, right_click_block,

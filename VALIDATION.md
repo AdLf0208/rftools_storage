@@ -2,18 +2,94 @@
 
 Slice 1 (the `modular_storage` block with a tier-1 storage module).
 
-**Version 0.2.5 is the current SDK package (2026-11-21):** one flat `.hmod`, SDK
+**Version 0.2.6 is the current SDK package (2026-11-22):** one flat `.hmod`, SDK
 nightly `0a875da91dbb0fdcb7ba8c42c11341aa229af51a`, mixins
-`e59da9094f0c2fdda6c627fe9eff22dec6a906f0`. **§0d is this slice's evidence (the
-storage scanner) and is where the in-game legs are**; §0c is slice 3's (the
-card slot), §0b slice 2's (the menu) and §0 the 0.2.0 migration; §1–§6 are the
-retired 0.1.0 `.hnmod` run (pin `1d63e0a5…` / `5a64af93…`), kept as history. The
-0.2.x `tools/e2e.sh` runs on a launcher-built game
-(`ports/tools/launcher-game.sh`).
+`e59da9094f0c2fdda6c627fe9eff22dec6a906f0`. **§0e is this slice's evidence (the
+scanner's item slots and its inject tick) and is where the in-game legs are**; §0d
+is slice 5's (the scanner's block and scan), §0c slice 3's (the card slot), §0b
+slice 2's (the menu) and §0 the 0.2.0 migration; §1–§6 are the retired 0.1.0
+`.hnmod` run (pin `1d63e0a5…` / `5a64af93…`), kept as history. The 0.2.x
+`tools/e2e.sh` runs on a launcher-built game (`ports/tools/launcher-game.sh`).
 
 Every command below ran through `ports/tools/build-slot.sh` (a lease per step);
 in 0.1.0 compile steps forwarded to the second machine and game legs ran locally
 because the script uses `--offscreen`.
+
+## 0e. The scanner's item slots and its inject tick — version 0.2.6 (2026-11-22)
+
+Slice 6: `StorageScannerContainer`'s three slots (in 0, out 1, auto-in 2) and the
+`StorageScannerTileEntity.tickServer` path that pushes the two input slots into the scanned
+inventories, one `rfPerInsert` attempt each. Ladder and package logs:
+`ports/_shared/evidence/rftoolsstorage/`; game legs: `ports/_shared/evidence/rftoolsstorage-e2e/`.
+The slice plan, with the gap line and the upstream reading, is
+`ports/_shared/evidence/rftoolsstorage/SLICE-6-PLAN.md`.
+
+| Step | Command | Result | Log |
+|---|---|---|---|
+| red proof | `cargo test` with `inject_plan`/`injectable_at` stubbed | **FAILED. 29 passed; 2 failed**, `TEST_EXIT:101` | `slice6-red.log` |
+| tests | `cargo test` | `running 32 tests` → **32 passed**, 0 failed, `TEST_EXIT:0` | `sdk-test.log` |
+| lints | `cargo clippy --all-targets -- -D warnings` | `Finished`, **CLIPPY_EXIT:0**, 0 warnings | `sdk-clippy.log` |
+| format | `rustfmt --edition 2024 --check src/{lib,support,runtime}.rs` | `FMT_EXIT:0` | `sdk-test.log` |
+| SDK gate | `cargo horizon-mod check` | **CHECK_EXIT:0** — *"RFTools Storage uses 524 items of the API (5 Part kinds, 2 capabilitys, 141 fields or variants, 18 hooks, 52 hook arguments, 2 macros, 161 methods, 29 traits, 114 types). Made for 0a875da."* | `sdk-check.log` |
+| package | `rm -f Cargo.lock && cargo horizon-mod build`, twice | **78,799 B**, SHA-256 `5a034f0ac023bb31dd107c98c439943842a8a722a6f94d9917006df43156996b`, **`cmp`-identical** (`CMP_EXIT:0`) | `slice6-build.log`, `sdk-check.log` |
+| package check | `cargo horizon-mod check rftoolsstorage.hmod` | `rftoolsstorage 0.2.6 (native-mod, format native-1/0a875da…/e59da90…, for 26.3)`, **78,799 bytes**, `5a034f0a…996b`, **FILE_CHECK_EXIT:0** | `sdk-check.log` |
+| entries | `unzip -l rftoolsstorage.hmod` | **67 files**, no `Cargo.lock`; `src/runtime.rs` byte-identical in tree and package (`1336fe99312c`) | `sdk-check.log` |
+| fits, the pin | `cargo horizon-mod fits rftoolsstorage.hmod --build 0a875da91dbb…` | `0a875da  made for`, **FITS_PIN_EXIT:0**, sha `5a034f0a…996b` before and after | `sdk-fits.log` |
+| fits, another build | `cargo horizon-mod fits rftoolsstorage.hmod --build 0b14f8acfd…` | `0b14f8a  fits`, **FITS_OTHER_EXIT:0**, sha `5a034f0a…996b` | `sdk-fits.log` |
+| launcher build | `ports/tools/launcher-game.sh build rftoolsstorage` | `Compiling rftoolsstorage (1 of 1)`, **LAUNCHER_BUILD_EXIT:0** | `slice6-launcher-build.log` |
+| in game | `build-slot.sh run --job W1-rftoolsstorage --step e2e -- bash ports/rftoolsstorage/tools/e2e.sh` | **PASS** + `EXIT:0` | `rftoolsstorage-e2e/e2e-inject.log` |
+| control | the same leg on the Nightly **without** the package | **FAIL** + `EXIT:1` (`{"error":"unknown item rftoolsstorage:storage_scanner"}`) | `e2e-inject-control.log` |
+| counterfactual | a vanilla barrel where the scanner would be | **PASS** + `EXIT:0` — `scan`/`radius` answer `not a storage scanner` | `e2e-inject-counterfactual.log` |
+| selftest | `SELFTEST=1` (asserts the tick did not move the stone) | **FAIL** + `EXIT:1` — *"the tick moved 64 stone from the in-slot into the chest two blocks away (energy 4980) …"* | `e2e-inject-selftest.log` |
+| e2e gate | `python3 ports/tools/check-e2e-logs.py rftoolsstorage-e2e --strict` | `logs=12  ok=12`, exit 0 | — |
+| package gate | `python3 ports/tools/verify-sdk-package.py rftoolsstorage` | `1/1 package(s) verified`, exit 0 | — |
+| skills gate | `python3 ports/tools/check-skills.py --notes ports/rftoolsstorage --strict` | `Skills line present`, PASS | — |
+
+The default leg's transcript (abridged; the log has every `ctl` reply):
+
+```
+== THE INJECT TICK: 64 stone in the in-slot goes to the chest two blocks away, for one rfPerInsert ==
+radius: rftoolsstorage:storage_scanner: radius 2
+before the seed: in-slot '' chest total 0 energy 5000
+after the seed: in-slot  energy 4980
+after 10 ticks: in-slot '', chest Items[0] = 64 x minecraft:stone, energy 4980
+== counterfactual: buffer 0, another 64 stone in the in-slot -> the chest keeps 64 and the slot keeps the stone ==
+buffer 0: in-slot 64, chest total 64, energy 0
+== recharged, the same stack goes: the stall was the power, not the walk ==
+recharged: in-slot '', chest total 128, energy 4980
+== the automation input (slot 2) routes through the same tick ==
+auto slot: '', chest total 160, energy 4960
+== items the game puts in the container are routed too (ctl container -> the tick) ==
+container path: chest 160 -> 163, energy 4960 -> 4940
+== a stack nothing accepts still costs its attempt: 20 FE pays one, 19 pays none ==
+the full barrel holds 64 x 27 slots of stone
+20 FE: in-slot 64 dirt, energy 0
+19 FE: in-slot 64 dirt, energy 19
+== the walk passes a refusing inventory for the one behind it (a full barrel at S+1, a chest at S+2) ==
+walk: in-slot '', barrel 64..64 stone, chest 64 x minecraft:dirt
+== the out slot (1) is declared and never written by the tick ==
+out slot reply: Found no elements matching Items
+scanner container: {"slots":[null,null,null]}
+```
+
+The selftest keeps the scenario and inverts the slice's own assertion:
+
+```
+== THE INJECT TICK: 64 stone in the in-slot goes to the chest two blocks away, for one rfPerInsert ==
+after 10 ticks: in-slot '', chest Items[0] = 64 x minecraft:stone, energy 4980
+== SELFTEST: assert the tick did NOT push the stone into the chest (must fail) ==
+FAIL: the tick moved 64 stone from the in-slot into the chest two blocks away (energy 4980), so this inverted assertion fails as it must
+EXIT:1
+```
+
+The control leg (the same rig on the Nightly without the package) fails on the game's own
+refusal, so the PASS is not vacuous:
+
+```
+control give: {"error":"unknown item rftoolsstorage:storage_scanner"}
+FAIL: without the package there is no rftoolsstorage:storage_scanner to place or scan with, so nothing of this scenario can run
+EXIT:1
+```
 
 ## 0d. The storage scanner — version 0.2.5 (2026-11-21)
 

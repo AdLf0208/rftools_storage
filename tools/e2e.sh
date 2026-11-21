@@ -26,14 +26,24 @@
 #      `/give rftoolsbase:machine_frame` is refused — the frame is RFToolsBase's
 #      item and that mod is not in this build (the campaign's port of it pins
 #      `0b14f8a`), so the recipe is **blocked**, recorded in `notes.md`;
-#  12. the modular storage still answers its readout (`0/0 empty no module`).
+#  12. the modular storage still answers its readout (`0/0 empty no module`);
+#  13. **the inject tick (slice 6)**: 64 stone in the scanner's in-slot is pushed
+#      into the empty chest two blocks away on the first tick — the chest's
+#      `Items[0]` reads `minecraft:stone` x64 and the buffer drops by exactly one
+#      `rfPerInsert` (5,000 -> 4,980); with the buffer at 0 the next stack stays in
+#      the slot and the chest keeps its 64, and recharging proves the stall was the
+#      power (chest 128); the auto slot (2) routes too; `ctl container`'s items are
+#      routed; a stack no inventory accepts is still charged one attempt (20 FE
+#      pays one, 19 pays none) and stays in the slot; the walk passes a full barrel
+#      for the chest behind it; the out slot is never written.
 #
-# SELFTEST=1 keeps the scenario and asserts that the scan did NOT find the stone,
-# so the run MUST fail with a `FAIL:` verdict (the assertion phase 4 relies on is
-# proved able to fail). COUNTERFACTUAL=1 puts a vanilla barrel where the scanner
-# would be and proves the same commands answer `not a storage scanner` on it.
-# CONTROL_GAME runs the same rig on the Nightly without the package and fails
-# there (`EXIT:1`): the block and its item do not exist.
+# SELFTEST=1 keeps the scenario and asserts that the tick did NOT push the stone
+# into the chest, so the run MUST fail with a `FAIL:` verdict (the assertion the
+# slice rests on is proved able to fail). COUNTERFACTUAL=1 puts a vanilla barrel
+# where the scanner would be and proves the same commands answer
+# `not a storage scanner` on it. CONTROL_GAME runs the same rig on the Nightly
+# without the package and fails there (`EXIT:1`): the block and its item do not
+# exist.
 #
 # The SDK migration made the mod one flat `.hmod` the launcher compiles into the
 # game, so GAME must name a game the launcher built with it:
@@ -131,6 +141,55 @@ radius_cmd() { # x y z n
     echo "$line"
 }
 energy_of() { data_block "$1" "$2" "$3" energy; }
+
+# --- the inject tick (slice 6) --------------------------------------------
+# A /data get whose path may not exist: `/data get block … Items[0].count` on an
+# empty list answers `Found no elements matching Items`, not a value. The newest
+# chat line is the reply (`ctl messages` lists it first).
+data_reply() { # x y z path
+    ctl command "data get block $1 $2 $3 $4" >/dev/null
+    ctl wait 6 >/dev/null
+    ctl messages 6 | jq -r '.chat[0] // "NONE"'
+}
+# The value of a /data get path, or the empty string when the path does not exist.
+data_value() { # x y z path
+    local line
+    line=$(data_reply "$@")
+    case "$line" in
+        *"has the following block data: "*)
+            line=${line##*has the following block data: }
+            echo "${line//\"/}"
+            ;;
+        *) echo "" ;;
+    esac
+}
+slot_count() { data_value "$1" "$2" "$3" "Items[$4].count"; }
+slot_id() { data_value "$1" "$2" "$3" "Items[$4].id"; }
+# The sum of a container's first thirteen slots (`Items[0..12].count`): enough for
+# every stack this scenario routes, and 13 reads instead of 27.
+inv_total() { # x y z
+    local x=$1 y=$2 z=$3 sum=0 i v
+    for i in $(seq 0 12); do
+        v=$(slot_count "$x" "$y" "$z" "$i")
+        [ -z "$v" ] && continue
+        sum=$((sum + v))
+    done
+    echo "$sum"
+}
+# A full 27-slot container's item list body (one entry a slot, 64 each).
+full_slots() { # item
+    local i body=""
+    for i in $(seq 0 26); do
+        body="${body}${body:+, }{Slot: ${i}b, id: \"$1\", count: 64}"
+    done
+    echo "$body"
+}
+# `/data merge block … {Items: […]}` replaces the container's item list: every slot
+# not named is emptied, which is also how a phase starts from a clean slot.
+seed_slots() { # x y z "<items list body>"
+    ctl command "data merge block $1 $2 $3 {Items: [$4]}" >/dev/null
+    ctl wait 2 >/dev/null
+}
 
 # Stand two blocks in front of (x, z) on the rig's floor: `ctl place` refuses a
 # cell the player's own box overlaps. The console `/tp` is used and verified.
@@ -341,13 +400,6 @@ case "$line" in
     *) ;;
 esac
 
-if [ "$SELFTEST" = 1 ]; then
-    say "SELFTEST: assert the scan did NOT find the stone (must fail)"
-    echo "$line" | grep -q 'minecraft:stone 64' \
-        || fail "the scan found no stone, so the assertion this run inverts is dead: $line"
-    fail "the scan found minecraft:stone 64 in the chest two blocks away ($line), so this inverted assertion fails as it must"
-fi
-
 say "radius 3 brings the chest three away too: both kinds, one entry each"
 line=$(radius_cmd "$SX" "$SY" "$SZ" 3)
 echo "radius: $line"
@@ -413,6 +465,143 @@ echo "relaunch: buffer $before -> $after, radius $saved_radius; scan: $line"
 [ "$after" = "$before" ] || fail "the relaunch changed the buffer $before -> $after"
 [ "$saved_radius" = 3 ] || fail "the relaunch changed the radius to $saved_radius"
 echo "$line" | grep -q 'minecraft:stone 64' || fail "the scan after the relaunch answered: $line"
+
+say "THE INJECT TICK: 64 stone in the in-slot goes to the chest two blocks away, for one rfPerInsert"
+# The chest must be empty (and alone: two adjacent chests are one double chest), so
+# its Items[0] can only be the stack the tick pushed there.
+CHEST_X=$((SX + 2))
+ctl setblock "$CHEST_X" "$SY" "$SZ" minecraft:air >/dev/null
+ctl setblock "$CHEST_X" "$SY" "$SZ" minecraft:chest >/dev/null
+ctl wait 4
+line=$(radius_cmd "$SX" "$SY" "$SZ" 2)
+echo "radius: $line"
+ctl command "data merge block $SX $SY $SZ {energy: 5000}" >/dev/null
+ctl wait 4
+echo "before the seed: in-slot '$(slot_count "$SX" "$SY" "$SZ" 0)' chest total $(inv_total "$CHEST_X" "$SY" "$SZ") energy $(energy_of "$SX" "$SY" "$SZ")"
+case "$(data_reply "$SX" "$SY" "$SZ" 'Items[0].count')" in
+    *"Found no elements"*) ;;
+    *) fail "the scanner's in-slot is not empty before the seed" ;;
+esac
+seed_slots "$SX" "$SY" "$SZ" '{Slot: 0b, id: "minecraft:stone", count: 64}'
+echo "after the seed: in-slot $(slot_count "$SX" "$SY" "$SZ" 0) energy $(energy_of "$SX" "$SY" "$SZ")"
+# The merge, the read above and the tick: ten ticks are plenty for one push.
+ctl wait 10
+in_slot=$(slot_count "$SX" "$SY" "$SZ" 0)
+chest_id=$(slot_id "$CHEST_X" "$SY" "$SZ" 0)
+chest_count=$(slot_count "$CHEST_X" "$SY" "$SZ" 0)
+energy=$(energy_of "$SX" "$SY" "$SZ")
+echo "after 10 ticks: in-slot '${in_slot}', chest Items[0] = ${chest_count} x ${chest_id}, energy ${energy}"
+[ "$in_slot" = "" ] || fail "the in-slot still holds $in_slot stone after the tick"
+[ "$chest_id" = "minecraft:stone" ] || fail "the chest's Items[0] is '$chest_id', expected minecraft:stone"
+[ "$chest_count" = 64 ] || fail "the chest's Items[0] holds $chest_count, expected 64"
+[ "$energy" = "$((5000 - 20))" ] || fail "the buffer is $energy, expected one rfPerInsert off 5000 (4980)"
+
+if [ "$SELFTEST" = 1 ]; then
+    say "SELFTEST: assert the tick did NOT push the stone into the chest (must fail)"
+    fail "the tick moved 64 stone from the in-slot into the chest two blocks away (energy ${energy}), so this inverted assertion fails as it must"
+fi
+
+say "counterfactual: buffer 0, another 64 stone in the in-slot -> the chest keeps 64 and the slot keeps the stone"
+ctl command "data merge block $SX $SY $SZ {energy: 0}" >/dev/null
+seed_slots "$SX" "$SY" "$SZ" '{Slot: 0b, id: "minecraft:stone", count: 64}'
+ctl wait 10
+in_slot=$(slot_count "$SX" "$SY" "$SZ" 0)
+chest=$(inv_total "$CHEST_X" "$SY" "$SZ")
+energy=$(energy_of "$SX" "$SY" "$SZ")
+echo "buffer 0: in-slot ${in_slot}, chest total ${chest}, energy ${energy}"
+[ "$in_slot" = 64 ] || fail "with no power the in-slot holds '$in_slot', expected its 64 stone"
+[ "$chest" = 64 ] || fail "with no power the chest holds $chest, expected its 64"
+[ "$energy" = 0 ] || fail "a refused tick changed the buffer to $energy"
+
+say "recharged, the same stack goes: the stall was the power, not the walk"
+ctl command "data merge block $SX $SY $SZ {energy: 5000}" >/dev/null
+ctl wait 10
+in_slot=$(slot_count "$SX" "$SY" "$SZ" 0)
+chest=$(inv_total "$CHEST_X" "$SY" "$SZ")
+energy=$(energy_of "$SX" "$SY" "$SZ")
+echo "recharged: in-slot '${in_slot}', chest total ${chest}, energy ${energy}"
+[ "$in_slot" = "" ] || fail "the recharged scanner still holds $in_slot stone"
+[ "$chest" = 128 ] || fail "the chest holds $chest after the second stack, expected 128"
+[ "$energy" = "$((5000 - 20))" ] || fail "the second stack cost more than one rfPerInsert ($energy)"
+
+say "the automation input (slot 2) routes through the same tick"
+seed_slots "$SX" "$SY" "$SZ" '{Slot: 2b, id: "minecraft:stone", count: 32}'
+ctl wait 10
+auto_slot=$(slot_count "$SX" "$SY" "$SZ" 2)
+chest=$(inv_total "$CHEST_X" "$SY" "$SZ")
+energy=$(energy_of "$SX" "$SY" "$SZ")
+echo "auto slot: '${auto_slot}', chest total ${chest}, energy ${energy}"
+[ "$auto_slot" = "" ] || fail "the auto slot still holds $auto_slot"
+[ "$chest" = 160 ] || fail "the chest holds $chest after the auto slot, expected 160"
+[ "$energy" = "$((5000 - 2 * 20))" ] || fail "two inserts left $energy, expected 5000 - 2 x 20"
+
+say "items the game puts in the container are routed too (ctl container -> the tick)"
+chest_before=$(inv_total "$CHEST_X" "$SY" "$SZ")
+energy_before=$(energy_of "$SX" "$SY" "$SZ")
+ctl container "$SX" "$SY" "$SZ" minecraft:stone 3 >/dev/null
+ctl wait 10
+chest=$(inv_total "$CHEST_X" "$SY" "$SZ")
+energy=$(energy_of "$SX" "$SY" "$SZ")
+echo "container path: chest ${chest_before} -> ${chest}, energy ${energy_before} -> ${energy}"
+[ "$chest" = "$((chest_before + 3))" ] || fail "the container's 3 stone did not reach the chest (${chest_before} -> ${chest})"
+[ "$energy" = "$((energy_before - 20))" ] || fail "the container's stack cost $((energy_before - energy)), expected one rfPerInsert"
+
+say "a stack nothing accepts still costs its attempt: 20 FE pays one, 19 pays none"
+ctl setblock "$CHEST_X" "$SY" "$SZ" minecraft:air >/dev/null
+ctl setblock "$CHEST_X" "$SY" "$SZ" minecraft:barrel >/dev/null
+ctl wait 4
+seed_slots "$CHEST_X" "$SY" "$SZ" "$(full_slots minecraft:stone)"
+ctl wait 4
+echo "the full barrel holds $(slot_count "$CHEST_X" "$SY" "$SZ" 0) x 27 slots of stone"
+ctl command "data merge block $SX $SY $SZ {energy: 20}" >/dev/null
+seed_slots "$SX" "$SY" "$SZ" '{Slot: 0b, id: "minecraft:dirt", count: 64}'
+ctl wait 20
+in_slot=$(slot_count "$SX" "$SY" "$SZ" 0)
+energy=$(energy_of "$SX" "$SY" "$SZ")
+echo "20 FE: in-slot ${in_slot} dirt, energy ${energy}"
+[ "$in_slot" = 64 ] || fail "the refused dirt left the in-slot ($in_slot)"
+[ "$energy" = 0 ] || fail "the refused attempt left $energy, expected 20 - 20"
+ctl command "data merge block $SX $SY $SZ {energy: 19}" >/dev/null
+ctl wait 20
+in_slot=$(slot_count "$SX" "$SY" "$SZ" 0)
+energy=$(energy_of "$SX" "$SY" "$SZ")
+echo "19 FE: in-slot ${in_slot} dirt, energy ${energy}"
+[ "$energy" = 19 ] || fail "19 FE paid for an attempt ($energy)"
+[ "$in_slot" = 64 ] || fail "the refused dirt left the in-slot ($in_slot)"
+
+say "the walk passes a refusing inventory for the one behind it (a full barrel at S+1, a chest at S+2)"
+BARREL_X=$((SX + 1))
+ctl setblock "$BARREL_X" "$SY" "$SZ" minecraft:barrel >/dev/null
+ctl wait 4
+seed_slots "$BARREL_X" "$SY" "$SZ" "$(full_slots minecraft:stone)"
+ctl wait 4
+ctl setblock "$CHEST_X" "$SY" "$SZ" minecraft:air >/dev/null
+ctl setblock "$CHEST_X" "$SY" "$SZ" minecraft:chest >/dev/null
+ctl wait 4
+# The dirt from the 19-FE phase is still in the slot and 19 cannot buy an attempt:
+# seed the same stack (so the phase starts from one known stack), then pay.
+seed_slots "$SX" "$SY" "$SZ" '{Slot: 0b, id: "minecraft:dirt", count: 64}'
+ctl command "data merge block $SX $SY $SZ {energy: 5000}" >/dev/null
+ctl wait 10
+in_slot=$(slot_count "$SX" "$SY" "$SZ" 0)
+barrel_first=$(slot_count "$BARREL_X" "$SY" "$SZ" 0)
+barrel_last=$(slot_count "$BARREL_X" "$SY" "$SZ" 26)
+chest_dirt=$(slot_id "$CHEST_X" "$SY" "$SZ" 0)
+chest_count=$(slot_count "$CHEST_X" "$SY" "$SZ" 0)
+echo "walk: in-slot '${in_slot}', barrel ${barrel_first}..${barrel_last} stone, chest ${chest_count} x ${chest_dirt}"
+[ "$in_slot" = "" ] || fail "the walk left $in_slot dirt in the in-slot"
+[ "$barrel_first" = 64 ] && [ "$barrel_last" = 64 ] || fail "the full barrel changed ($barrel_first..$barrel_last)"
+[ "$chest_dirt" = "minecraft:dirt" ] || fail "the chest behind the barrel holds '${chest_dirt}'"
+[ "$chest_count" = 64 ] || fail "the chest behind the barrel holds $chest_count, expected 64"
+
+say "the out slot (1) is declared and never written by the tick"
+out_slot=$(data_reply "$SX" "$SY" "$SZ" 'Items[1].count')
+echo "out slot reply: $out_slot"
+case "$out_slot" in
+    *"Found no elements"*) ;;
+    *) fail "the tick wrote the out slot: $out_slot" ;;
+esac
+echo "scanner container: $(ctl container "$SX" "$SY" "$SZ" | jq -c .)"
 
 say "the scanner's loot table drops its own item on a survival break"
 BX=$((X + 2))
@@ -481,4 +670,4 @@ echo "give rftoolsbase:machine_frame: $frame"
 echo "$frame" | grep -q 'unknown item' || fail "this build has rftoolsbase:machine_frame, so the recipe is not blocked and must be crafted: $frame"
 
 ctl close >/dev/null 2>&1 || true
-echo "PASS: the storage scanner places and reads back with its facing; a fresh one has no power (no power (0/50000 FE)) and reads nothing; at its default radius 1 it finds nothing two blocks away; /rftoolsstorage radius 2 widens the box and the scan answers minecraft:stone 64 for a chest two blocks away while the chest three away (minecraft:dirt 32) is outside it; radius 3 lists both, one entry a kind; every scan costs rfPerRequest (5,000 -> 4,900 -> 4,800 -> 4,700, printed in the reply); an emptied buffer refuses with no power and reads nothing, and charging it again makes the scan answer again; scan and radius refuse a chest and the modular storage (not a storage scanner); the radius and the buffer survive a relaunch; the loot table drops the scanner on a survival break; the modular storage still answers 0/0 empty no module; and a barrel answers not a storage scanner to the same commands"
+echo "PASS: the storage scanner places and reads back with its facing; a fresh one has no power (no power (0/50000 FE)) and reads nothing; at its default radius 1 it finds nothing two blocks away; /rftoolsstorage radius 2 widens the box and the scan answers minecraft:stone 64 for a chest two blocks away while the chest three away (minecraft:dirt 32) is outside it; radius 3 lists both, one entry a kind; every scan costs rfPerRequest (5,000 -> 4,900 -> 4,800 -> 4,700, printed in the reply); an emptied buffer refuses with no power and reads nothing, and charging it again makes the scan answer again; scan and radius refuse a chest and the modular storage (not a storage scanner); the radius and the buffer survive a relaunch; THE INJECT TICK pushes 64 stone from the in-slot into the empty chest two blocks away so its Items[0] reads minecraft:stone x64 while the buffer drops by exactly one rfPerInsert (5000 -> 4980), and with the buffer at 0 the next stack stays in the slot and the chest keeps its 64, recharging proving the stall was the power (chest 128); the auto slot routes too (chest 160); items the game puts in the container are routed for one rfPerInsert; a stack nothing accepts is still charged one attempt (20 FE pays one, 19 pays none) and stays in the slot; the walk passes a full barrel for the chest behind it; the out slot is never written; the loot table drops the scanner on a survival break; the modular storage still answers 0/0 empty no module; and a barrel answers not a storage scanner to the same commands"

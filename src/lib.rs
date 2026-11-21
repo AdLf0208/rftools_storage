@@ -18,12 +18,15 @@
 //! The **storage scanner** (slice 5) is the mod's second block: a machine with a
 //! 50,000 FE buffer that reads what the inventories around it hold,
 //! `/rftoolsstorage scan <pos>` (the GUI's list, as far as this slice goes),
-//! `/rftoolsstorage radius <pos> <n>` being its radius slider.
+//! `/rftoolsstorage radius <pos> <n>` being its radius slider. Its **tick**
+//! (slice 6) pushes the stack in its in slot — and the one automation puts in the
+//! auto slot — into those inventories, one `rfPerInsert` attempt a stack.
 //!
 //! [`runtime`] is the pure engine (the module's slot count, one kind a slot, the
 //! lock, the menu's slot and padlock rules, the carried payload's clamp, the
-//! scanner's box, price and readout) and [`support`] is the game glue. See
-//! `notes.md` for the slice boundary, the deliberate deviations and the gaps.
+//! scanner's box, price, readout and inject plan) and [`support`] is the game
+//! glue. See `notes.md` for the slice boundary, the deliberate deviations and the
+//! gaps.
 pub mod runtime;
 mod support;
 
