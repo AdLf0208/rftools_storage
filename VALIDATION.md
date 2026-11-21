@@ -2,21 +2,19 @@
 
 Slice 1 (the `modular_storage` block with a tier-1 storage module).
 
-**Version 0.2.0 is the SDK package (2026-11-18):** one flat `.hmod`, SDK nightly
-`0b14f8acfd97fa2c750e42795249dcc981178ca4`, mixins
-`e59da9094f0c2fdda6c627fe9eff22dec6a906f0`. §0 is this migration's evidence.
-§1–§6 are the retired 0.1.0 `.hnmod` run (pin `1d63e0a5…` / `5a64af93…`), kept
-because they are the behaviour evidence: the logic behind every 0.1.0 assertion
-is `src/runtime.rs`, and that file is byte-identical in both packages. The
-staged ladder and the embedded/control legs no longer exist; the 0.2.0
-`tools/e2e.sh` keeps the scenario, the counterfactual and the selftest, and waits
-for a launcher-built game.
+**Version 0.2.2 is the current SDK package (2026-11-21):** one flat `.hmod`, SDK
+nightly `0a875da91dbb0fdcb7ba8c42c11341aa229af51a`, mixins
+`e59da9094f0c2fdda6c627fe9eff22dec6a906f0`. **§0b is this slice's evidence (the
+menu) and is where the in-game legs are**; §0 is the 0.2.0 migration and its
+staged ladder; §1–§6 are the retired 0.1.0 `.hnmod` run (pin `1d63e0a5…` /
+`5a64af93…`), kept as history. The 0.2.x `tools/e2e.sh` runs on a launcher-built
+game (`ports/tools/launcher-game.sh`).
 
 Every command below ran through `ports/tools/build-slot.sh` (a lease per step);
 in 0.1.0 compile steps forwarded to the second machine and game legs ran locally
 because the script uses `--offscreen`.
 
-## 0. The SDK package (0.2.0) — what ran here
+## 0. The SDK package (0.2.0) — the migration (history)
 
 All steps in one lease (`--job sdk-rfs --step check`), then a repeat
 `--step build`; logs in `ports/_shared/evidence/rftoolsstorage/sdk-*.log`.
@@ -36,11 +34,77 @@ All steps in one lease (`--job sdk-rfs --step check`), then a repeat
 | package entries | `unzip -l rftoolsstorage.hmod` | **57 files**: 48 content (`assets/`+`data/`), `horizon-mod.toml`, `Cargo.toml`, `src/{lib,runtime,support}.rs`, `uses.json`, `LICENSE`, `LICENSE-NOTICE.md`, `README.md`; no `Cargo.lock` | `sdk-sha256.txt` |
 | skills gate | `python3 ports/tools/check-skills.py --notes ports/rftoolsstorage --strict` | `Skills line present`, **SKILLS GATE: PASS**, exit 0 | — |
 
-**Not run here:** the in-game e2e. There is no `horizon-launcher` on this machine
-(`which horizon-launcher` is empty), so no game carrying the package can be
-built; `tools/e2e.sh` is adapted and is the next run on a launcher machine. The
-0.1.0 logs in §4 remain the behaviour evidence, and the rules they exercise are
-the byte-identical `src/runtime.rs`.
+**Superseded:** this 0.2.0 run had no in-game leg (no `horizon-launcher` was
+installed then). The launcher wrapper `ports/tools/launcher-game.sh` later built
+and exported a game carrying the package, and §0b has the in-game legs for
+0.2.2. The 0.1.0 logs in §4 stay as history.
+
+## 0b. The menu — version 0.2.2 (2026-11-21)
+
+Slice 2: the block's own menu (a 100-slot grid opened by a right click), the screen
+and the padlock. Ladder and package logs: `ports/_shared/evidence/rftoolsstorage/`;
+game legs: `ports/_shared/evidence/rftoolsstorage-e2e/`.
+
+| Step | Command | Result | Log |
+|---|---|---|---|
+| red proof | `cargo test` with `slot_accepts`/`lock_press` stubbed | **FAILED. 15 passed; 2 failed**, `TEST_EXIT:101` | `slice2-red.log` |
+| tests | `cargo test` | `running 17 tests` → **17 passed**, 0 failed, `TEST_EXIT:0` | `sdk-test.log` |
+| lints | `cargo clippy --all-targets -- -D warnings` | `Finished`, **CLIPPY_EXIT:0**, 0 warnings | `sdk-test.log` |
+| format | `rustfmt --edition 2024 --check src/{lib,support,runtime}.rs` | `FMT_EXIT:0` | `sdk-test.log` |
+| SDK gate | `cargo horizon-mod check` | **CHECK_EXIT:0** — *"RFTools Storage uses 372 items of the API (5 Part kinds, 1 capability, 93 fields or variants, 12 hooks, 31 hook arguments, 2 macros, 113 methods, 24 traits, 91 types). Made for 0a875da."* | `sdk-check.log` |
+| package | `rm -f Cargo.lock && cargo horizon-mod build`, twice | 53,878 B, SHA-256 `fd5d7213bc29cd1ee3fb6bacc3b16a9d5115d58f36d9793ceaa9777125c8fc82`, **`cmp`-identical** | `sdk-sha256.txt` |
+| package check | `cargo horizon-mod check rftoolsstorage.hmod` | `rftoolsstorage 0.2.2 (native-mod, format native-1/0a875da…/e59da90…, for 26.3)`, **53,878 bytes**, **FILE_CHECK_EXIT:0** | `sdk-check.log` |
+| entries | `unzip -l rftoolsstorage.hmod` | **58 files**, no `Cargo.lock`; `src/runtime.rs` in the tree and in the package are the same bytes (`3445c570…`) | `sdk-sha256.txt` |
+| fits, the pin | `cargo horizon-mod fits rftoolsstorage.hmod --build 0a875da` | `0a875da  made for`, **FITS_PIN_EXIT:0** | `sdk-check.log` |
+| fits, another build | `cargo horizon-mod fits rftoolsstorage.hmod --build 0b14f8a` | `0b14f8a  fits`, **FITS_OTHER_EXIT:0** | `sdk-check.log` |
+| in game | `build-slot.sh run --job e2e-rftoolsstorage --step e2e -- bash tools/e2e.sh` | **PASS** + `EXIT:0` | `rftoolsstorage-e2e/e2e-menu.log` |
+| control | the same leg on the Nightly **without** the package | **PASS** + `EXIT:0` (`{"error":"unknown item rftoolsstorage:modular_storage"}`) | `e2e-menu-control.log` |
+| counterfactual | a vanilla barrel in the same rig | **PASS** + `EXIT:0` — a 27-slot chest menu, its slot takes the stack | `e2e-menu-counterfactual.log` |
+| selftest | `SELFTEST=1` (asserts a 27-slot menu on the storage) | **FAIL** + `EXIT:1` — *"the storage's menu shows 100 slots, not 27: the grid assertion is alive"* | `e2e-menu-selftest.log` |
+| e2e gate | `python3 ports/tools/check-e2e-logs.py rftoolsstorage-e2e --strict` | `logs=6  ok=6`, exit 0 | — |
+
+The default leg's transcript (abridged; the log has every `ctl` reply):
+
+```
+== CONTROL A: the plain click opens the storage's menu, and with no module it stores nothing ==
+panel origin 30,15; the menu shows 100 container slots
+slot 300 after the click with no module: '0' (the stack stays on the cursor)
+action bar: 'Modular Storage: no storage module'; stored: 0; stone in the hand: 64
+== a storage module installs from the hand (sneak click) ==
+action bar: 'Modular Storage: module installed, 100 slots'; readout: … 0/6400 empty unlocked
+== CONTROL B: unlocked, the menu's grid still refuses a stack ==
+slot 300 after the unlocked click: '0'
+== the panel's padlock seals it (upstream's lockButton) ==
+action bar: 'Modular Storage: locked'; readout: … 0/6400 empty locked
+== a locked storage stores the stack put into a grid slot ==
+slot 300 now: '64 minecraft:stone'
+== one kind a slot: dirt is refused by the stone's slot and takes the grid's last one ==
+slot 300 after the dirt click: 'minecraft:stone' (stone keeps its slot)
+slot 399 (the last of the grid) now holds 64 dirt
+== a click on a filled grid slot takes the stack back ==
+stored: 64; stone in the inventory: 64
+== fill the storage to its tier-1 capacity (6,400) and watch the grid refuse more ==
+the harness filled 99 slots
+readout: … 6400/6400 minecraft:stone locked
+slot 300 with the storage full: '64 minecraft:stone' (nothing fits, the stack stays on the cursor)
+== …and takes it again once one stack is withdrawn through the grid ==
+the grid gave 64 (6400 -> 6336); the gesture took it back: stored 6400
+== the contents, the lock and the grid survive a relaunch ==
+relaunch: 6400 -> 6400 (state locked)
+the reopened grid shows 64 in slot 300
+== the carried storage-module recipe crafts in a real crafting table ==
+the grid's result: 'rftoolsstorage:storage_module0 x1'
+crafted modules in the inventory: 1
+== control: a stick in the iron's cell, and a block where the machine frame goes, craft nothing ==
+the module recipe with a stick instead of iron: 'empty'
+the storage recipe with a stone block where rftoolsbase:machine_frame belongs: 'empty'
+PASS: … EXIT:0
+```
+
+**Not run:** a *client* screenshot of the panel (`--offscreen` + `ctl screenshot`) —
+the layout is asserted through `ctl screen`/`ctl ui` (100 container slots, the panel
+origin from the window size), not by pixels. The screen's drawn padlock is proven by
+the press it answers, not by its colour.
 
 ## 1. The pure runtime (TDD)
 

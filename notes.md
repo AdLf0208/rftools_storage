@@ -13,21 +13,23 @@ differences, are in [`FINDINGS.md`](FINDINGS.md).
 publishing (ARCHITECTURE.md §8); the port carries the upstream MIT notice in
 [`LICENSE`](LICENSE) and its provenance in [`LICENSE-NOTICE.md`](LICENSE-NOTICE.md).
 
-**Format: the SDK package (2026-11-18), version 0.2.0.** One flat `.hmod` —
+**Format: the SDK package (2026-11-18), version 0.2.2.** One flat `.hmod` —
 `horizon-mod.toml` + `Cargo.toml` + `src/` + `assets/` + `data/` — built by the
-launcher against SDK nightly **`0b14f8acfd97fa2c750e42795249dcc981178ca4`** with
+launcher against SDK nightly **`0a875da91dbb0fdcb7ba8c42c11341aa229af51a`** with
 horizon-mixins **`e59da9094f0c2fdda6c627fe9eff22dec6a906f0`** (see
-[`## Migration to the SDK format`](#migration-to-the-sdk-format--version-020)).
+[`## Migration to the SDK format`](#migration-to-the-sdk-format--version-020) and
+[`## Slice 2`](#slice-2--the-storages-menu-version-022)).
 The retired `.hnmod` container pinned Horizon `1d63e0a5…` / mixins `5a64af93…`;
-`src/runtime.rs` is **byte-identical** to the retired `mixins/rftoolsstorage/runtime.rs`
-(SHA-256 `01691fc18bd4…8615f4`, including the copy inside the built package).
+`src/runtime.rs` was byte-identical to the retired
+`mixins/rftoolsstorage/runtime.rs` until the 2026-11-18 review fixes gave it the
+reach rule, and slice 2 added the menu's two rules.
 
 Status: **ported-partial** — slice 1 (the modular storage block with a tier-1
-storage module) is implemented; its 0.1.0 behaviour was verified in-game, and the
-migrated 0.2.0 package passes the SDK gate (`check`, `fits`) but has not been run
-in a launcher-built game on this machine (no `horizon-launcher` here — see
-[`## Migration to the SDK format`](#migration-to-the-sdk-format--version-020),
-gap 1). The gap list below is the rest of the mod.
+storage module) and slice 2 (its **menu**: a 100-slot grid opened by a right
+click, its slot rules and the padlock) are implemented and verified in a
+launcher-built game at the pin (four legs: default, control, barrel
+counterfactual, `SELFTEST=1`; `ports/_shared/evidence/rftoolsstorage-e2e/`). The
+gap list below is the rest of the mod.
 
 ## Class + tier and the approach
 
@@ -73,13 +75,14 @@ gap 1). The gap list below is the rest of the mod.
 - **The container.** `native_block_entity_container` (API 16) declares all 100
   slots on every face, inputs and outputs, so hoppers move items both ways and a
   broken block spills its contents (`PreRemove::Contents` for a mod container).
-- **The player surface** (this slice's substitute for the GUI): a storage module
-  in hand installs it; a held stack inserts as much as fits; an empty hand
-  **seals** an unlocked block or **withdraws** a stack from a locked one; and
-  every action answers on the action bar with `stored/capacity item`. The GUI's
-  padlock button is also `/rftoolsstorage lock <x> <y> <z>` (it is how a player
-  unlocks to swap the module), and `/rftoolsstorage info <x> <y> <z>` is the
-  readout the harness reads.
+- **The player surface.** Slice 1's substitute is gone: a plain right click now
+  opens the storage's **menu** (slice 2 below). A **sneak** click keeps the quick
+  path — a storage module in hand installs it, a held stack inserts as much as
+  fits, an empty hand **seals** an unlocked block or **withdraws** a stack from a
+  locked one — and every gesture answers on the action bar with
+  `stored/capacity item`. `/rftoolsstorage lock <x> <y> <z>` is the same padlock
+  from chat (how a player unlocks to swap the module), and
+  `/rftoolsstorage info <x> <y> <z>` is the readout the harness reads.
 
 ## Deliberate deviations
 
@@ -88,10 +91,15 @@ gap 1). The gap list below is the rest of the mod.
    of this slice is the same (contents survive a relaunch and outlive a module
    swap) and it needs no world file; the difference is that one module item
    cannot serve two blocks at once, which upstream's UUID model allows.
-2. **Right-click replaces the GUI** (search/sort/compact/cycle/visible-size are
-   not there), and the padlock is the empty-hand click plus a command. A
-   `MenuProvider` block opens its menu from any face upstream; this port has no
-   menu, so the block does not open one.
+2. **The menu is a slot grid, not upstream's scrollable item list.** Slice 2
+   gives the block its own menu — the 100 storage slots in a 10 x 10 grid, the
+   player's inventory beside it and the padlock on the panel — but the list
+   widget's search, sort, compact, cycle and visible-size controls are not there:
+   the pin's screen is a fixed slot layout, and those controls are the next
+   slice's rules. A plain right click opens it; the quick gestures (module in
+   hand installs, a held stack inserts, an empty hand seals or gives a stack
+   back) are still there but **behind sneak**, as `functionalstorage`'s
+   sneak-click is. The padlock button is the GUI's own lock.
 3. **The `type`/`amount` overlays are declared but never written.** Upstream
    1.21.1 declares them and ships 19 overlay models but never sets either
    (`getRenderLevel()` is a commented-out `// @todo 1.14` stub), so the fill
@@ -101,8 +109,9 @@ gap 1). The gap list below is the rest of the mod.
    defect fixed.
 4. **The container declares the tier-1 slot count** (100). The pin declares a
    block's container once per block, not per instance, so tiers 2-4 (200/300/500
-   slots) cannot be wired through the container path yet; the runtime carries
-   the whole table and its tests.
+   slots) cannot be wired through the container path — and a menu type holds at
+   most 256 slots, so tiers 2 and 3 would not fit beside the player's 36 either.
+   The runtime carries the whole table and its tests.
 5. **A break spills the contents** as loose drops instead of carrying them in
    the item: `minecraft:copy_components` covers only vanilla block entities at
    this pin (ARCHITECTURE §3), and upstream's loot list names `mcjtylib:*`
@@ -131,9 +140,11 @@ None. The two candidates were checked and left alone, on purpose:
   remote storage block.
 - The type modules (`generic`/`oredict`), the filter module, the dump module, the
   storage control module, the tablet, and the crafting grid.
-- The GUI (search, sort, compact, cycle, the padlock button, the module tooltip),
-  the comparator output, JEI/TOP/XNet/RFToolsUtility compat, the
-  `/rftoolsstorage list|restore` commands and the config.
+- The GUI's **list controls** (search, sort, compact, cycle, visible-size), the
+  **module slot and the three card slots** (upstream's GUI has them; here the
+  sneak click installs the module and nothing takes it out), the module tooltip,
+  JEI/TOP/XNet/RFToolsUtility compat, the `/rftoolsstorage list|restore` commands
+  and the config. (The padlock and the storage grid itself are slice 2.)
 - The `rftoolsbase:machine_frame` ingredient and `rftoolsbase`'s casing textures
   in the model chain (the port copied the textures into its own namespace, so
   only the recipe needs RFToolsBase installed).
@@ -146,11 +157,16 @@ retired helper files and their mapping are in
 
 | Hook (SDK 0.2) | What it does |
 |---|---|
-| `register` → `Registrar` | declares the block-entity type `rftoolsstorage:storage_block_entity` over the block, attaches its `BlockEntityPart`, and declares the block's container (100 slots, every face, inputs and outputs, no menu) |
+| `register` → `Registrar` | declares the block-entity type `rftoolsstorage:storage_block_entity` over the block, attaches its `BlockEntityPart`, declares the menu's `MenuPart`, and declares the block's container (100 slots, every face, inputs and outputs) with its menu |
 | `BlockEntityPart::block_entity` | gives `rftoolsstorage:modular_storage` a block entity with empty saved data (the module tier and the lock live in its compound; `Items` are the container's) |
 | `right_click_block` (cancel) | install / insert / seal / withdraw, and the action-bar readout |
 | `register_commands` | `/rftoolsstorage info <pos>` and `/rftoolsstorage lock <pos>` (typed `block_pos`) |
 | `run_mod_command` | their answers |
+| `screen` / `screen_draw` / `screen_click` (BlockEntityPart, API 19/20) | the menu's 366 x 210 layout, the title, the inventory label and the padlock; a press on the padlock's rectangle answers button 0 |
+| `menu_button` (BlockEntityPart, API 20) | the padlock: flip the lock of a storage that has a module, answer on the action bar, push the state into the menu's data slot |
+| `menu_slot_rules` (MenuPart, API 130) | a grid slot takes a stack only while locked, and only when it is empty or holds that same kind |
+| `player_container_open` (API 152) | our menu's open fills the data slot with the block's real lock state (data slots are not saved) |
+| `PlayerRef::open_menu` | the plain click opens the menu itself: the block's `end_rod` template has no use of its own, so the mod asks for it as `BlockMenuProvider` would |
 | ~~`server_tick`~~ | **retired**: it existed only to resend a LAN guest's inventory after the old `native_give_stack`, which bypassed the inventory sync. `PlayerRef::give_stack` is `/give` with the vanilla sync, so the workaround (and its `Mutex` state) is gone, not a gap |
 
 ## Upstream source files read
@@ -369,12 +385,132 @@ for"*, **EXIT 0**. Evidence: `ports/_shared/evidence/rftoolsstorage/sdk-*.log`.
 > **not yet run** on a launcher-built game (no `horizon-launcher` on the build
 > machine).
 
-Skills: superpowers/using-superpowers, brainstorming, writing-plans, test-driven-development, systematic-debugging, verification-before-completion; BeautifulRust/rust-best-practices, rust-port
+## Slice 2 — the storage's menu (version 0.2.2)
+
+The jar's GUI, as far as the pin expresses it: `ModularStorageContainer`'s grid and
+its padlock, not its list widget.
+
+- **The menu.** `data/rftoolsstorage/horizon/menu/modular_storage.json` declares the menu type
+  `rftoolsstorage:modular_storage` (100 slots, 1 data slot, no `results`); the block's
+  container names it, and the click opens it with `PlayerRef::open_menu` — the `end_rod`
+  template has no use of its own, so nothing else would open it. The panel is 366 x 210: the
+  100 slots in a 10 x 10 grid on the left, the player's inventory to its right, the title, the
+  inventory label and a 46 x 16 padlock at the top left. It is under a double chest's 222 px,
+  the tallest screen the smallest vanilla GUI (240 px) holds; the pin's screen layout is fixed
+  when the menu opens, so a scroll could not move a slot — a grid is what fits.
+- **The grid's rule** is upstream's `Slot.mayPlace`: `if (!isLocked()) return false;` then
+  `getItemHandler().isItemValid(...)` — nothing while unlocked, and a slot is empty or already
+  holds that kind (`runtime::slot_accepts`, pinned by a test). The engine's own stack limit
+  (the item's size, never past 64 through the engine's 1..99 clamp) is the per-slot cap.
+- **The padlock** is upstream's `lockButton`: `screen_click` on its rectangle answers button 0,
+  `menu_button` flips the lock of a storage that has a module (`runtime::lock_press`), answers
+  on the action bar, and pushes the state into the menu's one data slot so the button redraws;
+  `player_container_open` fills that slot from the block when the menu opens (data slots are
+  not saved).
+- **The quick gestures stay**, behind sneak: the module install, the whole-stack insert and the
+  seal/withdraw click are unchanged code, and the old e2e's assertions for them still hold.
+
+### Red → green (the menu's rules)
+
+The two rules were written first and stubbed (`slot_accepts` answered `false`, `lock_press`
+always `NoModule`), and the suite was run **before** implementing them
+(`ports/_shared/evidence/rftoolsstorage/slice2-red.log`, `TEST_EXIT:101`):
+
+```
+test runtime::tests::the_grid_takes_a_stack_only_when_locked_and_in_a_slot_of_its_own ... FAILED
+test runtime::tests::the_padlock_needs_a_module_and_then_flips_the_lock ... FAILED
+...
+thread 'runtime::tests::the_grid_takes_a_stack_only_when_locked_and_in_a_slot_of_its_own' panicked at src/runtime.rs:560:9:
+a locked, empty slot takes a stack
+thread 'runtime::tests::the_padlock_needs_a_module_and_then_flips_the_lock' panicked at src/runtime.rs:584:9:
+assertion `left == right` failed
+  left: NoModule
+ right: Locked
+test result: FAILED. 15 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out
+```
+
+Implemented, then **17 passed, 0 failed** (`sdk-test.log`).
+
+### In game (`ports/_shared/evidence/rftoolsstorage-e2e/`)
+
+| Leg | Log | Verdict |
+|---|---|---|
+| default, the launcher-built package | `e2e-menu.log` | **PASS** + `EXIT:0` |
+| control (the same Nightly without the package) | `e2e-menu-control.log` | **PASS** + `EXIT:0` — `{"error":"unknown item rftoolsstorage:modular_storage"}` |
+| counterfactual (a vanilla barrel in the same rig) | `e2e-menu-counterfactual.log` | **PASS** + `EXIT:0` — a 27-slot chest menu whose slot takes the stack the storage refuses |
+| `SELFTEST=1` (asserts a 27-slot menu on the storage) | `e2e-menu-selftest.log` | **FAIL** + `EXIT:1` — *"the storage's menu shows 100 slots, not 27: the grid assertion is alive"* |
+
+What `e2e-menu.log` asserts, in order: the block places; a fresh block reads `0/0 empty no
+module`; **a plain click opens a 100-slot menu** (panel origin from `ctl ui`); with no module
+the grid leaves slot 300 empty and the sneak gesture says `no storage module`; a module
+installs on a sneak click (`0/6400 empty unlocked`); **unlocked, the grid still refuses**
+(`slot 300: '0'`); the **padlock press** locks it (`0/6400 empty locked`); a locked storage
+stores the stack clicked into slot 300 (`64/6400`); **dirt is refused by the stone's slot and
+takes slot 399 — the grid's last one**; a click on slot 300 gives the stack back (`64/6400`);
+`/rftoolsstorage lock` unlocks and re-locks; the harness fills 99 slots to `6400/6400` and a
+further click moves nothing; **one stack withdrawn through the grid** (`6400 -> 6336`) is
+taken back by the sneak gesture (`6400`); a relaunch keeps `6400`, `locked` and the reopened
+grid's slot 300; **the carried `storage_module0` recipe crafts in a real crafting table** (the
+result is the module ×1, in the inventory) while **a stick in the iron's cell and a stone block
+where `rftoolsbase:machine_frame` belongs both craft nothing**; and the barrel leg closes the
+differential.
+
+### Coverage (every jar family in this port)
+
+| Family | State |
+|---|---|
+| `modular_storage` block, its states/models/loot/tag | **tested** (place + read back, `e2e-menu.log`) |
+| the storage slot rules (locked, one kind a slot, 64 a slot, 100 slots) | **tested** (grid clicks in `e2e-menu.log`, rules in `runtime` tests) |
+| the menu: 100-slot grid, the padlock, the screen | **tested** (`e2e-menu.log`) |
+| the quick gestures (module, insert, seal, withdraw) | **tested** (`e2e-menu.log`) |
+| `storage_module0` recipe (chest, 2 gold nuggets, iron ingot, 2 quartz, 2 redstone) | **tested** — crafted in a real crafting table, the result is `rftoolsstorage:storage_module0` ×1 and it reaches the inventory; a stick in the iron's cell crafts nothing (`e2e-menu.log`) |
+| `modular_storage` recipe | **blocked** on `rftoolsbase:machine_frame`: with a stone block in that cell the same pattern crafts nothing, so the frame is what the recipe needs and RFToolsBase is not in this game build (`e2e-menu.log` control) |
+| tiers 2-4 (`storage_module1..3`) | **blocked**(container per block, menu ≤ 256 slots) |
+| the remote module/block, `storage_scanner`, `crafting_manager` | **not ported** (later slices) |
+| the list controls (search/sort/compact/cycle) and the module/card slots in the menu | **not ported** (next slice; the sneak click installs the module, and there is no way to take it out) |
+| commands `info`/`lock` | **tested** (`e2e-menu.log`, parsed replies) |
+| `/rftoolsstorage list|restore`, config, compat | **not ported** |
+
+### Traps this slice paid for
+
+1. **A template block with no use of its own does not open its container's menu.** The engine's
+   block-use path only emits `OpenMenu` for the vanilla classes (`barrel`, `chest`, ..., a
+   `MenuProvider` block); an `end_rod` template has none, so the mod must call
+   `PlayerRef::open_menu` itself. `functionalstorage` hides this by using the `barrel` template.
+2. **`ctl key shift down` needs a tick before `interact`.** Snapshotted in the same tick, the
+   click still reads `is_secondary_use_active() == false` and the plain path runs. `ctl wait 6`
+   between them is what makes the sneak gesture reach the mod (the first three probes missed it).
+3. **A fresh mod block entity's item vector is empty**, not the container's slot count, until
+   something writes through the menu (`put_back` grows it). `ctl container` therefore answers
+   `container is full` on an untouched block; the e2e fills after a click, and the fill loop
+   stops on the first error instead of trusting `script --keep-going`.
+4. **`menu_slot_rules` asks per slot and stack** while a click plans: answer from the block
+   entity's saved compound (one read per slot) and nothing else; a shift-click asks many.
+
+Skills: superpowers/using-superpowers, brainstorming, writing-plans, test-driven-development, systematic-debugging, verification-before-completion; BeautifulRust/rust-best-practices
 
 ## Verification
 
 Full evidence in [`VALIDATION.md`](VALIDATION.md); the e2e logs are in
-`ports/_shared/evidence/rftoolsstorage/`.
+`ports/_shared/evidence/rftoolsstorage-e2e/` (the game legs) and
+`ports/_shared/evidence/rftoolsstorage/` (the ladder, package and fits).
+
+**0.2.2 — the menu (2026-11-21, pin `0a875da`)**
+
+| Step | Command | Result |
+|---|---|---|
+| Red proof | `cargo test` with the two new rules stubbed | **2 failed**, 15 passed (`slice2-red.log`, `TEST_EXIT:101`); evidence quoted above |
+| Runtime + glue tests | `cargo test` | **17 passed**, 0 failed (`sdk-test.log`, `TEST_EXIT:0`) |
+| Lints | `cargo clippy --all-targets -- -D warnings` | `CLIPPY_EXIT:0`, 0 warnings (`sdk-test.log`) |
+| Formatting | `rustfmt --edition 2024 --check src/{lib,support,runtime}.rs` | `FMT_EXIT:0` |
+| SDK gate | `cargo horizon-mod check` | EXIT 0 — *"…uses 372 items of the API (… 12 hooks …). Made for 0a875da."* (`sdk-check.log`) |
+| Package | `rm -f Cargo.lock && cargo horizon-mod build`, twice | 53,878 B, SHA-256 `fd5d7213…fc82`, **`cmp`-identical**; 58 entries, no `Cargo.lock` (`sdk-sha256.txt`) |
+| Package check | `cargo horizon-mod check rftoolsstorage.hmod` | `rftoolsstorage 0.2.2 (native-mod, format native-1/0a875da…/e59da90…, for 26.3)`, EXIT 0 (`sdk-check.log`) |
+| Fits the pin | `cargo horizon-mod fits rftoolsstorage.hmod --build 0a875da` | `0a875da  made for`, EXIT 0 (`sdk-check.log`) |
+| Fits another build | `cargo horizon-mod fits rftoolsstorage.hmod --build 0b14f8a` | `0b14f8a  fits`, EXIT 0 (`sdk-check.log`) |
+| In game | `build-slot.sh run --step e2e -- bash tools/e2e.sh` | **PASS** + `EXIT:0`, `e2e-menu.log`; control `EXIT:0`, counterfactual `EXIT:0`, `SELFTEST=1` **FAIL** + `EXIT:1` (`e2e-menu-*.log`) |
+| e2e gate | `check-e2e-logs.py rftoolsstorage-e2e --strict` | `logs=6 ok=6`, exit 0 |
+| Skills gate | `check-skills.py --notes ports/rftoolsstorage --strict` | `Skills line present`, PASS |
 
 **0.2.0 — the SDK package (2026-11-18)**
 
@@ -388,7 +524,7 @@ Full evidence in [`VALIDATION.md`](VALIDATION.md); the e2e logs are in
 | Package check | `cargo horizon-mod check rftoolsstorage.hmod` | `rftoolsstorage 0.2.0 (native-mod, format native-1/0b14f8a/e59da90, for 26.3)`, **45,351 B**, SHA-256 `d3f57e1e…e1de`, EXIT 0 (`sdk-file-check.log`) |
 | What it uses | `cargo horizon-mod check rftoolsstorage.hmod --uses` | 244 entries (`sdk-uses.json`), EXIT 0 |
 | Fits the pinned build | `cargo horizon-mod fits rftoolsstorage.hmod --build nightly` | *"0b14f8a made for"*, EXIT 0 (`sdk-fits.log`) |
-| `runtime.rs` untouched | `unzip -p rftoolsstorage.hmod src/runtime.rs \| sha256sum` | `01691fc1…8615f4` = the retired file, byte for byte (`sdk-sha256.txt`) |
+| `runtime.rs` untouched (0.2.0 only) | `unzip -p rftoolsstorage.hmod src/runtime.rs \| sha256sum` | `01691fc1…8615f4` = the retired file, byte for byte (`sdk-sha256.txt`, before the review fixes) |
 | Symbols line | `python3 ports/tools/check-skills.py --notes ports/rftoolsstorage` | `Skills line present`, **SKILLS GATE: PASS** (`--strict` exit 0) |
 
 **0.1.0 — the retired `.hnmod` (behaviour evidence, still valid)**
@@ -416,3 +552,33 @@ selftest, and waits for a launcher-built game.
 | e2e counterfactual (vanilla barrel) | **PASS**, `EXIT:0`: the same click stores nothing (`e2e-counterfactual.log`) |
 | `SELFTEST=1` | **FAIL** + `EXIT:1`: the capacity assertion is alive (`e2e-selftest.log`) |
 | `check-e2e-logs.py rftoolsstorage --strict` | exit 0, 5/5 logs |
+
+## Review fixes (2026-11-18)
+
+`var/review-all/1201-rftoolsstorage.md` (the held PR), the one finding fixed; version **0.2.1**
+(46,987 B, sha256 `32f0505ef59a5eb1aa476578430a024bb02e9913edca853cf342bd5d9320a0f6`).
+
+- **Foreign-container wipe through `/rftoolsstorage lock` (src/support.rs:532, :555, :265).**
+  The command took a mutable handle to any addressed block entity; a foreign container decoded as
+  an empty storage, `toggle_lock` returned false, and the write-back still cleared its slots.
+  Three changes: `mutate_checked` refuses a position that is not this mod's modular storage
+  *before* reading a mutable handle (`is_storage`), the lock commits only when `toggle_lock`
+  actually returned true (`Option`-returning change — a failed mutation writes nothing), and both
+  `lock` and `info` are gated to an operator or a player in the same level within 8 blocks.
+  Pure rule: `runtime::may_inspect`, pinned by
+  `a_readout_or_lock_needs_an_operator_reach_or_the_same_level`.
+- **Launcher build needed one dependency change.** The package depended on a second path crate
+  (`horizon-core`, for `JavaString`); `launcher-game.sh run` failed with
+  `error: No such file or directory (os error 2)` because the launcher resolves the API's own SDK
+  only. Saved-compound keys are now read through `Compound::iter` (`support::field`) and written
+  with `KEY.into()`, and `Cargo.toml` depends on `horizon-mod-api` alone. The in-game leg then
+  built and passed.
+- `runtime.rs` gained the reach rule and its test (16 tests total); it is no longer byte-identical
+  to the retired bundle.
+
+Ladder: `cargo test` 15 passed (the runtime's 14 plus the added reach test); `cargo clippy
+--all-targets -- -D warnings` exit 0; `cargo fmt --check`
+clean; `cargo horizon-mod build` twice byte-identical; `check` and `fits` exit 0. In-game:
+`launcher-game.sh run rftoolsstorage` → `PASS` + `EXIT:0`
+(`ports/_shared/evidence/rftoolsstorage-e2e/e2e-launcher.log`); `GAME=$CONTROL_GAME` → `FAIL`
+(`cannot give rftoolsstorage:modular_storage`) + `EXIT:1`.

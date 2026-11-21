@@ -1,22 +1,24 @@
-//! RFTools Storage for Horizon: the modular storage block (slice 1).
+//! RFTools Storage for Horizon: the modular storage block (slice 2).
 //!
-//! One block, `rftoolsstorage:modular_storage`, with a block entity: a storage
-//! module in its slot sets the capacity (tier 1 holds 100 slots, one item kind a
-//! slot, up to 64 a slot), and the block stores nothing until it is **locked**.
-//! Upstream opens a GUI from the block; this slice's player surface is the
-//! right click — a module in hand installs, a held stack inserts, an empty hand
-//! seals an unlocked block or takes a stack out of a locked one — plus
-//! `/rftoolsstorage info|lock`, which stand in for the GUI's readout and padlock.
+//! One block, `rftoolsstorage:modular_storage`, with a block entity and its own
+//! menu: a storage module in its slot sets the capacity (tier 1 holds 100 slots,
+//! one item kind a slot, up to 64 a slot), the block stores nothing until it is
+//! **locked**, and a right click opens the storage's grid — upstream's GUI —
+//! with the padlock on its panel. While sneaking, a click is the quick path
+//! instead: a module in hand installs, a held stack inserts, an empty hand seals
+//! an unlocked block or takes a stack out of a locked one. `/rftoolsstorage
+//! info|lock` remain the readout and the operator's lock.
 //!
 //! [`runtime`] is the pure engine (the module's slot count, one kind a slot, the
-//! lock, the readout text) and [`support`] is the game glue. See `notes.md` for
-//! the slice boundary, the deliberate deviations and the gaps.
+//! lock, the menu's slot and padlock rules, the readout text) and [`support`] is
+//! the game glue. See `notes.md` for the slice boundary, the deliberate
+//! deviations and the gaps.
 pub mod runtime;
 mod support;
 
 use mod_api::{
-    self, Flow, Hooks, HostSide, RegisterCommandsEvent, Registrar, RegistrationContext,
-    RightClickBlockEvent, RunModCommandEvent, ServerHost,
+    self, Flow, Hooks, HostSide, PlayerContainerOpenEvent, RegisterCommandsEvent, Registrar,
+    RegistrationContext, RightClickBlockEvent, RunModCommandEvent, ServerHost,
 };
 
 /// The mod holds no state of its own: the storage is the block entity's saved
@@ -26,12 +28,13 @@ struct Mod;
 
 #[mod_api::horizon_mod]
 impl Hooks for Mod {
-    /// Declare the block-entity type, its Part, and the block's container.
+    /// Declare the block-entity type, its Part, the block's container and its
+    /// menu, and the menu's own slot rules.
     fn register(&self, registrar: &mut dyn Registrar, cx: &RegistrationContext) {
         support::register(registrar, cx);
     }
 
-    /// The block's whole player surface: install, insert, seal, withdraw.
+    /// A plain click opens the menu; a sneaking one is the quick gesture.
     fn right_click_block(&self, host: HostSide<'_>, event: &mut RightClickBlockEvent<'_>) -> Flow {
         support::on_right_click_block(host, event)
     }
@@ -48,5 +51,15 @@ impl Hooks for Mod {
         event: &mut RunModCommandEvent<'_>,
     ) -> Flow {
         support::on_run_mod_command(host, event)
+    }
+
+    /// The menu's padlock reads a data slot, which is not saved: fill it with
+    /// the block's real state when the menu opens.
+    fn player_container_open(
+        &self,
+        host: &mut dyn ServerHost,
+        event: &mut PlayerContainerOpenEvent<'_>,
+    ) {
+        support::on_player_container_open(host, event);
     }
 }

@@ -1,40 +1,51 @@
 #!/usr/bin/env bash
-# In-game check for RFTools Storage slice 1: the modular storage block.
+# In-game check for RFTools Storage slice 2: the modular storage block and its menu.
 #
-# Default run (offscreen renderer, creative launch, then survival where a
-# break must drop):
+# Default run (offscreen renderer, creative launch, then survival where a break
+# must drop):
 #   1. `rftoolsstorage:modular_storage` places and answers its readout
 #      (`0/0 empty no module`);
-#   2. CONTROL A — with no module the block refuses a stack: the readout stays
-#      `0/0`, the stone stays in the hand, the action bar says so;
-#   3. a `storage_module0` in hand installs, and the block reads `0/6400 empty
-#      unlocked`;
-#   4. CONTROL B — unlocked, the block still refuses a stack (upstream's
-#      `if (!isLocked()) return stack`), and nothing is stored;
-#   5. an empty-hand click seals it (the GUI padlock's stand-in) and a
-#      right-click then stores the whole 64-stack;
-#   6. `/rftoolsstorage lock` unlocks it again and re-locks it (the GUI
-#      button's other half, which a module swap needs);
-#   7. a second stack takes a second slot (128 stored: a barrel holds 64);
-#   8. a third kind (dirt) takes its own slot (192 stored, 2 kinds);
-#   9. an empty-hand right-click takes a stack of the first kind back out;
-#  10. a second block filled to 6,400 refuses a stack — and takes it again
-#      after one stack is withdrawn (the control inside the same block);
-#  11. quitting and relaunching the same world keeps both blocks' contents;
-#  12. CONTROL C (COUNTERFACTUAL=1 replaces the block with a vanilla barrel in
-#      the insert phases): the same click does not store, and the readout says
-#      `not a modular storage`.
+#   2. CONTROL A — the plain click opens the storage's own menu (100 slots and
+#      the player's 36, the panel 366 x 210), and with no module neither the menu
+#      nor the sneak gesture stores: the slot stays empty, the readout stays
+#      `0/0`, the stone stays in the hand;
+#   3. a `storage_module0` in hand installs on a sneak click, and the block reads
+#      `0/6400 empty unlocked`;
+#   4. CONTROL B — unlocked, the menu's grid still refuses the stone (upstream's
+#      `if (!isLocked()) return false` on the slot), and so does the gesture;
+#   5. the panel's padlock seals it (upstream's `lockButton`), and a locked
+#      storage stores a stack put into a grid slot (`64/6400`);
+#   6. one kind a slot: dirt is refused by the slot holding stone and takes the
+#      next one (`128/6400`, 2 kinds);
+#   7. a click on a filled grid slot takes the stack back (`64/6400`);
+#   8. `/rftoolsstorage lock` unlocks and re-locks the block (the GUI button's
+#      other half), contents unchanged;
+#   9. the storage fills to 6,400 and the grid refuses the next stack — and takes
+#      it again after one stack is withdrawn through the grid (the control inside
+#      the same block);
+#  10. quitting and relaunching the same world keeps the contents, the lock and
+#      the grid, and the padlock shows the truth on the reopened menu;
+#  11. the carried `storage_module0` recipe crafts in a real crafting table and
+#      the crafted module reaches the inventory; a stick in the iron's cell and
+#      a stone block where `rftoolsbase:machine_frame` belongs craft nothing (the
+#      `modular_storage` recipe needs that mod, which this build does not have);
+#  12. CONTROL C (COUNTERFACTUAL=1 replaces the block with a vanilla barrel):
+#      the same click opens a chest menu with 27 slots, not 100, and the barrel
+#      takes the stack the storage refuses while unlocked — so the 100-slot grid
+#      and its refusal are the port's own code.
 #
-# SELFTEST=1 keeps the scenario but asserts the barrel's 64-item capacity on
-# the storage, so the run MUST fail with a `FAIL:` verdict: the capacity
-# assertion is not vacuous.
+# SELFTEST=1 keeps the scenario and asserts the barrel's 27-slot menu on the
+# storage, so the run MUST fail with a `FAIL:` verdict: the menu assertion is not
+# vacuous.
 #
 # Since the SDK migration (2026-11-18) the mod is one flat `.hmod` the launcher
 # compiles into the game, so GAME must name a game the launcher built with it:
-#   horizon-launcher native-build ports/rftoolsstorage --instance <instance> --trust-native-code
-# and then `GAME=<that horizon-client> tools/e2e.sh`. The retired `--dev-mod` and
-# the embedded/control legs (one `.hnmod` writing its own content out) are gone
-# with the format; the scenario, the counterfactual and the selftest remain.
+#   ports/tools/launcher-game.sh build rftoolsstorage
+#   eval "$(ports/tools/launcher-game.sh env rftoolsstorage)"
+#   build-slot.sh run --job e2e-rftoolsstorage --port ports/rftoolsstorage --step e2e -- bash tools/e2e.sh
+# The retired `--dev-mod` and the embedded legs (one `.hnmod` writing its own
+# content out) are gone with the format; the scenario, the counterfactual and the
+# selftest remain.
 set -euo pipefail
 
 CLONE=/home/adlf/Desktop/all_the_mods_10_rust_rewrite
@@ -44,6 +55,7 @@ SHARED=$CLONE/ports/_shared/bin/horizon-1d63e0a5
 # the shared one speaks the same control protocol at this pin.
 CTL=${CTL:-$SHARED/horizon-ctl}
 GAME=${GAME:-$PORT/target/horizon-cargo/fast/horizon-client}
+CONTROL_GAME=${CONTROL_GAME:-}
 RES=${RES:-${HORIZON_RES:-/home/adlf/Desktop/horizon/.local/horizon-client/26.3}}
 SOCK=${SOCK:-/tmp/opencode/rftoolsstorage-e2e.sock}
 COUNTERFACTUAL=${COUNTERFACTUAL:-0}
@@ -52,9 +64,17 @@ SELFTEST=${SELFTEST:-0}
 STORAGE=rftoolsstorage:modular_storage
 MODULE=rftoolsstorage:storage_module0
 CAPACITY=6400
+# The port's menu: 100 storage slots, then the player's 36. The panel is
+# 366 x 210 (`src/support.rs`), and the padlock sits at [8, 6] with a 46 x 16
+# rectangle, so its centre is (31, 14) from the panel's top left.
+MENU_SLOTS=100
+PANEL_W=366
+PANEL_H=210
+LOCK_X=31
+LOCK_Y=14
 
 [ -x "$CTL" ] || { echo "missing horizon-ctl: $CTL" >&2; exit 1; }
-[ -x "$GAME" ] || { echo "missing horizon-client: $GAME (build it with horizon-launcher native-build)" >&2; exit 1; }
+[ -x "$GAME" ] || { echo "missing horizon-client: $GAME (build it with ports/tools/launcher-game.sh)" >&2; exit 1; }
 [ -d "$RES/assets" ] || { echo "missing prepared resources: $RES" >&2; exit 1; }
 
 SCRATCH=$(mktemp -d "${E2E_TMP:-/tmp/opencode}"/rftoolsstorage-home.XXXXXX)
@@ -82,7 +102,82 @@ info_amount() { info "$1" "$2" "$3" | sed -n 's/.*: \([0-9][0-9]*\)\/[0-9][0-9]*
 info_state() { info "$1" "$2" "$3" | sed -n 's/.* \([a-z][a-z ]*\)$/\1/p'; }
 lock() { reply lock "$1" "$2" "$3"; }
 action_bar() { ctl messages 10 | jq -r '.actionbar // ""'; }
+# The plain click: upstream's GUI. The sneak click: this port's quick gesture.
 use() { ctl interact "$1" "$2" "$3" "$4" >/dev/null; ctl wait 6 >/dev/null; }
+quick() {
+    ctl key shift down >/dev/null
+    ctl wait 6 >/dev/null
+    ctl interact "$1" "$2" "$3" "$4" >/dev/null
+    ctl key shift up >/dev/null
+    ctl wait 6 >/dev/null
+}
+# --- the open menu ---------------------------------------------------------
+menu_slots() { ctl screen | jq '[.slots[]? | select(.slot >= 300)] | length'; }
+slot_item() { ctl screen | jq -r --arg s "$1" '[.slots[]? | select((.slot|tostring) == $s) | .item] | first // ""'; }
+slot_count() { ctl screen | jq -r --arg s "$1" '[.slots[]? | select((.slot|tostring) == $s) | .count] | first // 0'; }
+inv_slot() { ctl screen | jq -r --arg i "$1" '[.slots[]? | select(.slot < 300 and .item == $i) | .slot] | first // ""'; }
+empty_inv_slot() { ctl screen | jq -r '[.slots[]? | select(.slot < 36 and ((.item // "") == "")) | .slot] | first // ""'; }
+craft_slot() { ctl screen | jq -r --arg s "$1" '[.slots[]? | select((.slot|tostring) == $s) | .item] | first // ""'; }
+# One ingredient into a crafting grid cell: pick the stack up, right-click the
+# cell (which places one), put the rest back.
+place_one() {
+    local item=$1 cell=$2 src
+    src=$(ctl screen | jq -r --arg i "$item" '[.slots[]? | select(.slot < 36 and .item == $i) | .slot] | first // ""')
+    [ -n "$src" ] || fail "no $item in the inventory for the recipe"
+    ctl click-slot "$src" >/dev/null
+    ctl wait 1 >/dev/null
+    ctl click-slot "$cell" right >/dev/null
+    ctl wait 1 >/dev/null
+    ctl click-slot "$src" >/dev/null
+    ctl wait 1 >/dev/null
+}
+# A crafting table at the given spot with the grid open (the harness's recipe path).
+open_table() { # x y z
+    ctl close >/dev/null 2>&1 || true
+    ctl wait 2 >/dev/null
+    ctl setblock "$1" "$2" "$3" minecraft:air >/dev/null
+    ctl setblock "$1" "$2" "$3" minecraft:crafting_table >/dev/null
+    ctl wait 2 >/dev/null
+    ctl command "execute in minecraft:overworld run tp @s $(( $1 - 1 )).5 $2 $(( $3 )).5" >/dev/null
+    ctl wait 4 >/dev/null
+    ctl interact "$1" "$2" "$3" >/dev/null || fail "the crafting table did not take the click"
+    ctl wait 6 >/dev/null
+    # The crafting table's screen reports `inventory` in this build; its grid is
+    # slots 100..108 with the result at 200 (36 + 9 + 1).
+    grid=$(ctl screen | jq '[.slots[]? | select(.slot >= 100)] | length')
+    [ "$grid" = 10 ] || fail "the crafting table did not open its grid ($grid grid slots)"
+}
+panel_origin() {
+    local ui w h
+    ui=$(ctl ui)
+    w=$(jq -r '.gui_size[0] | floor' <<<"$ui")
+    h=$(jq -r '.gui_size[1] | floor' <<<"$ui")
+    OX=$(( (w - PANEL_W) / 2 ))
+    OY=$(( (h - PANEL_H) / 2 ))
+}
+open_menu() { # open_menu X Y Z FACE -> the storage's menu, panel origin in OX/OY
+    ctl close >/dev/null 2>&1 || true
+    ctl wait 4 >/dev/null
+    use "$1" "$2" "$3" "$4" || true
+    ctl wait-for screen container --timeout 10 >/dev/null \
+        || fail "the click did not open a menu (screen=$(ctl state | jq -r '.screen // ""'))"
+    panel_origin
+}
+press_lock() { ctl click-at "$((OX + LOCK_X))" "$((OY + LOCK_Y))" >/dev/null || fail "the padlock press did not send"; ctl wait 6 >/dev/null; }
+# Puts the stack the player holds in `ITEM` on the cursor: a left click on its
+# inventory slot. Prints that slot, which is empty until the stack goes back.
+carry() {
+    local slot
+    slot=$(inv_slot "$1")
+    [ -n "$slot" ] || fail "no $1 in the inventory to carry"
+    ctl click-slot "$slot" >/dev/null || fail "cannot pick $1 up"
+    ctl wait 2 >/dev/null
+    echo "$slot"
+}
+put_back() { # put_back SLOT: the cursor stack into inventory slot SLOT
+    ctl click-slot "$1" >/dev/null
+    ctl wait 2 >/dev/null
+}
 
 cleanup() {
     local status=$?
@@ -95,7 +190,7 @@ trap cleanup EXIT
 
 launch() {
     "$CTL" --socket "$SOCK" launch \
-        --game "$GAME" --world RFToolsStorageE2E --seed 20261105 --creative --offscreen --wait \
+        --game "$1" --world RFToolsStorageE2E --seed 20261105 --creative --offscreen --wait \
         --game-dir "$SCRATCH/game" --resources "$RES" >/dev/null
     ctl wait-ready 180 >/dev/null
     if grep -q "content mods not loaded" "${SOCK}.log" 2>/dev/null; then
@@ -104,8 +199,24 @@ launch() {
     fi
 }
 
+if [ -n "$CONTROL_GAME" ]; then
+    say "control: the game without the package does not know the storage"
+    launch "$CONTROL_GAME"
+    ctl command "fill -8 100 -8 8 100 8 minecraft:stone" >/dev/null
+    ctl command "fill -8 101 -8 8 110 8 minecraft:air" >/dev/null
+    ctl tp 0.5 101 3.5 >/dev/null
+    ctl wait 20 >/dev/null
+    if ctl give "$STORAGE" 1 2>/dev/null | grep -q '"ok":true'; then
+        fail "the package-less game gave $STORAGE (the control is not a control)"
+    fi
+    got=$(ctl give "$STORAGE" 1 2>&1 || true)
+    echo "control give: $got"
+    echo "PASS: without the package the block does not exist, so nothing of this scenario can run"
+    exit 0
+fi
+
 say "launch (offscreen renderer, creative)"
-launch
+launch "$GAME"
 
 say "an Overworld platform at y=100, away from the terrain"
 PX=$(ctl state | jq -r '.player.position[0]' | cut -d. -f1)
@@ -146,21 +257,25 @@ ctl look-at block "$X" "$Y" "$Z1" "$facing" >/dev/null || fail "cannot aim at th
 ctl wait 6
 
 if [ "$COUNTERFACTUAL" = 1 ]; then
-    say "counterfactual: a vanilla barrel is not a modular storage"
+    say "counterfactual: a vanilla barrel opens a chest menu, not the storage's grid"
     line=$(info "$X" "$Y" "$Z1")
     echo "readout: $line"
     echo "$line" | grep -q 'not a modular storage' || fail "the barrel answered as a storage: $line"
     ctl command "clear @s" >/dev/null
     ctl give minecraft:stone 64 >/dev/null
     ctl wait 4
-    ctl select minecraft:stone >/dev/null
-    ctl wait 4
-    use "$X" "$Y" "$Z1" "$facing" || true
+    open_menu "$X" "$Y" "$Z1" "$facing"
+    barrel_slots=$(menu_slots)
+    echo "the barrel's menu shows $barrel_slots container slots"
+    [ "$barrel_slots" = 27 ] || fail "the barrel's menu shows $barrel_slots slots, expected 27 (our storage's 100 would mean the grid is not ours)"
+    carry minecraft:stone
+    ctl click-slot 300 >/dev/null
+    ctl wait 2 >/dev/null
+    barrel_stone=$(slot_count 300)
+    echo "the barrel took $barrel_stone into its first slot (the storage refuses an unlocked stack)"
+    [ "$barrel_stone" = 64 ] || fail "the barrel took $barrel_stone, expected 64"
     ctl close >/dev/null 2>&1 || true
-    left=$(count_item minecraft:stone)
-    echo "stone left in the hand after the barrel click: $left"
-    [ "$left" -eq 64 ] || fail "the barrel swallowed the stone (a chest menu is not a storage)"
-    echo "PASS: the same click does not store in a barrel; the storage behaviour is the port's own code"
+    echo "PASS: the same click opens a 27-slot chest menu on a barrel and its slot takes the stack, so the 100-slot grid and the locked-only rule are the port's own" 
     exit 0
 fi
 
@@ -169,13 +284,24 @@ line=$(info "$X" "$Y" "$Z1")
 echo "readout: $line"
 echo "$line" | grep -q "^$STORAGE: 0/0 empty no module$" || fail "unexpected empty readout: $line"
 
-say "CONTROL A: with no module the block refuses a stack"
+say "CONTROL A: the plain click opens the storage's menu, and with no module it stores nothing"
 ctl command "clear @s" >/dev/null
 ctl give minecraft:stone 64 >/dev/null || fail "cannot give stone"
 ctl wait 6
-ctl select minecraft:stone >/dev/null || fail "cannot select stone"
-ctl wait 6
-use "$X" "$Y" "$Z1" "$facing"
+open_menu "$X" "$Y" "$Z1" "$facing"
+slots=$(menu_slots)
+echo "panel origin $OX,$OY; the menu shows $slots container slots"
+[ "$slots" = "$MENU_SLOTS" ] || fail "the menu shows $slots container slots, expected $MENU_SLOTS"
+src=$(carry minecraft:stone)
+ctl click-slot 300 >/dev/null
+ctl wait 2 >/dev/null
+taken=$(slot_count 300)
+echo "slot 300 after the click with no module: '$taken' (the stack stays on the cursor)"
+[ "${taken:-0}" = 0 ] || fail "a storage with no module took $taken into slot 300"
+put_back "$src"
+ctl close >/dev/null 2>&1 || true
+ctl wait 4 >/dev/null
+quick "$X" "$Y" "$Z1" "$facing"
 bar=$(action_bar)
 amount=$(info_amount "$X" "$Y" "$Z1")
 left=$(count_item minecraft:stone)
@@ -187,13 +313,13 @@ esac
 [ "${amount:-0}" = 0 ] || fail "a storage with no module stored $amount"
 [ "$left" = 64 ] || fail "the block took $((64 - left)) stone without a module"
 
-say "a storage module installs from the hand"
+say "a storage module installs from the hand (sneak click)"
 ctl command "clear @s" >/dev/null
 ctl give "$MODULE" 1 >/dev/null || fail "cannot give the module"
 ctl wait 6
 ctl select "$MODULE" >/dev/null || fail "cannot select the module"
 ctl wait 6
-use "$X" "$Y" "$Z1" "$facing"
+quick "$X" "$Y" "$Z1" "$facing"
 bar=$(action_bar)
 line=$(info "$X" "$Y" "$Z1")
 modules=$(count_item "$MODULE")
@@ -201,13 +327,21 @@ echo "action bar: '$bar'; readout: $line; modules in the hand: $modules"
 echo "$line" | grep -q "^$STORAGE: 0/$CAPACITY empty unlocked$" || fail "unexpected readout after the module: $line"
 [ "$modules" = 0 ] || fail "the module was not taken from the hand"
 
-say "CONTROL B: unlocked, the block still refuses a stack"
+say "CONTROL B: unlocked, the menu's grid still refuses a stack"
 ctl command "clear @s" >/dev/null
 ctl give minecraft:stone 64 >/dev/null
 ctl wait 6
-ctl select minecraft:stone >/dev/null
-ctl wait 6
-use "$X" "$Y" "$Z1" "$facing"
+open_menu "$X" "$Y" "$Z1" "$facing"
+src=$(carry minecraft:stone)
+ctl click-slot 300 >/dev/null
+ctl wait 2 >/dev/null
+refused=$(slot_count 300)
+echo "slot 300 after the unlocked click: '$refused'"
+[ "${refused:-0}" = 0 ] || fail "an unlocked storage took $refused into slot 300"
+put_back "$src"
+ctl close >/dev/null 2>&1 || true
+ctl wait 4 >/dev/null
+quick "$X" "$Y" "$Z1" "$facing"
 bar=$(action_bar)
 amount=$(info_amount "$X" "$Y" "$Z1")
 left=$(count_item minecraft:stone)
@@ -219,28 +353,72 @@ esac
 [ "${amount:-0}" = 0 ] || fail "an unlocked storage stored $amount"
 [ "$left" = 64 ] || fail "an unlocked storage took $((64 - left)) stone"
 
-say "an empty-hand click seals it (the GUI padlock's stand-in)"
+say "the panel's padlock seals it (upstream's lockButton)"
 ctl command "clear @s" >/dev/null
 ctl wait 4
-use "$X" "$Y" "$Z1" "$facing"
+open_menu "$X" "$Y" "$Z1" "$facing"
+press_lock
 bar=$(action_bar)
 line=$(info "$X" "$Y" "$Z1")
 echo "action bar: '$bar'; readout: $line"
-echo "$line" | grep -q "^$STORAGE: 0/$CAPACITY empty locked$" || fail "the empty-hand click did not lock: $line"
+echo "$line" | grep -q "^$STORAGE: 0/$CAPACITY empty locked$" || fail "the padlock did not lock: $line"
 
-say "a locked storage stores a whole stack"
+say "a locked storage stores the stack put into a grid slot"
 ctl command "clear @s" >/dev/null
 ctl give minecraft:stone 64 >/dev/null
 ctl wait 6
-ctl select minecraft:stone >/dev/null
-ctl wait 6
-use "$X" "$Y" "$Z1" "$facing"
-bar=$(action_bar)
+open_menu "$X" "$Y" "$Z1" "$facing"
+carry minecraft:stone >/dev/null
+ctl click-slot 300 >/dev/null
+ctl wait 4 >/dev/null
+stored=$(slot_count 300)
+item=$(slot_item 300)
+echo "slot 300 now: '$stored $item'"
+[ "$stored" = 64 ] || fail "slot 300 holds $stored, expected 64"
+[ "$item" = minecraft:stone ] || fail "slot 300 holds $item, expected minecraft:stone"
+ctl close >/dev/null 2>&1 || true
 amount=$(info_amount "$X" "$Y" "$Z1")
 left=$(count_item minecraft:stone)
-echo "action bar: '$bar'; stored: $amount; stone in the hand: $left"
+echo "stored: $amount; stone in the hand: $left"
 [ "$amount" = 64 ] || fail "the storage holds $amount, expected 64"
 [ "$left" = 0 ] || fail "the storage left $left stone in the hand"
+
+say "one kind a slot: dirt is refused by the stone's slot and takes the grid's last one"
+ctl command "clear @s" >/dev/null
+ctl give minecraft:dirt 64 >/dev/null
+ctl wait 6
+open_menu "$X" "$Y" "$Z1" "$facing"
+carry minecraft:dirt >/dev/null
+ctl click-slot 300 >/dev/null
+ctl wait 2 >/dev/null
+still=$(slot_item 300)
+echo "slot 300 after the dirt click: '$still' (stone keeps its slot)"
+[ "$still" = minecraft:stone ] || fail "slot 300 became '$still', expected the stone to stay"
+ctl click-slot 399 >/dev/null
+ctl wait 4 >/dev/null
+dirt=$(slot_count 399)
+echo "slot 399 (the last of the grid) now holds $dirt dirt"
+[ "$dirt" = 64 ] || fail "slot 399 holds '$dirt', expected 64 dirt"
+ctl close >/dev/null 2>&1 || true
+line=$(info "$X" "$Y" "$Z1")
+echo "readout: $line"
+echo "$line" | grep -q "^$STORAGE: 128/$CAPACITY minecraft:stone locked$" || fail "unexpected readout after the dirt: $line"
+
+say "a click on a filled grid slot takes the stack back"
+open_menu "$X" "$Y" "$Z1" "$facing"
+ctl click-slot 300 >/dev/null
+ctl wait 2 >/dev/null
+dst=$(empty_inv_slot)
+[ -n "$dst" ] || fail "no empty inventory slot for the withdrawn stone"
+ctl click-slot "$dst" >/dev/null || fail "cannot put the withdrawn stone into the inventory"
+ctl wait 4 >/dev/null
+amount=$(info_amount "$X" "$Y" "$Z1")
+stone=$(count_item minecraft:stone)
+echo "stored: $amount; stone in the inventory: $stone"
+[ "$stone" = 64 ] || fail "the grid gave $stone stone, expected 64"
+[ "$amount" = 64 ] || fail "the storage holds $amount after the withdrawal, expected 64"
+[ "$(count_item minecraft:dirt)" = 0 ] || fail "the withdrawal took the wrong kind"
+ctl close >/dev/null 2>&1 || true
 
 say "the lock command unlocks and re-locks it (the GUI button's other half)"
 line=$(lock "$X" "$Y" "$Z1")
@@ -253,98 +431,74 @@ echo "lock command: '$line' then '$line2'"
 amount=$(info_amount "$X" "$Y" "$Z1")
 [ "$amount" = 64 ] || fail "the lock toggle changed the contents to $amount"
 
-say "a second stack takes a second slot (a barrel holds 64)"
-ctl command "clear @s" >/dev/null
-ctl give minecraft:stone 64 >/dev/null
-ctl wait 6
-ctl select minecraft:stone >/dev/null
-ctl wait 6
-use "$X" "$Y" "$Z1" "$facing"
-amount=$(info_amount "$X" "$Y" "$Z1")
-echo "stored: $amount"
-[ "$amount" = 128 ] || fail "the storage holds $amount, expected 128 (two slots)"
-
-say "another kind takes its own slot"
-ctl command "clear @s" >/dev/null
-ctl give minecraft:dirt 64 >/dev/null
-ctl wait 6
-ctl select minecraft:dirt >/dev/null
-ctl wait 6
-use "$X" "$Y" "$Z1" "$facing"
-line=$(info "$X" "$Y" "$Z1")
-dirt=$(count_item minecraft:dirt)
-echo "readout: $line; dirt in the hand: $dirt"
-echo "$line" | grep -q "^$STORAGE: 192/$CAPACITY minecraft:stone locked$" || fail "unexpected readout after the dirt: $line"
-[ "$dirt" = 0 ] || fail "the storage left $dirt dirt in the hand"
-
-say "an empty-hand click takes a stack of the first kind back out"
-ctl command "clear @s" >/dev/null
-ctl wait 4
-use "$X" "$Y" "$Z1" "$facing"
-bar=$(action_bar)
-amount=$(info_amount "$X" "$Y" "$Z1")
-stone=$(count_item minecraft:stone)
-echo "action bar: '$bar'; stored: $amount; stone in the hand: $stone"
-[ "$stone" = 64 ] || fail "the storage gave $stone stone, expected 64"
-[ "$amount" = 128 ] || fail "the storage holds $amount after the withdrawal, expected 128"
-[ "$(count_item minecraft:dirt)" = 0 ] || fail "the withdrawal took the wrong kind"
-
-say "fill the storage to its tier-1 capacity (6,400) and watch it refuse more"
+say "fill the storage to its tier-1 capacity (6,400) and watch the grid refuse more"
 # The harness fills the block entity's own container slots (`ctl container`
-# writes slot by slot, first empty first); the refusal below is the mod's own
-# insert path, and the extra lines fail harmlessly once the slots are full.
-python3 -c "
-import sys
-x, y, z = sys.argv[1:4]
-print(chr(10).join(f'container {x} {y} {z} minecraft:stone 64' for _ in range(120)))
-" "$X" "$Y" "$Z1" > "$SCRATCH/fill.txt"
-# `script --keep-going` still reports the last failure, and the last lines of
-# this file hit "container is full": the readout below is the assertion.
-ctl script "$SCRATCH/fill.txt" --keep-going >/dev/null || true
+# writes slot by slot, first empty first, and answers an error once they are all
+# taken); the refusal below is the storage's own capacity, and the readout is
+# the assertion.
+writes=0
+while [ "$writes" -lt 120 ]; do
+    if ctl container "$X" "$Y" "$Z1" minecraft:stone 64 | jq -e 'has("error") | not' >/dev/null 2>&1; then
+        writes=$((writes + 1))
+    else
+        break
+    fi
+done
+echo "the harness filled $writes slots"
 line=$(info "$X" "$Y" "$Z1")
 echo "readout: $line"
 echo "$line" | grep -q "^$STORAGE: $CAPACITY/$CAPACITY minecraft:stone locked$" || fail "the filled storage reads: $line"
+open_menu "$X" "$Y" "$Z1" "$facing"
 ctl command "clear @s" >/dev/null
 ctl give minecraft:stone 64 >/dev/null
 ctl wait 6
-ctl select minecraft:stone >/dev/null
-ctl wait 6
-use "$X" "$Y" "$Z1" "$facing"
-bar=$(action_bar)
+slot=$(carry minecraft:stone)
+ctl click-slot 300 >/dev/null
+ctl wait 2 >/dev/null
+full_item=$(slot_item 300)
+full_count=$(slot_count 300)
+echo "slot 300 with the storage full: '$full_count $full_item' (nothing fits, the stack stays on the cursor)"
+[ "$full_item" = minecraft:stone ] || fail "slot 300 holds '$full_item'"
+[ "$full_count" = 64 ] || fail "slot 300 holds $full_count, expected its own 64"
+put_back "$slot"
+ctl close >/dev/null 2>&1 || true
 amount=$(info_amount "$X" "$Y" "$Z1")
 left=$(count_item minecraft:stone)
-echo "action bar: '$bar'; stored: $amount; stone in the hand: $left"
-case "$bar" in
-    *full*) ;;
-    *) fail "a full storage did not say it is full: '$bar'" ;;
-esac
+echo "stored: $amount; stone in the hand: $left"
 [ "$amount" = "$CAPACITY" ] || fail "a full storage changed to $amount"
 [ "$left" = 64 ] || fail "a full storage took $((64 - left)) stone"
 
-say "…and takes a stack again once one is withdrawn (the control inside the block)"
-ctl command "clear @s" >/dev/null
-ctl wait 4
-use "$X" "$Y" "$Z1" "$facing"
-withdrawn=$(count_item minecraft:stone)
+say "…and takes it again once one stack is withdrawn through the grid"
+inv_before=$(count_item minecraft:stone)
+open_menu "$X" "$Y" "$Z1" "$facing"
+ctl click-slot 300 >/dev/null
+ctl wait 2 >/dev/null
+dst=$(empty_inv_slot)
+[ -n "$dst" ] || fail "no empty inventory slot for the withdrawn stack"
+ctl click-slot "$dst" >/dev/null || fail "cannot put the withdrawn stack into the inventory"
+ctl wait 6 >/dev/null
+withdrawn=$(( $(count_item minecraft:stone) - inv_before ))
 before=$(info_amount "$X" "$Y" "$Z1")
+ctl close >/dev/null 2>&1 || true
+ctl wait 4 >/dev/null
 ctl select minecraft:stone >/dev/null
-ctl wait 6
-use "$X" "$Y" "$Z1" "$facing"
+ctl wait 6 >/dev/null
+quick "$X" "$Y" "$Z1" "$facing"
 amount=$(info_amount "$X" "$Y" "$Z1")
 left=$(count_item minecraft:stone)
-echo "withdrew $withdrawn ($CAPACITY -> $before), re-inserted: stored $amount, stone in the hand: $left"
+echo "the grid gave $withdrawn ($CAPACITY -> $before); the gesture took it back: stored $amount, stone in the inventory $inv_before -> $left"
 [ "$withdrawn" = 64 ] || fail "the withdrawal from the full storage gave $withdrawn"
 [ "$before" = "$((CAPACITY - 64))" ] || fail "the withdrawal left $before stored, expected $((CAPACITY - 64))"
 [ "$amount" = "$CAPACITY" ] || fail "the storage did not take the stack back: $amount"
-[ "$left" = 0 ] || fail "the storage left $left stone in the hand"
+[ "$left" = "$inv_before" ] || fail "the re-inserted stack left $left in the inventory, expected $inv_before"
 
-say "the contents survive a relaunch"
+say "the contents, the lock and the grid survive a relaunch"
 before1=$(info_amount "$X" "$Y" "$Z1")
 echo "quit with $before1 stored"
 ctl quit >/dev/null 2>&1 || true
 sleep 5
 rm -f "$SOCK"
-launch
+launch "$GAME"
 ctl wait 20 >/dev/null
 after1=$(info_amount "$X" "$Y" "$Z1")
 state1=$(info_state "$X" "$Y" "$Z1")
@@ -352,10 +506,93 @@ echo "relaunch: $before1 -> $after1 (state $state1)"
 [ "$(block_name "$X" "$Y" "$Z1")" = "$STORAGE" ] || fail "the storage is gone after the relaunch"
 [ "$after1" = "$before1" ] || fail "the relaunch changed the storage $before1 -> $after1"
 [ "$state1" = "locked" ] || fail "the lock did not survive the relaunch (state $state1)"
+open_menu "$X" "$Y" "$Z1" "$facing"
+reopened=$(slot_count 300)
+unlocked_bar=$(action_bar)
+echo "the reopened grid shows $reopened in slot 300; action bar: '$unlocked_bar'"
+[ "$reopened" = 64 ] || fail "the reopened grid shows $reopened in slot 300, expected 64"
+
+say "the carried storage-module recipe crafts in a real crafting table"
+TX=$((X + 4))
+TY=$Y
+TZ=$Z1
+ctl command "clear @s" >/dev/null
+for item in minecraft:chest minecraft:gold_nugget minecraft:iron_ingot minecraft:quartz minecraft:redstone; do
+    ctl give "$item" 4 >/dev/null
+done
+ctl wait 8
+open_table "$TX" "$TY" "$TZ"
+# " C " / "gig" / "qrq": chest 101, gold nuggets 103 and 105, iron ingot 104,
+# quartz 106 and 108, redstone 107.
+place_one minecraft:chest 101
+place_one minecraft:gold_nugget 103
+place_one minecraft:iron_ingot 104
+place_one minecraft:gold_nugget 105
+place_one minecraft:quartz 106
+place_one minecraft:redstone 107
+place_one minecraft:quartz 108
+made=$(ctl screen | jq -r '[.slots[]? | select(.slot == 200) | "\(.item) x\(.count)"] | first // "empty"')
+echo "the grid's result: '$made'"
+[ "$made" = "$MODULE x1" ] || fail "the module recipe's result is '$made', expected $MODULE x1"
+ctl click-slot 200 >/dev/null || fail "cannot take the crafted module"
+ctl wait 2 >/dev/null
+dst=$(empty_inv_slot)
+ctl click-slot "$dst" >/dev/null || fail "cannot put the crafted module into the inventory"
+ctl wait 4 >/dev/null
+crafted=$(count_item "$MODULE")
+echo "crafted modules in the inventory: $crafted"
+[ "$crafted" = 1 ] || fail "the crafted module reached the inventory as $crafted"
+ctl close >/dev/null 2>&1 || true
+ctl wait 4 >/dev/null
+
+say "control: a stick in the iron's cell, and a block where the machine frame goes, craft nothing"
+ctl command "clear @s" >/dev/null
+for item in minecraft:chest minecraft:gold_nugget minecraft:stick minecraft:quartz minecraft:redstone; do
+    ctl give "$item" 4 >/dev/null
+done
+ctl wait 8
+open_table "$TX" "$TY" "$TZ"
+place_one minecraft:chest 101
+place_one minecraft:gold_nugget 103
+place_one minecraft:stick 104
+place_one minecraft:gold_nugget 105
+place_one minecraft:quartz 106
+place_one minecraft:redstone 107
+place_one minecraft:quartz 108
+empty_result=$(ctl screen | jq -r '[.slots[]? | select(.slot == 200) | .item] | first // "empty"')
+echo "the module recipe with a stick instead of iron: '$empty_result'"
+[ "$empty_result" = "empty" ] || fail "a stick crafted $empty_result in the iron's cell"
+ctl close >/dev/null 2>&1 || true
+ctl wait 4 >/dev/null
+# The modular_storage recipe needs `rftoolsbase:machine_frame`, a mod that is
+# not in this build: the same pattern with a stone block there crafts nothing.
+ctl command "clear @s" >/dev/null
+for item in minecraft:chest minecraft:stone minecraft:quartz minecraft:redstone; do
+    ctl give "$item" 8 >/dev/null
+done
+ctl wait 8
+open_table "$TX" "$TY" "$TZ"
+# "rCr" / "qFq" / "rqr": redstone in 100/102/106/108, chest 101, quartz 103/105,
+# stone where the machine frame belongs (104).
+place_one minecraft:redstone 100
+place_one minecraft:chest 101
+place_one minecraft:redstone 102
+place_one minecraft:quartz 103
+place_one minecraft:stone 104
+place_one minecraft:quartz 105
+place_one minecraft:redstone 106
+place_one minecraft:redstone 108
+no_frame=$(ctl screen | jq -r '[.slots[]? | select(.slot == 200) | .item] | first // "empty"')
+echo "the storage recipe with a stone block where rftoolsbase:machine_frame belongs: '$no_frame'"
+[ "$no_frame" = "empty" ] || fail "a stone block crafted $no_frame in the machine frame's cell"
+ctl close >/dev/null 2>&1 || true
+ctl wait 4 >/dev/null
 
 if [ "$SELFTEST" = 1 ]; then
-    say "SELFTEST: assert the barrel's 64-item capacity on the storage (must fail)"
-    [ "$after1" = 64 ] || fail "the storage holds $after1, not 64: the capacity assertion is alive"
+    say "SELFTEST: assert the barrel's 27-slot menu on the storage (must fail)"
+    slots=$(menu_slots)
+    [ "$slots" = 27 ] || fail "the storage's menu shows $slots slots, not 27: the grid assertion is alive"
 fi
 
-echo "PASS: the modular storage refuses items with no module and while unlocked, stores 64-stack slots (128 in two, 192 with a second kind), gives a stack back, reads 6400/6400 when full and refuses more (taking it again after a withdrawal), keeps its contents and lock across a relaunch, and a barrel does not behave this way"
+ctl close >/dev/null 2>&1 || true
+echo "PASS: the plain click opens the storage's own 100-slot menu and the padlock on its panel seals it, the carried storage-module recipe crafts in a crafting table (and a stick/a block where its keys are crafts nothing), the grid refuses stacks with no module and while unlocked (one kind a slot), stores and gives back stacks by click, reads 6400/6400 when full and refuses more (taking it again after a withdrawal), keeps its contents, lock and grid across a relaunch, and a barrel's chest menu and unlocked slot do not behave this way"

@@ -158,6 +158,25 @@ The modules are `stacksTo(1)` items.
   windowed click path in a headless harness, so this slice's player surface is
   right-click, see `notes.md`.
 
+### The GUI (read for slice 2)
+
+`ModularStorageContainer.java` and `client/GuiModularStorage.java`:
+
+- the container has a **storage module card slot** (`SLOT_STORAGE_MODULE = 0`, `mayPlace` is
+  `if (isLocked()) return false` then "a `StorageModuleItem`"), a type-module slot
+  (`SLOT_TYPE_MODULE = 1`, `@todo 1.14` — no longer supported), a filter slot (2) and the storage
+  grid from index 3 (`MAXSIZE_STORAGE = 500`, "`@todo` should be max of all possible storages");
+- the grid's slots are placed at `(-500, -500)` — dummy positions — because
+  `GuiModularStorage` draws a **scrollable item list** (`WidgetList itemList`) with a search
+  field, view/sort/group mode choices, a `ToggleButton lockButton`, a cycle and a compact
+  button. Each grid `Slot.mayPlace` is `if (!isLocked()) return false;` and then
+  `getItemHandler().isItemValid(index - 3, stack)`;
+- `clicked()` on the module slot carries a `// @todo 1.14` for the module copy, and
+  `broadcastChanges` only pushes the sort/view/group/filter/lock state to the client.
+
+So the pin can carry the grid and the padlock (a slot layout plus a drawn button), not the list
+widget: the port's deviation 2 records that.
+
 ## Brief vs artefact
 
 | Brief says | Artefact says | Resolution |
@@ -193,6 +212,7 @@ The modules are `stacksTo(1)` items.
   `assets/rftoolsbase/patchouli_books/manual/en_us/**`.
 - Source (`1.21_neo` @ `fc1b18a7`): `ModularStorageBlock.java`,
   `ModularStorageTileEntity.java`, `ModularStorageContainer.java`,
+  `client/GuiModularStorage.java`,
   `ModularAmountOverlay.java`, `ModularTypeModule.java`,
   `StorageModuleItem.java`, `StorageModuleData.java`, `ModularStorageData.java`,
   `ModularStorageModule.java`, `storage/GlobalStorageItemWrapper.java`,

@@ -286,6 +286,54 @@ fn slots_of(tier: u8) -> usize {
         .map_or(0, |n| usize::try_from(*n).unwrap_or(0))
 }
 
+/// Whether the menu's grid slot holding `stored` takes a stack of `incoming`:
+/// upstream's `Slot.mayPlace` on a storage slot, which is
+/// `if (!isLocked()) return false;` and then
+/// `getItemHandler().isItemValid(slot, stack)` — a slot is empty or already
+/// holds that kind (`ItemStack.isSameItemSameComponents`).
+#[must_use]
+pub fn slot_accepts(locked: bool, stored: Option<&str>, incoming: &str) -> bool {
+    locked && stored.is_none_or(|held| held == incoming)
+}
+
+/// What the padlock button answers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LockPress {
+    /// No storage module: there is nothing to lock (upstream's `isLocked()` only
+    /// means something with a module in the card slot).
+    NoModule,
+    /// It now stores nothing until it is unlocked again.
+    Locked,
+    /// It now stores and gives items.
+    Unlocked,
+}
+
+/// The padlock's whole rule: flip the lock of a storage that has a module, and
+/// say what happened.
+pub fn lock_press(storage: &mut Storage) -> LockPress {
+    if !storage.toggle_lock() {
+        return LockPress::NoModule;
+    }
+    if storage.locked {
+        LockPress::Locked
+    } else {
+        LockPress::Unlocked
+    }
+}
+
+/// How far a player without operator permission may be from a storage to read
+/// or lock it.
+pub const INSPECT_RANGE: f64 = 8.0;
+
+/// `Commands.LEVEL_ADMINS`: the permission level that bypasses the reach check.
+pub const LEVEL_ADMINS: u8 = 2;
+
+/// Whether a caller may read or lock a storage: an operator, or a player in the
+/// same level within [`INSPECT_RANGE`] of the block.
+pub fn may_inspect(op: bool, same_level: bool, distance: f64) -> bool {
+    op || (same_level && distance <= INSPECT_RANGE)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -508,5 +556,49 @@ mod tests {
             storage.insert(&stone(), 64, 64);
         }
         assert_eq!(storage.total(), 6_400);
+    }
+
+    #[test]
+    fn the_grid_takes_a_stack_only_when_locked_and_in_a_slot_of_its_own() {
+        // Upstream's `Slot.mayPlace` on the storage grid: `!isLocked()` first,
+        // then the handler's `isItemValid` (empty, or the same item and components).
+        assert!(
+            slot_accepts(true, None, "minecraft:stone"),
+            "a locked, empty slot takes a stack"
+        );
+        assert!(
+            !slot_accepts(false, None, "minecraft:stone"),
+            "an unlocked storage stores nothing, whatever the slot holds"
+        );
+        assert!(
+            !slot_accepts(true, Some("minecraft:dirt"), "minecraft:stone"),
+            "one kind a slot: a slot holding dirt takes no stone"
+        );
+        assert!(
+            slot_accepts(true, Some("minecraft:stone"), "minecraft:stone"),
+            "a slot tops up its own kind"
+        );
+    }
+
+    #[test]
+    fn the_padlock_needs_a_module_and_then_flips_the_lock() {
+        let mut empty = Storage::empty();
+        assert_eq!(lock_press(&mut empty), LockPress::NoModule);
+        assert!(!empty.locked, "a module-less press changes nothing");
+        let mut storage = Storage::with_tier(0);
+        assert_eq!(lock_press(&mut storage), LockPress::Locked);
+        assert!(storage.locked);
+        assert!(storage.accepts(), "a locked storage with a module stores");
+        assert_eq!(lock_press(&mut storage), LockPress::Unlocked);
+        assert!(!storage.locked);
+        assert!(!storage.accepts());
+    }
+
+    #[test]
+    fn a_readout_or_lock_needs_an_operator_reach_or_the_same_level() {
+        assert!(may_inspect(true, false, f64::MAX), "an operator");
+        assert!(may_inspect(false, true, 5.0), "a player in reach");
+        assert!(!may_inspect(false, true, 8.5), "out of reach");
+        assert!(!may_inspect(false, false, 1.0), "another level");
     }
 }

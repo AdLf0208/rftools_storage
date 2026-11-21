@@ -7,10 +7,10 @@
 #
 # Cargo's name and version are not the mod's identity: horizon-mod.toml is.
 name = "rftoolsstorage"
-version = "0.2.0"
+version = "0.2.2"
 edition = "2024"
 license = "MIT"
-description = "RFTools Storage for Horizon: the modular storage block"
+description = "RFTools Storage for Horizon: the modular storage block and its menu"
 publish = false
 
 [dependencies]
@@ -18,8 +18,7 @@ publish = false
 # command (the launcher builds against its own copy of the same build). Any other
 # registry dependency must be pinned with `horizon-launcher native-lock .` first.
 horizon-mod-api = { path = ".horizon/sdk/api/crates/horizon-mod-api" }
-# The same SDK checkout's core crate, for `JavaString` (a saved compound's key
-# type): the API re-exports `Compound`/`Tag` but not the key, so a mod cannot
-# insert into a block entity's saved data without it. Same path as the API's own
-# dependency, so it is one crate instance.
-horizon-core = { path = ".horizon/sdk/api/crates/horizon-core" }
+# No second path dependency: the launcher's native-build resolves the API's own
+# copy, and a direct `horizon-core` path made it fail with `No such file or
+# directory` (os error 2). Saved-compound keys are reached through
+# `Compound::iter`/`insert` instead, as `support::field` does.
