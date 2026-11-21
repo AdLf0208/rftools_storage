@@ -22,11 +22,11 @@
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use mod_api::item::containers::ModBlockEntityFields;
+use mod_api::item::containers::{ModBlockEntityFields, ModEnergyBuffer};
 use mod_api::{
     self, BlockDropsEvent, BlockEntityEvent, BlockEntityPart, BlockEntityRef, BlockKey, BlockPart,
     ClientHost, Command, CommandArgumentValue, CommandSource, Compound, Flow, Hand, Host, HostSide,
-    HostTransaction, Identifier, InteractionResult, ItemKey, ItemPart, ItemStack, LevelHost,
+    HostTransaction, ITEMS, Identifier, InteractionResult, ItemKey, ItemPart, ItemStack, LevelHost,
     LevelRef, LevelSide, MenuButtonEvent, MenuContainer, MenuPart, MenuSlotRulesEvent,
     ModContainer, OnBlockPlacedByEvent, OnDestroyedByPlayerEvent, PlayerContainerOpenEvent,
     RegisterCommandsEvent, Registrar, RegistrationContext, RightClickBlockEvent,
@@ -35,14 +35,24 @@ use mod_api::{
 };
 
 use crate::runtime::{
-    Kind, LEVEL_ADMINS, LockPress, SLOT_LIMIT, Slot, Storage, card_accepts, carried_slot_in,
-    lock_press, may_inspect, module_id, module_tier, restored_count, slot_accepts,
+    Found, Kind, LEVEL_ADMINS, LockPress, SCANNER_RECEIVE_PER_TICK, SLOT_LIMIT, STORAGE_SCANNER,
+    Slot, Storage, card_accepts, carried_slot_in, clamp_radius, is_storage_scanner, lock_press,
+    may_inspect, merge_counts, module_id, module_tier, no_power_line, restored_count, scan_line,
+    scan_positions, scanner_radius, slot_accepts, spend_power,
 };
 
 /// The block this slice implements, exactly as the content declares it.
 const BLOCK: &str = crate::runtime::MODULAR_STORAGE;
 /// The block-entity type this mod declares for that block.
 const BE_TYPE: &str = "rftoolsstorage:storage_block_entity";
+/// The scanner's block-entity type: the scanner's own saved compound (its FE
+/// buffer and its scan radius) and nothing else.
+const SCANNER_BE_TYPE: &str = "rftoolsstorage:storage_scanner_block_entity";
+/// The saved compound key of the scanner's radius (`StorageScannerData.radius`).
+const KEY_RADIUS: &str = "radius";
+/// The saved compound key of a machine's FE buffer: the name the game's own
+/// energy handler reads and writes (`ModEnergyBuffer`).
+const KEY_ENERGY: &str = "energy";
 /// The saved compound key of the installed module's tier. Only a block saved
 /// before the card slot (0.2.2) has it: [`adopt_legacy_module`] moves it into the
 /// slot, and every write clears it, so a removed module cannot come back.
@@ -108,6 +118,8 @@ const BLOCK_ENTITY_DATA: &str = "minecraft:block_entity_data";
 /// The block key the click compares the loaded block against. A `BlockKey` only
 /// names itself through a host, so it is asked for once, at registration.
 static BLOCK_KEY: OnceLock<BlockKey> = OnceLock::new();
+/// The scanner's block key, asked for once at registration for the same reason.
+static SCANNER_KEY: OnceLock<BlockKey> = OnceLock::new();
 /// The block's own item, resolved once at registration: `block_drops` runs with a
 /// read-only level host, which cannot name an item, and only this block's own
 /// drop takes the carried contents.
@@ -115,6 +127,12 @@ static ITEM_KEY: OnceLock<ItemKey> = OnceLock::new();
 
 fn block_key() -> BlockKey {
     *BLOCK_KEY
+        .get()
+        .expect("registration runs before every hook")
+}
+
+fn scanner_key() -> BlockKey {
+    *SCANNER_KEY
         .get()
         .expect("registration runs before every hook")
 }
@@ -160,6 +178,60 @@ pub(crate) fn register(registrar: &mut dyn Registrar, _cx: &RegistrationContext)
         ..ModContainer::default()
     };
     registrar.block_container(&block, container);
+    register_scanner(registrar);
+}
+
+/// The scanner's declarations: its block-entity type and Part, and its FE buffer
+/// (`StorageScannerConfiguration`'s 50,000 / 500 a tick). It declares no container:
+/// the GUI's own item slots belong to the list widget this slice does not carry,
+/// and the scan reads its neighbours' capabilities, not a container of its own.
+fn register_scanner(registrar: &mut dyn Registrar) {
+    let scanner = registrar.block_key(STORAGE_SCANNER);
+    let _ = SCANNER_KEY.set(scanner);
+    let kind = registrar
+        .block_entity_type(SCANNER_BE_TYPE)
+        .blocks(&[STORAGE_SCANNER])
+        .build();
+    registrar
+        .block_entity_part(&kind, ScannerBlock)
+        .expect("one Part per block-entity type");
+    // `GenericEnergyStorage(this, true, MAXENERGY, RECEIVEPERTICK)`: filled from
+    // any side up to 500 a move, never drained from outside (the machine spends
+    // its own buffer), and the amount is the saved compound's `energy`.
+    #[expect(
+        clippy::needless_update,
+        reason = "the update is for a field a later game build may add"
+    )]
+    let energy = ModEnergyBuffer {
+        capacity: 50_000,
+        max_insert: i32::try_from(SCANNER_RECEIVE_PER_TICK).unwrap_or(i32::MAX),
+        max_extract: 0,
+        insert_faces: [true; 6],
+        extract_faces: [false; 6],
+        ..ModEnergyBuffer::default()
+    };
+    registrar.block_energy(&scanner, energy);
+}
+
+/// The scanner's Part: its block entity (the saved compound the FE buffer and the
+/// radius live in). Nothing per-block beyond that; the scan is a command, not a
+/// tick.
+struct ScannerBlock;
+
+#[mod_api::horizon_part]
+impl BlockPart for ScannerBlock {}
+
+#[mod_api::horizon_part]
+impl BlockEntityPart for ScannerBlock {
+    /// The scanner gets a block entity with empty saved data; `energy` and `radius`
+    /// are written by the game's energy handler and by `/rftoolsstorage radius`.
+    fn block_entity(
+        &self,
+        _level: LevelSide<'_>,
+        _event: &mut BlockEntityEvent<'_>,
+    ) -> Option<Compound> {
+        Some(Compound::new())
+    }
 }
 
 /// The Part of the mod's one block-entity type: the modular storage declares a
@@ -1340,9 +1412,113 @@ fn withdraw(host: &mut dyn ServerHost, pos: [i32; 3], uuid: u128) {
     action_bar(host, uuid, line);
 }
 
+// --- the storage scanner ---------------------------------------------------
+
+/// Whether the storage scanner stands at `pos`.
+fn is_scanner(host: &dyn Host, pos: [i32; 3]) -> bool {
+    host.level(host.dimension())
+        .and_then(|level| level.block(host, pos))
+        == Some(scanner_key())
+}
+
+/// The scanner's block entity at `pos`, when the scanner stands there.
+fn scanner_entity(host: &dyn Host, pos: [i32; 3]) -> Option<BlockEntityRef> {
+    if !is_scanner(host, pos) {
+        return None;
+    }
+    entity_at(host, pos)
+}
+
+/// A saved non-negative count (`energy`), 0 when the key is missing or is not one.
+fn saved_count(data: Option<&Compound>, key: &str) -> u32 {
+    number(field(data, key))
+        .filter(|value| *value > 0)
+        .and_then(|value| u32::try_from(value).ok())
+        .unwrap_or(0)
+}
+
+/// The scanner's saved radius: `StorageScannerData.radius`, 1 when the block has
+/// never been given one, always inside the GUI slider's range.
+fn saved_radius(data: Option<&Compound>) -> i32 {
+    scanner_radius(number(field(data, KEY_RADIUS)).and_then(|value| i32::try_from(value).ok()))
+}
+
+/// `/rftoolsstorage scan <pos>`: what the inventories in the scanner's box hold.
+///
+/// Upstream's GUI lists them for free and charges `rfPerRequest` when the player
+/// pulls an item out; this port has no list widget (a gap, `notes.md`), so the
+/// readout is the whole player surface and it costs the request's price. With
+/// less than that in the buffer the scan is refused with `no power` and nothing
+/// is read or spent.
+fn scan_readout(host: &mut dyn ServerHost, pos: [i32; 3]) -> String {
+    let block = block_id_at(&*host, pos);
+    if !is_storage_scanner(&block) {
+        return format!("{block}: not a storage scanner");
+    }
+    let Some(entity) = entity_at(&*host, pos) else {
+        return format!("{block}: not a storage scanner");
+    };
+    let data = entity.data(&*host);
+    let stored = saved_count(data.as_ref(), KEY_ENERGY);
+    let Some(after) = spend_power(stored) else {
+        return format!("{block}: {}", no_power_line(stored));
+    };
+    let found = scan_found(host, pos, saved_radius(data.as_ref()));
+    if let Ok(after) = i32::try_from(after) {
+        let mut spent = Compound::new();
+        spent.insert(KEY_ENERGY.into(), Tag::Int(after));
+        let _ = entity.merge_data(host, spent);
+    }
+    format!("{block}: {}", scan_line(after, &found))
+}
+
+/// The kinds every inventory in the scanner's box holds, one entry a kind: a
+/// neighbour's item capability (the game's own answer for a chest, a barrel or a
+/// mod container), read slot by slot and summed. The scanner's own cell and any
+/// other storage scanner are skipped, as upstream skips its own tile entity; a
+/// position with no inventory, in an unloaded chunk or in a level that is not in
+/// place answers nothing.
+fn scan_found(host: &mut dyn ServerHost, pos: [i32; 3], radius: i32) -> Vec<Found> {
+    let Some(level) = host.level(host.dimension()) else {
+        return Vec::new();
+    };
+    let mut entries: Vec<(String, u32)> = Vec::new();
+    for at in scan_positions(pos, radius) {
+        if at == pos || level.block(&*host, at) == Some(scanner_key()) {
+            continue;
+        }
+        let Some(handler) = level.capability(&mut *host, &ITEMS, at, None) else {
+            continue;
+        };
+        let size = handler.size(host);
+        for index in 0..size {
+            let Some(resource) = handler.resource(host, index) else {
+                continue;
+            };
+            let count = handler.amount(host, index);
+            if count > 0 {
+                entries.push((resource.item().id(&*host), count));
+            }
+        }
+    }
+    merge_counts(&entries)
+}
+
+/// `/rftoolsstorage radius <pos> <radius>`: the GUI's radius slider, which this
+/// slice has no screen for. Saves the clamped value in the scanner's compound and
+/// answers with it.
+fn set_radius(host: &mut dyn ServerHost, pos: [i32; 3], wanted: i32) -> Option<i32> {
+    let entity = scanner_entity(&*host, pos)?;
+    let radius = clamp_radius(wanted);
+    let mut data = Compound::new();
+    data.insert(KEY_RADIUS.into(), Tag::Int(radius));
+    entity.merge_data(host, data).ok()?;
+    Some(radius)
+}
+
 // --- the readout commands --------------------------------------------------
 
-/// `/rftoolsstorage info` and `/rftoolsstorage lock` (`register_commands`).
+/// `/rftoolsstorage info`, `lock`, `scan` and `radius` (`register_commands`).
 pub(crate) fn on_register_commands(event: &mut RegisterCommandsEvent<'_>) {
     event
         .commands
@@ -1350,6 +1526,12 @@ pub(crate) fn on_register_commands(event: &mut RegisterCommandsEvent<'_>) {
     event
         .commands
         .push(Command::new("rftoolsstorage lock <pos:block_pos>"));
+    event
+        .commands
+        .push(Command::new("rftoolsstorage scan <pos:block_pos>"));
+    event.commands.push(Command::new(
+        "rftoolsstorage radius <pos:block_pos> <radius:integer>",
+    ));
 }
 
 /// The `/rftoolsstorage` commands' bodies (`run_mod_command`).
@@ -1364,7 +1546,10 @@ pub(crate) fn on_run_mod_command(
         return Flow::Continue;
     }
     let Some(CommandArgumentValue::BlockPos(pos)) = event.command.argument("pos") else {
-        feedback(host, "usage: /rftoolsstorage info|lock <x> <y> <z>");
+        feedback(
+            host,
+            "usage: /rftoolsstorage info|lock|scan|radius <x> <y> <z>",
+        );
         return Flow::Cancel;
     };
     let pos = *pos;
@@ -1427,6 +1612,18 @@ pub(crate) fn on_run_mod_command(
                     )
                 }
                 None => format!("{block}: not a modular storage"),
+            }
+        }
+        "scan" => scan_readout(host, pos),
+        "radius" => {
+            let Some(CommandArgumentValue::Integer(wanted)) = event.command.argument("radius")
+            else {
+                feedback(host, "usage: /rftoolsstorage radius <x> <y> <z> <radius>");
+                return Flow::Cancel;
+            };
+            match set_radius(host, pos, *wanted) {
+                Some(radius) => format!("{block}: radius {radius}"),
+                None => format!("{block}: not a storage scanner"),
             }
         }
         _ => return Flow::Continue,

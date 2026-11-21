@@ -1,0 +1,25 @@
+{
+  "type": "minecraft:block",
+  "random_sequence": "rftoolsstorage:blocks/storage_scanner",
+  "pools": [
+    {
+      "rolls": 1.0,
+      "bonus_rolls": 0.0,
+      "condition": {
+        "type": "minecraft:survives_explosion"
+      },
+      "entries": [
+        {
+          "type": "minecraft:item",
+          "name": "rftoolsstorage:storage_scanner",
+          "functions": [
+            {
+              "function": "minecraft:copy_name",
+              "source": "block_entity"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

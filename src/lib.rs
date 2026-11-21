@@ -1,4 +1,5 @@
-//! RFTools Storage for Horizon: the modular storage block (slice 2).
+//! RFTools Storage for Horizon: the modular storage block (slice 2) and the
+//! storage scanner (slice 5).
 //!
 //! One block, `rftoolsstorage:modular_storage`, with a block entity and its own
 //! menu: a storage module in its slot sets the capacity (tier 1 holds 100 slots,
@@ -14,10 +15,15 @@
 //! block's drop carries them as vanilla's `minecraft:block_entity_data`, and
 //! placing the item puts them back — the lock and the card slot's module with them.
 //!
+//! The **storage scanner** (slice 5) is the mod's second block: a machine with a
+//! 50,000 FE buffer that reads what the inventories around it hold,
+//! `/rftoolsstorage scan <pos>` (the GUI's list, as far as this slice goes),
+//! `/rftoolsstorage radius <pos> <n>` being its radius slider.
+//!
 //! [`runtime`] is the pure engine (the module's slot count, one kind a slot, the
 //! lock, the menu's slot and padlock rules, the carried payload's clamp, the
-//! readout text) and [`support`] is the game glue. See `notes.md` for the slice
-//! boundary, the deliberate deviations and the gaps.
+//! scanner's box, price and readout) and [`support`] is the game glue. See
+//! `notes.md` for the slice boundary, the deliberate deviations and the gaps.
 pub mod runtime;
 mod support;
 

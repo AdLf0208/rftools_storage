@@ -2,17 +2,84 @@
 
 Slice 1 (the `modular_storage` block with a tier-1 storage module).
 
-**Version 0.2.3 is the current SDK package (2026-11-21):** one flat `.hmod`, SDK
+**Version 0.2.5 is the current SDK package (2026-11-21):** one flat `.hmod`, SDK
 nightly `0a875da91dbb0fdcb7ba8c42c11341aa229af51a`, mixins
-`e59da9094f0c2fdda6c627fe9eff22dec6a906f0`. **§0c is this slice's evidence (the
-card slot) and is where the in-game legs are**; §0b is slice 2's (the menu) and
-§0 the 0.2.0 migration; §1–§6 are the retired 0.1.0 `.hnmod` run (pin `1d63e0a5…`
-/ `5a64af93…`), kept as history. The 0.2.x `tools/e2e.sh` runs on a
-launcher-built game (`ports/tools/launcher-game.sh`).
+`e59da9094f0c2fdda6c627fe9eff22dec6a906f0`. **§0d is this slice's evidence (the
+storage scanner) and is where the in-game legs are**; §0c is slice 3's (the
+card slot), §0b slice 2's (the menu) and §0 the 0.2.0 migration; §1–§6 are the
+retired 0.1.0 `.hnmod` run (pin `1d63e0a5…` / `5a64af93…`), kept as history. The
+0.2.x `tools/e2e.sh` runs on a launcher-built game
+(`ports/tools/launcher-game.sh`).
 
 Every command below ran through `ports/tools/build-slot.sh` (a lease per step);
 in 0.1.0 compile steps forwarded to the second machine and game legs ran locally
 because the script uses `--offscreen`.
+
+## 0d. The storage scanner — version 0.2.5 (2026-11-21)
+
+Slice 5: `rftoolsstorage:storage_scanner` — the block, its block entity, its 50,000 FE buffer and
+`/rftoolsstorage scan <pos>` (the inventories in a `pos ± radius` box, one entry a kind) with
+`/rftoolsstorage radius <pos> <n>` as the GUI's radius slider. Ladder and package logs:
+`ports/_shared/evidence/rftoolsstorage/`; game legs: `ports/_shared/evidence/rftoolsstorage-e2e/`.
+
+| Step | Command | Result | Log |
+|---|---|---|---|
+| red proof | `cargo test` with the scanner's new rules stubbed | **FAILED. 24 passed; 5 failed**, `TEST_EXIT:101` | `slice5-red.log` |
+| tests | `cargo test` | `running 29 tests` → **29 passed**, 0 failed, `TEST_EXIT:0` | `sdk-test.log` |
+| lints | `cargo clippy --all-targets -- -D warnings` | `Finished`, **CLIPPY_EXIT:0**, 0 warnings | `sdk-clippy.log` |
+| format | `rustfmt --edition 2024 --check src/{lib,support,runtime}.rs` | `FMT_EXIT:0` | `sdk-test.log` |
+| SDK gate | `cargo horizon-mod check` | **CHECK_EXIT:0** — *"RFTools Storage uses 498 items of the API (5 Part kinds, 2 capabilitys, 135 fields or variants, 16 hooks, 47 hook arguments, 2 macros, 152 methods, 28 traits, 111 types). Made for 0a875da."* | `sdk-check.log` |
+| package | `rm -f Cargo.lock && cargo horizon-mod build`, twice | **74,447 B**, SHA-256 `48a860378bfafddcf78e4e5d6fcc2eb055de475bfd91713aa0bcfe4600546776`, **`cmp`-identical** | `sdk-build.log`, `sdk-sha256.txt` |
+| package check | `cargo horizon-mod check rftoolsstorage.hmod` | `rftoolsstorage 0.2.5 (native-mod, format native-1/0a875da…/e59da90…, for 26.3)`, **74,447 bytes**, `48a86037…6776`, **FILE_CHECK_EXIT:0** | `sdk-fits.log` |
+| entries | `unzip -l rftoolsstorage.hmod` | **67 files**, no `Cargo.lock`; `src/runtime.rs` byte-identical in tree and package | `sdk-sha256.txt` |
+| fits, the pin | `cargo horizon-mod fits rftoolsstorage.hmod --build 0a875da91dbb…` | `0a875da  made for`, **FITS_PIN_EXIT:0**, sha `48a86037…6776` before and after | `sdk-fits.log` |
+| fits, another build | `cargo horizon-mod fits rftoolsstorage.hmod --build 0b14f8acfd…` | `0b14f8a  fits`, **FITS_OTHER_EXIT:0**, sha `48a86037…6776` | `sdk-fits.log` |
+| in game | `build-slot.sh run --job e2e-rftoolsstorage --step e2e -- bash tools/e2e.sh` | **PASS** + `EXIT:0` | `rftoolsstorage-e2e/e2e-scanner.log` |
+| control | the same leg on the Nightly **without** the package | **FAIL** + `EXIT:1` (`{"error":"unknown item rftoolsstorage:storage_scanner"}`) | `e2e-scanner-control.log` |
+| counterfactual | a vanilla barrel where the scanner would be | **PASS** + `EXIT:0` — `scan`/`radius` answer `not a storage scanner` | `e2e-scanner-counterfactual.log` |
+| selftest | `SELFTEST=1` (asserts the scan did not find the stone) | **FAIL** + `EXIT:1` — *"the scan found minecraft:stone 64 in the chest two blocks away …"* | `e2e-scanner-selftest.log` |
+| e2e gate | `python3 ports/tools/check-e2e-logs.py rftoolsstorage-e2e --strict` | `logs=8  ok=8`, exit 0 | — |
+| package gate | `python3 ports/tools/verify-sdk-package.py rftoolsstorage` | `1/1 package(s) verified`, exit 0 | — |
+| skills gate | `python3 ports/tools/check-skills.py --notes ports/rftoolsstorage --strict` | `Skills line present`, PASS | — |
+
+The default leg's transcript (abridged; the log has every `ctl` reply):
+
+```
+== a fresh scanner has no power: the scan refuses and reads nothing ==
+scan: rftoolsstorage:storage_scanner: no power (0/50000 FE)
+== a chest two blocks away holds 64 stone; one three away holds 32 dirt ==
+  chest at 15,102,1: 64 x minecraft:stone
+  chest at 16,102,1: 32 x minecraft:dirt
+scan: rftoolsstorage:storage_scanner: empty (4900/50000 FE); buffer now 4900
+== /rftoolsstorage radius 2 widens the box (the GUI's radius slider) ==
+radius: rftoolsstorage:storage_scanner: radius 2
+saved radius: 2
+== THE SLICE'S ASSERTION: the scan answers the chest two blocks away (minecraft:stone 64) ==
+scan: rftoolsstorage:storage_scanner: minecraft:stone 64 (4800/50000 FE); buffer now 4800
+== radius 3 brings the chest three away too: both kinds, one entry each ==
+scan: rftoolsstorage:storage_scanner: minecraft:dirt 32, minecraft:stone 64 (4700/50000 FE); buffer now 4700
+== an emptied buffer refuses the scan with no power, and reads nothing ==
+scan: rftoolsstorage:storage_scanner: no power (0/50000 FE); buffer now 0
+== charged again, the same scan answers again ==
+scan: rftoolsstorage:storage_scanner: minecraft:dirt 32, minecraft:stone 64 (4900/50000 FE); buffer now 4900
+== a scan of a block that is not a scanner is refused, and changes nothing ==
+scan of the chest: minecraft:chest: not a storage scanner
+scan of the modular storage: rftoolsstorage:modular_storage: not a storage scanner
+== the radius and the buffer survive a relaunch, and the scan still answers ==
+relaunch: buffer 4900 -> 4900, radius 3; scan: rftoolsstorage:storage_scanner: minecraft:dirt 32, minecraft:stone 64 (4800/50000 FE)
+== the scanner's loot table drops its own item on a survival break ==
+break: {"drops":{"rftoolsstorage:storage_scanner":1},"picked_up":{},"items_left_on_ground":1}
+== the carried storage-scanner recipe is in the table; its frame is not in this build ==
+recipe give rftoolsstorage:storage_scanner: {"chat":["Unlocked 1 recipe(s) for Player83869"],"ok":true}
+the scanner recipe with a stone block where rftoolsbase:machine_frame belongs: 'empty'
+give rftoolsbase:machine_frame: {"error":"unknown item rftoolsbase:machine_frame"}
+```
+
+**The one miss:** the brief asked for a second leg that *crafts* the scanner's recipe. The jar's
+recipe needs `rftoolsbase:machine_frame`, and this harness builds the Nightly plus **one** package;
+the campaign's `rftoolsbase` port pins `0b14f8a`, so both cannot be built into one `0a875da` game.
+The leg proves the recipe is loaded and parsed and that the frame's cell is what blocks it; the
+coverage row is `blocked(rftoolsbase:machine_frame)`.
 
 ## 0. The SDK package (0.2.0) — the migration (history)
 

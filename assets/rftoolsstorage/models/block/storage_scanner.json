@@ -1,0 +1,21 @@
+{
+  "parent": "minecraft:block/cube",
+  "render_type": "minecraft:cutout",
+  "display": {
+    "firstperson_righthand": {
+      "rotation": [ 0, 135, 0 ],
+      "translation": [ 0, 0, 0 ],
+      "scale": [ 0.40, 0.40, 0.40 ]
+    }
+  },
+  "textures": {
+    "particle": "#front",
+    "down": "rftoolsstorage:block/base/machinebottom",
+    "up": "rftoolsstorage:block/base/machinetop",
+    "north": "#front",
+    "east": "rftoolsstorage:block/base/machineside",
+    "south": "rftoolsstorage:block/base/machineside",
+    "west": "rftoolsstorage:block/base/machineside",
+    "front": "rftoolsstorage:block/machinestoragescanner"
+  }
+}

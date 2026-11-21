@@ -7,10 +7,10 @@
 #
 # Cargo's name and version are not the mod's identity: horizon-mod.toml is.
 name = "rftoolsstorage"
-version = "0.2.4"
+version = "0.2.5"
 edition = "2024"
 license = "MIT"
-description = "RFTools Storage for Horizon: the modular storage block, its menu and its module slot"
+description = "RFTools Storage for Horizon: the modular storage block, its menu, its module slot and the storage scanner"
 publish = false
 
 [dependencies]

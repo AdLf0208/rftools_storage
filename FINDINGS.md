@@ -147,6 +147,17 @@ The modules are `stacksTo(1)` items.
 
 - **`storage_scanner`** — scans nearby inventories, searches them, needs FE
   ("Infusing bonus: reduced power consumption"), has a remote/tablet variant.
+  Slice 5 carries the machine and the scan; the numbers are its own:
+  `StorageScannerConfiguration` `scannerMaxRF` **50,000**, `scannerRFPerTick`
+  **500**, `rfPerRequest` **100**, `rfPerInsert` **20**, `scannerNoRestrictions`
+  **false** (a fake player plus `canEntityDestroy`); `StorageScannerData.DEFAULT`
+  is `radius` **1**, `exportC` false, `wideview` true, `SortingMode.NAME`; the GUI's
+  radius slider is **1..20** without XNet. `findInventories` scans the cube
+  `pos ± radius`, keeps a neighbour with an `ItemHandler` capability
+  (`Capabilities.ItemHandler.BLOCK`, no side), skips another storage scanner and a
+  crafting manager's own handler, and merges by kind; `countItems` sums each
+  inventory's matching stacks. The GUI list's search is `getMatcher` (each word:
+  `@modid` prefix, else a case-insensitive contains on the hover name).
 - **`crafting_manager`** — the jar's own lang calls it "WIP! … This is not
   functional yet".
 - **Storage tiers 2-4** (`storage_module1..3`), the **remote** module and block,

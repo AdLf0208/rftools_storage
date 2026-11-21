@@ -1,8 +1,11 @@
 {
   "item.rftoolsstorage.storage_module0": "Tier 1 Storage Module",
   "block.rftoolsstorage.modular_storage": "Modular Storage",
+  "block.rftoolsstorage.storage_scanner": "Storage Scanner",
   "itemGroup.rftoolsstorage": "RFTools Storage",
   "message.rftoolsstorage.modular_storage.header": "This modular storage system can store a lot of items and allows easy searching and filtering. You must first insert a storage module item before you can use it",
   "message.rftoolsstorage.storage_module.header": "This storage module is for the Modular Storage block",
-  "message.rftoolsstorage.storage_module.info": "Supported stacks: "
+  "message.rftoolsstorage.storage_module.info": "Supported stacks: ",
+  "message.rftoolsstorage.storage_scanner.header": "This machine will scan all nearby inventories and show them in a list. You can then search and access items from those inventories",
+  "message.rftoolsstorage.storage_scanner.gold": "Infusing bonus: reduced power consumption"
 }

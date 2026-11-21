@@ -13,14 +13,15 @@ differences, are in [`FINDINGS.md`](FINDINGS.md).
 publishing (ARCHITECTURE.md §8); the port carries the upstream MIT notice in
 [`LICENSE`](LICENSE) and its provenance in [`LICENSE-NOTICE.md`](LICENSE-NOTICE.md).
 
-**Format: the SDK package (2026-11-18), version 0.2.4.** One flat `.hmod` —
+**Format: the SDK package (2026-11-18), version 0.2.5.** One flat `.hmod` —
 `horizon-mod.toml` + `Cargo.toml` + `src/` + `assets/` + `data/` — built by the
 launcher against SDK nightly **`0a875da91dbb0fdcb7ba8c42c11341aa229af51a`** with
 horizon-mixins **`e59da9094f0c2fdda6c627fe9eff22dec6a906f0`** (see
 [`## Migration to the SDK format`](#migration-to-the-sdk-format--version-020) and
 [`## Slice 2`](#slice-2--the-storages-menu-version-022),
 [`## Slice 3`](#slice-3--the-module-s-card-slot-version-023),
-[`## Slice 4`](#slice-4--the-contents-travel-on-the-item-version-024)).
+[`## Slice 4`](#slice-4--the-contents-travel-on-the-item-version-024),
+[`## Slice 5`](#slice-5--the-storage-scanner-version-025)).
 The retired `.hnmod` container pinned Horizon `1d63e0a5…` / mixins `5a64af93…`;
 `src/runtime.rs` was byte-identical to the retired
 `mixins/rftoolsstorage/runtime.rs` until the 2026-11-18 review fixes gave it the
@@ -29,10 +30,12 @@ reach rule, and slice 2 added the menu's two rules.
 Status: **ported-partial** — slice 1 (the modular storage block with a tier-1
 storage module), slice 2 (its **menu**: a 100-slot grid opened by a right click,
 its slot rules and the padlock), slice 3 (the menu's **card slot**, where the
-module itself lives, so it can be taken back out) and slice 4 (**a broken block's
+module itself lives, so it can be taken back out), slice 4 (**a broken block's
 contents travel on its own item**, with the lock and the module, and come back on
-placement) are implemented and verified in a launcher-built game at the pin (the
-legs are listed per slice below; `ports/_shared/evidence/rftoolsstorage-e2e/`).
+placement) and slice 5 (the **storage scanner**: its block, its block entity, its
+50,000 FE buffer and the inventory scan behind `/rftoolsstorage scan`) are
+implemented and verified in a launcher-built game at the pin (the legs are listed
+per slice below; `ports/_shared/evidence/rftoolsstorage-e2e/`).
 The gap list below is the rest of the mod.
 
 ## Class + tier and the approach
@@ -164,8 +167,13 @@ None. The two candidates were checked and left alone, on purpose:
 
 ## Gaps (the rest of the mod)
 
-- `storage_scanner` (inventory scan, search, FE use, remote/tablet variant),
-  `crafting_manager` (the jar's own lang calls it "WIP! … not functional yet").
+- `crafting_manager` (the jar's own lang calls it "WIP! … not functional yet") and
+  the **storage scanner's remaining half**: the GUI's list widget (search, sort,
+  compact, cycle, visible size), the scanner's own in/auto/out item slots and the
+  inject/request paths that use them, the **remote/tablet variant**, the XNet access
+  settings, and the claimed-land check (`scannerNoRestrictions`; the pin has no
+  `can_entity_destroy` **hook** exists at the pin, but it is a cancellable game
+  event, not a query a mod can ask for a fake player — `blocked(no permission query)`).
 - Storage tiers 2-4 (`storage_module1..3`; their recipes need McJtyLib's
   `mcjtylib:copy_components` recipe type, which the pin does not have), the
   remote module (`storage_module6`, "DO NOT USE" in the jar's lang) and the
@@ -192,11 +200,11 @@ retired helper files and their mapping are in
 
 | Hook (SDK 0.2) | What it does |
 |---|---|
-| `register` → `Registrar` | declares the block-entity type `rftoolsstorage:storage_block_entity` over the block, attaches its `BlockEntityPart`, declares the menu's `MenuPart`, and declares the block's container (100 slots, every face, inputs and outputs) with its menu |
-| `BlockEntityPart::block_entity` | gives `rftoolsstorage:modular_storage` a block entity with empty saved data (the module tier and the lock live in its compound; `Items` are the container's) |
+| `register` → `Registrar` | declares the block-entity type `rftoolsstorage:storage_block_entity` over the block, attaches its `BlockEntityPart`, declares the menu's `MenuPart`, and declares the block's container (100 slots, every face, inputs and outputs) with its menu; **also** the scanner's type `rftoolsstorage:storage_scanner_block_entity` with its Part and `block_energy` (50,000 FE, 500 a move, no external drain) |
+| `BlockEntityPart::block_entity` | gives `rftoolsstorage:modular_storage` a block entity with empty saved data (the module tier and the lock live in its compound; `Items` are the container's), and `rftoolsstorage:storage_scanner` one whose compound holds `energy` and `radius` |
 | `right_click_block` (cancel) | install / insert / seal / withdraw, and the action-bar readout |
-| `register_commands` | `/rftoolsstorage info <pos>` and `/rftoolsstorage lock <pos>` (typed `block_pos`) |
-| `run_mod_command` | their answers |
+| `register_commands` | `/rftoolsstorage info <pos>`, `lock <pos>`, `scan <pos>` and `radius <pos> <radius>` (typed `block_pos`/`integer`) |
+| `run_mod_command` | their answers (the scan costs `rfPerRequest`; the radius is the GUI slider's 1..20) |
 | `screen` / `screen_draw` / `screen_click` (BlockEntityPart, API 19/20) | the menu's 366 x 210 layout, the title, the inventory label and the padlock; a press on the padlock's rectangle answers button 0 |
 | `menu_button` (BlockEntityPart, API 20) | the padlock: flip the lock of a storage that has a module, answer on the action bar, push the state into the menu's data slot |
 | `menu_slot_rules` (MenuPart, API 130) | a grid slot takes a stack only while locked, and only when it is empty or holds that same kind; the card slot takes a storage module (and, once it holds one, anything — deviation 7) |
@@ -212,6 +220,13 @@ retired helper files and their mapping are in
 `ModularStorageData.java`, `ModularStorageModule.java`,
 `storage/GlobalStorageItemWrapper.java`, `storage/StorageEntry.java`,
 `storage/StorageInfo.java`, `setup/Registration.java`, `setup/ModSetup.java`.
+Slice 5: `modules/scanner/blocks/StorageScannerTileEntity.java` (the scan walk
+`findInventories`/`inRange`, `countItems`, the energy fields),
+`blocks/StorageScannerBlock.java`, `modules/scanner/StorageScannerConfiguration.java`
+(`scannerMaxRF` 50,000, `scannerRFPerTick` 500, `rfPerRequest` 100, `rfPerInsert` 20,
+`scannerNoRestrictions`), `modules/scanner/data/StorageScannerData.java` (radius 1,
+`SortingMode.NAME`), `modules/scanner/StorageScannerModule.java`, and
+`modules/scanner/client/GuiStorageScanner.java` (the radius slider 1..20).
 The clone (`ports/_shared/upstream/rftoolsstorage`) was deleted after these
 findings were recorded.
 
@@ -807,13 +822,199 @@ put back).
 5. **`ctl break`'s reply is the server's report** (`drops`, `picked_up`, `items_left_on_ground`):
    the spill check is `drops["minecraft:stone"] == 0`, not an entity count on the client.
 
-Skills: superpowers/using-superpowers, brainstorming, writing-plans, test-driven-development, systematic-debugging, verification-before-completion; BeautifulRust/rust-best-practices
+## Slice 5 — the storage scanner (version 0.2.5)
+
+The first gap line slice 1 left, verbatim from [`## Gaps`](#gaps-the-rest-of-the-mod):
+
+> `storage_scanner` (inventory scan, search, FE use, remote/tablet variant)
+
+The slice is the **block, its block entity, its FE buffer and the scan** — not the GUI list
+(the jar's `GuiStorageScanner` widget), not the scanner's own item slots, not the remote/tablet
+variant. It fits the **machines** tier: a second block entity with a saved compound, an FE buffer
+and a machine's readout, no renderer and no new vanilla hook. Upstream source read at
+`fc1b18a7f070d0030671e1db1d3aab90699fd160` (`StorageScannerTileEntity`, `StorageScannerBlock`,
+`StorageScannerConfiguration`, `StorageScannerData`, `StorageScannerModule`); the clone was deleted
+after the findings were recorded.
+
+### What it does
+
+- **The block.** `rftoolsstorage:storage_scanner`, on the **`minecraft:end_rod`** template like the
+  storage (the jar's own blockstate is six `facing` variants), full-cube shapes, the same
+  hardness/blast/tool/sound properties, its own item, model, texture, loot table, tags and the
+  jar's recipe. It sits in the creative tab beside the storage.
+- **The block entity.** `rftoolsstorage:storage_scanner_block_entity`, whose saved compound holds
+  the two numbers the machine is: `energy` (the game's own energy buffer key) and `radius`.
+- **The FE buffer.** `Registrar::block_energy` as upstream's
+  `GenericEnergyStorage(this, true, MAXENERGY, RECEIVEPERTICK)`: capacity **50,000**,
+  **500** the most one fill moves, **no** external drain (the machine spends its own buffer, as
+  upstream's `consumeEnergy` does). The amount lives in the saved compound, so it survives a
+  relaunch and `/data merge block … {energy: n}` is the vanilla path to it.
+- **The scan.** `/rftoolsstorage scan <pos>` walks the cube `pos - radius ..= pos + radius`
+  (upstream's `findInventories`, `SCANNER_DEFAULT_RADIUS` 1), reads every neighbour's **item
+  capability** (the game's own answer for a chest, a barrel or a mod container, as
+  `Capabilities.ItemHandler.BLOCK` with no side does) slot by slot, sums one entry a kind and prints
+  them sorted by item id (upstream's default `SortingMode.NAME`), then the buffer left:
+  `rftoolsstorage:storage_scanner: minecraft:stone 64 (4800/50000 FE)`. A scan costs
+  `rfPerRequest` (**100**); below that the reply is `no power (n/50000 FE)` and nothing is read.
+  The scanner's own cell and any other storage scanner are skipped, as upstream skips its own tile
+  entity.
+- **The radius.** `/rftoolsstorage radius <pos> <n>` is the GUI's radius slider
+  (`GuiStorageScanner`: `.realMinimum(1)`, `.realMaximum(20)`, `StorageScannerData.DEFAULT.radius =
+  1`) as a command, saved in the compound and clamped to 1..20.
+- **The rest of the machine's numbers** — `rfPerInsert` 20 for the automation slice — are in
+  `runtime` with the currency rule, so the next slice spends the same table.
+
+### Deviations this slice adds
+
+1. **The readout costs `rfPerRequest`.** Upstream lists the inventories for free and charges 100
+   when the player pulls an item out. This port has no list widget (a gap), so the readout *is* the
+   player surface: it answers what a pull would find and costs the pull's price. Without it the FE
+   buffer would have no in-game consumer at all and the FE half of the family would be unobservable.
+2. **`search` is not carried.** Upstream's `getMatcher` filters the list by item name or `@modid`;
+   the port's readout is the unfiltered list, because the GUI that shows a filtered list is the gap
+   below. The rule is recorded with the gap, not invented as a command argument.
+3. **The claimed-land check is not carried** (`blocked(no permission query)`): upstream asks
+   `level.getBlockState(p).canEntityDestroy(level, p, fakePlayer)` and defaults
+   `scannerNoRestrictions` to false. The pin's `can_entity_destroy` is a cancellable **hook** (a
+   game event another mod can veto), not a query a mod can call with a fake player, and there is no
+   claim-permission method in `host/levels.rs` or `host/block_states.rs`; so the scan reads any
+   inventory in the box — which is what an unclaimed build does anyway.
+4. **The scanner's own item slots are not declared.** `StorageScannerContainer` has an in, an
+   auto-in and an out slot, used by the GUI's insert/request paths and the automation; those belong
+   to the list slice, and a container with no consumer would be dead data. The block declares no
+   container at all.
+5. **The radius is a command, not a slider.** `radius` names the GUI's own control, so the value and
+   its bounds are the jar's; only the surface differs.
+6. **The loot table carries `copy_name`, not the jar's `copy_components`.** The jar copies
+   `mcjtylib:item_energy`, `mcjtylib:item_inventory`, `rftoolsstorage:storage_scanner_data` and
+   `rftoolsstorage:crafting_grid_data` on the drop; this port has none of those components (the
+   radius and the buffer are the block entity's saved compound, and a broken scanner carries
+   nothing), so the drop is the plain item. The modular storage's table is the same shape.
+7. **The receipt is charged even when nothing is found**, as upstream charges a request only when it
+   delivers: a scan of an empty box still cost 100. That is the price of the readout being the
+   request's substitute (deviation 1), not a second rule.
+
+### Red → green (the scanner's rules)
+
+The slice's five new rules were written first and stubbed (`scan_positions` answered an empty list,
+`clamp_radius`/`scanner_radius` returned the input, `spend_power` never charged, `merge_counts`
+did not merge or sort, `scan_line`/`no_power_line` printed no energy), and the suite was run
+**before** implementing them (`ports/_shared/evidence/rftoolsstorage/slice5-red.log`,
+`TEST_EXIT:101`):
+
+```
+---- runtime::tests::the_scanner_scans_a_cube_of_its_radius_and_nothing_outside_it stdout ----
+
+thread 'runtime::tests::the_scanner_scans_a_cube_of_its_radius_and_nothing_outside_it' panicked at src/runtime.rs:898:9:
+assertion `left == right` failed: a 3 x 3 x 3 box at the default radius
+  left: 0
+ right: 27
+...
+test result: FAILED. 24 passed; 5 failed; 0 ignored; 0 measured; 0 filtered out
+TEST_EXIT:101
+```
+
+Implemented, then **29 passed, 0 failed** (`sdk-test.log`): the runtime's 26 (21 + 5 new) and the
+three glue tests — `the_scanner_scans_a_cube_of_its_radius_and_nothing_outside_it`,
+`the_scanners_radius_is_the_gui_sliders_one_to_twenty`,
+`a_scan_costs_the_request_price_and_refuses_below_it`,
+`the_scan_counts_each_kind_once_across_the_inventories_it_found`,
+`the_scan_reply_names_the_items_and_the_energy_left_or_the_missing_power`.
+
+### In game (`ports/_shared/evidence/rftoolsstorage-e2e/`)
+
+| Leg | Log | Verdict |
+|---|---|---|
+| default, the launcher-built package | `e2e-scanner.log` | **PASS** + `EXIT:0` |
+| control (the same Nightly without the package) | `e2e-scanner-control.log` | **FAIL** + `EXIT:1` — `{"error":"unknown item rftoolsstorage:storage_scanner"}` |
+| counterfactual (a vanilla barrel where the scanner would be) | `e2e-scanner-counterfactual.log` | **PASS** + `EXIT:0` — `scan`/`radius` answer `minecraft:barrel: not a storage scanner` |
+| `SELFTEST=1` (asserts the scan did *not* find the stone) | `e2e-scanner-selftest.log` | **FAIL** + `EXIT:1` — *"the scan found minecraft:stone 64 in the chest two blocks away … so this inverted assertion fails as it must"* |
+
+What `e2e-scanner.log` asserts, in order (every number before and after): the scanner places and
+reads back with its `facing`; **a fresh one has no power** — `no power (0/50000 FE)`, nothing read;
+charged to 5,000 FE (`/data merge block`), the **default radius 1** scan answers
+`empty (4900/50000 FE)` although a chest two blocks away holds 64 stone (the 3 x 3 x 3 box);
+`/rftoolsstorage radius … 2` answers `radius 2` and the saved compound reads 2; the scan now answers
+**`minecraft:stone 64 (4800/50000 FE)`** and not the `minecraft:dirt 32` of the chest three away
+(the counterfactual chest outside the box); radius 3 then lists **both**, one entry a kind, sorted;
+**an emptied buffer** answers `no power (0/50000 FE)` and reads nothing, and charging it again makes
+the same scan answer again at 4,900; `scan` of a chest answers `not a storage scanner` and so does
+`scan` of the modular storage (which still reads `0/0 empty no module`); **a relaunch** keeps the
+buffer (4,900) and the radius (3) and the scan still answers; the **loot table** drops
+`rftoolsstorage:storage_scanner` ×1 on a survival break; the **recipe is loaded** (`recipe give`
+answers `Unlocked 1 recipe(s)`) and its pattern with a stone block where
+`rftoolsbase:machine_frame` belongs crafts nothing, while `/give rftoolsbase:machine_frame` is
+refused — the frame is RFToolsBase's item and that mod is not in this build.
+
+**The brief asked for a second leg that crafts the scanner's recipe. It cannot be met, and the
+artefact is why:** the jar's recipe is `ToT / gFg / ToT` with `F = rftoolsbase:machine_frame`, and
+this harness builds a game from the Nightly plus **one** package — the campaign's own `rftoolsbase`
+port pins `0b14f8a`, so the launcher refuses to build both into a `0a875da` game. The leg proves the
+recipe is loaded and parsed, and that the frame's cell is what blocks it; the coverage row is
+`blocked(rftoolsbase:machine_frame)`, the same gap the modular storage's recipe has.
+
+### Coverage (the families this slice changes)
+
+| Family | State |
+|---|---|
+| `storage_scanner` block, its states/models/loot/tags | **tested** (place + read back with `facing`; survival break drops the item, `e2e-scanner.log`) |
+| the scanner's FE buffer (50,000; 100 a scan; saved compound) | **tested** — `no power` at 0, 5,000 → 4,900 → 4,800 → 4,700, refused at 0 and restored, and kept across a relaunch (`e2e-scanner.log`) |
+| the scan box and the radius (default 1, 1..20) | **tested** — radius 1 finds nothing two away, 2 finds the stone, 3 adds the dirt; the radius survives a relaunch (`e2e-scanner.log`); the box and the slider in `runtime` tests |
+| the scan's count and order (one entry a kind, by id) | **tested in game** (two chests, `minecraft:dirt 32, minecraft:stone 64`) and by `merge_counts` |
+| the answer for a block that is not a scanner | **tested** — a chest and the modular storage answer `not a storage scanner`; a barrel in the counterfactual does too |
+| commands `scan`/`radius` | **tested** (`e2e-scanner.log`, parsed replies) |
+| `storage_scanner` recipe | **blocked**(`rftoolsbase:machine_frame`) — loaded and parsed, its pattern with a stone block in the frame's cell crafts nothing, and the frame item is refused by this build (`e2e-scanner.log`) |
+| the GUI's list (search/sort/compact/cycle), the scanner's in/auto/out slots, the remote/tablet variant, XNet settings, the claimed-land check | **not ported** (later slices / `blocked(no permission query)`) |
+
+### Traps this slice paid for
+
+1. **A neighbour's items are its capability, not its saved data.** `BlockEntityRef::data` is a *mod*
+   block entity's compound and holds no `Items` (slice 4's trap); the scan must ask
+   `level.capability(host, &ITEMS, pos, None)`, which the game answers for a chest, a barrel and a
+   mod container alike. A scan built on `data()` would find the storage's own `carried`/`locked`
+   keys and nothing else.
+2. **The energy is the game's key, not a mod one.** `ModEnergyBuffer` keeps its amount in the saved
+   compound's `energy` int, so a mod that reads/writes another key would have two buffers. The e2e
+   writes it with vanilla's `/data merge block` (the same path `block_entity_merge_data` documents),
+   which is also the only way to charge a machine in a build with no FE generator.
+3. **`ctl break` on an empty cell fails.** The loot leg first broke a scanner that had never been
+   placed (only its support block was set) and `ctl break` answered an error; place the block, then
+   break it.
+4. **The crafting table's empty result slot can be listed with no item.** A result reader that
+   takes `.item` unconditionally prints `null xnull`; filter the empty entry out (the old script's
+   `// "empty"` fallback only fires when the slot is absent).
+5. **A reply helper that greps the chat for `ns:path:` also matches the previous answer.** Each
+   assertion here pins the whole line (`^<block>: … (NNNN/50000 FE)$`), so a stale line fails
+   loudly instead of passing.
 
 ## Verification
+
+Skills: superpowers/using-superpowers, brainstorming, writing-plans, test-driven-development, systematic-debugging, verification-before-completion; BeautifulRust/rust-best-practices
 
 Full evidence in [`VALIDATION.md`](VALIDATION.md); the e2e logs are in
 `ports/_shared/evidence/rftoolsstorage-e2e/` (the game legs) and
 `ports/_shared/evidence/rftoolsstorage/` (the ladder, package and fits).
+
+**0.2.5 — the storage scanner (2026-11-21, pin `0a875da`)**
+
+| Step | Command | Result |
+|---|---|---|
+| Red proof | `cargo test` with the scanner's new rules stubbed | **FAILED. 24 passed; 5 failed**, `TEST_EXIT:101` (`slice5-red.log`); quoted above |
+| Runtime + glue tests | `cargo test` | **29 passed**, 0 failed (`sdk-test.log`, `TEST_EXIT:0`) |
+| Lints | `cargo clippy --all-targets -- -D warnings` | `CLIPPY_EXIT:0`, 0 warnings (`sdk-clippy.log`) |
+| Formatting | `rustfmt --edition 2024 --check src/{lib,support,runtime}.rs` | `FMT_EXIT:0` (`sdk-test.log`) |
+| SDK gate | `cargo horizon-mod check` | EXIT 0 — *"…uses 498 items of the API (… 16 hooks …). Made for 0a875da."* (`sdk-check.log`) |
+| Package | `rm -f Cargo.lock && cargo horizon-mod build`, twice | **74,447 B**, SHA-256 `48a86037…6776`, **`cmp`-identical**; 67 entries, no `Cargo.lock` (`sdk-build.log`, `sdk-sha256.txt`) |
+| Package check | `cargo horizon-mod check rftoolsstorage.hmod` | `rftoolsstorage 0.2.5 (native-mod, format native-1/0a875da…/e59da90…, for 26.3)`, **74,447 B**, `48a86037…6776`, EXIT 0 (`sdk-fits.log`) |
+| Fits the pin | `cargo horizon-mod fits rftoolsstorage.hmod --build 0a875da91dbb…` | `0a875da  made for`, EXIT 0, sha `48a86037…6776` (`sdk-fits.log`) |
+| Fits another build | `cargo horizon-mod fits rftoolsstorage.hmod --build 0b14f8acfd…` | `0b14f8a  fits`, EXIT 0, sha `48a86037…6776` (`sdk-fits.log`) |
+| In game | `build-slot.sh run --step e2e -- bash tools/e2e.sh` | **PASS** + `EXIT:0` (`e2e-scanner.log`) |
+| Control | the same rig on the Nightly without the package | **FAIL** + `EXIT:1` (`e2e-scanner-control.log`) |
+| Counterfactual | a vanilla barrel where the scanner would be | **PASS** + `EXIT:0` (`e2e-scanner-counterfactual.log`) |
+| Selftest | `SELFTEST=1` (asserts the scan did not find the stone) | **FAIL** + `EXIT:1` (`e2e-scanner-selftest.log`) |
+| e2e gate | `check-e2e-logs.py rftoolsstorage-e2e --strict` | `logs=8 ok=8`, exit 0 |
+| Package gate | `verify-sdk-package.py rftoolsstorage` | `1/1 package(s) verified`, exit 0 |
+| Skills gate | `check-skills.py --notes ports/rftoolsstorage --strict` | `Skills line present`, PASS |
 
 **0.2.4 — the contents travel on the item (2026-11-21, pin `0a875da`)**
 

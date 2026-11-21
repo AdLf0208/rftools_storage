@@ -1,5 +1,6 @@
 {
   "values": [
-    "rftoolsstorage:modular_storage"
+    "rftoolsstorage:modular_storage",
+    "rftoolsstorage:storage_scanner"
   ]
 }

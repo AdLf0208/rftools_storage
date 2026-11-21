@@ -405,6 +405,135 @@ pub fn may_inspect(op: bool, same_level: bool, distance: f64) -> bool {
     op || (same_level && distance <= INSPECT_RANGE)
 }
 
+// --- the storage scanner (slice 5) ----------------------------------------
+
+/// The block the scanner slice implements: `rftoolsstorage:storage_scanner`.
+pub const STORAGE_SCANNER: &str = "rftoolsstorage:storage_scanner";
+
+/// Whether `block` is the storage scanner.
+#[must_use]
+pub fn is_storage_scanner(block: &str) -> bool {
+    block == STORAGE_SCANNER
+}
+
+/// `StorageScannerConfiguration.MAXENERGY`: how much FE a scanner holds.
+pub const SCANNER_MAX_ENERGY: u32 = 50_000;
+
+/// `StorageScannerConfiguration.RECEIVEPERTICK`: the most one fill moves.
+pub const SCANNER_RECEIVE_PER_TICK: u32 = 500;
+
+/// `StorageScannerConfiguration.rfPerRequest`: what one readout of what the
+/// scanned inventories hold costs (upstream charges it per item request; the
+/// port's readout is the request's price, `notes.md`).
+pub const SCANNER_RF_PER_REQUEST: u32 = 100;
+
+/// `StorageScannerConfiguration.rfPerInsert`: upstream's price for pushing one
+/// stack into a scanned inventory (carried for the automation slice).
+pub const SCANNER_RF_PER_INSERT: u32 = 20;
+
+/// `StorageScannerData.DEFAULT.radius`: one, a 3 x 3 x 3 box around the block.
+pub const SCANNER_DEFAULT_RADIUS: i32 = 1;
+
+/// `GuiStorageScanner`'s radius slider: `.realMinimum(RFToolsStorage.setup.xnet ?
+/// 0 : 1)`, `.realMaximum(20)` — 1 is the minimum without XNet.
+pub const SCANNER_MIN_RADIUS: i32 = 1;
+
+/// The GUI slider's upper end, and the radius a saved value is clamped to.
+pub const SCANNER_MAX_RADIUS: i32 = 20;
+
+/// A radius saved in the block's compound, clamped to the GUI's slider; a block
+/// with no saved radius scans at [`SCANNER_DEFAULT_RADIUS`], as upstream's
+/// attachment's default does.
+#[must_use]
+pub fn scanner_radius(saved: Option<i32>) -> i32 {
+    saved.map_or(SCANNER_DEFAULT_RADIUS, clamp_radius)
+}
+
+/// `radius` inside the GUI's slider range.
+#[must_use]
+pub fn clamp_radius(radius: i32) -> i32 {
+    radius.clamp(SCANNER_MIN_RADIUS, SCANNER_MAX_RADIUS)
+}
+
+/// Every block position in the scanner's box: `centre - radius ..= centre +
+/// radius` on each axis, upstream's `inRange` (`findInventories`' three nested
+/// loops). It is a cube, not a sphere.
+#[must_use]
+pub fn scan_positions(centre: [i32; 3], radius: i32) -> Vec<[i32; 3]> {
+    let radius = radius.max(0);
+    let side = usize::try_from(radius.saturating_mul(2).saturating_add(1)).unwrap_or(0);
+    let mut positions = Vec::with_capacity(side.saturating_pow(3));
+    for x in centre[0].saturating_sub(radius)..=centre[0].saturating_add(radius) {
+        for y in centre[1].saturating_sub(radius)..=centre[1].saturating_add(radius) {
+            for z in centre[2].saturating_sub(radius)..=centre[2].saturating_add(radius) {
+                positions.push([x, y, z]);
+            }
+        }
+    }
+    positions
+}
+
+/// What a scan costs off `stored`: the buffer after it, or none when it cannot
+/// pay [`SCANNER_RF_PER_REQUEST`].
+#[must_use]
+pub fn spend_power(stored: u32) -> Option<u32> {
+    stored.checked_sub(SCANNER_RF_PER_REQUEST)
+}
+
+/// One kind the scan found, with the count of it in every inventory together.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Found {
+    /// The item id (`minecraft:stone`).
+    pub item: String,
+    /// How many of it the scanned inventories hold.
+    pub count: u32,
+}
+
+/// Merges the kinds an inventory walk found into one entry a kind, sorted by
+/// item id — upstream's `SortingMode.NAME`, the default.
+#[must_use]
+pub fn merge_counts(entries: &[(String, u32)]) -> Vec<Found> {
+    let mut found: Vec<Found> = Vec::new();
+    for (item, count) in entries {
+        if *count == 0 {
+            continue;
+        }
+        match found.binary_search_by(|entry| entry.item.as_str().cmp(item.as_str())) {
+            Ok(index) => found[index].count = found[index].count.saturating_add(*count),
+            Err(index) => found.insert(
+                index,
+                Found {
+                    item: item.clone(),
+                    count: *count,
+                },
+            ),
+        }
+    }
+    found
+}
+
+/// The scan's answer after a paid scan: what the inventories hold, then the
+/// buffer left.
+#[must_use]
+pub fn scan_line(after: u32, found: &[Found]) -> String {
+    let items = if found.is_empty() {
+        "empty".to_owned()
+    } else {
+        found
+            .iter()
+            .map(|entry| format!("{} {}", entry.item, entry.count))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    format!("{items} ({after}/{SCANNER_MAX_ENERGY} FE)")
+}
+
+/// The scan's answer when the buffer cannot pay for it.
+#[must_use]
+pub fn no_power_line(stored: u32) -> String {
+    format!("no power ({stored}/{SCANNER_MAX_ENERGY} FE)")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -779,5 +908,101 @@ mod tests {
         assert_eq!(storage.stacks_used(), 0);
         assert_eq!(storage.summary(64), "0/0 empty");
         assert_eq!(storage.state_word(), "no module");
+    }
+
+    #[test]
+    fn the_scanner_scans_a_cube_of_its_radius_and_nothing_outside_it() {
+        // Upstream's `inRange`/`findInventories`: `pos - radius ..= pos + radius`
+        // on every axis, a cube, not a sphere.
+        let centre = [10, 64, -3];
+        let near = scan_positions(centre, 1);
+        assert_eq!(near.len(), 27, "a 3 x 3 x 3 box at the default radius");
+        assert!(
+            near.contains(&centre),
+            "the scanner's own cell is in the walk"
+        );
+        assert!(near.contains(&[11, 65, -2]), "a corner of the box is in");
+        assert!(
+            !near.contains(&[12, 64, -3]),
+            "two blocks away is outside radius 1"
+        );
+        let wider = scan_positions(centre, 2);
+        assert_eq!(wider.len(), 125, "a 5 x 5 x 5 box");
+        assert!(wider.contains(&[12, 66, -1]), "the box is a cube");
+        assert!(
+            !wider.contains(&[13, 64, -3]),
+            "three away is outside radius 2"
+        );
+    }
+
+    #[test]
+    fn the_scanners_radius_is_the_gui_sliders_one_to_twenty() {
+        // `StorageScannerData.DEFAULT.radius` = 1; the GUI's slider is 1..20
+        // (0 only with XNet, which this pin does not have).
+        assert_eq!(SCANNER_DEFAULT_RADIUS, 1);
+        assert_eq!(SCANNER_MIN_RADIUS, 1);
+        assert_eq!(SCANNER_MAX_RADIUS, 20);
+        assert_eq!(clamp_radius(0), 1, "below the slider's minimum");
+        assert_eq!(clamp_radius(-3), 1);
+        assert_eq!(clamp_radius(1), 1);
+        assert_eq!(clamp_radius(20), 20);
+        assert_eq!(clamp_radius(21), 20, "past the slider's maximum");
+        assert_eq!(
+            scanner_radius(None),
+            SCANNER_DEFAULT_RADIUS,
+            "an unscanned block scans its neighbours"
+        );
+        assert_eq!(scanner_radius(Some(3)), 3);
+        assert_eq!(scanner_radius(Some(99)), 20);
+    }
+
+    #[test]
+    fn a_scan_costs_the_request_price_and_refuses_below_it() {
+        // The jar's config defaults: scannerMaxRF 50,000, scannerRFPerTick 500,
+        // rfPerRequest 100, rfPerInsert 20.
+        assert_eq!(SCANNER_MAX_ENERGY, 50_000);
+        assert_eq!(SCANNER_RECEIVE_PER_TICK, 500);
+        assert_eq!(SCANNER_RF_PER_REQUEST, 100);
+        assert_eq!(SCANNER_RF_PER_INSERT, 20);
+        assert_eq!(spend_power(0), None, "an empty buffer scans nothing");
+        assert_eq!(spend_power(99), None, "one short is still no scan");
+        assert_eq!(spend_power(100), Some(0), "the last 100 buy one scan");
+        assert_eq!(spend_power(5_000), Some(4_900), "a scan takes its price");
+    }
+
+    #[test]
+    fn the_scan_counts_each_kind_once_across_the_inventories_it_found() {
+        let found = merge_counts(&[
+            ("minecraft:stone".to_owned(), 64),
+            ("minecraft:dirt".to_owned(), 3),
+            ("minecraft:stone".to_owned(), 32),
+        ]);
+        assert_eq!(found.len(), 2, "one entry a kind");
+        assert_eq!(
+            found[0].item, "minecraft:dirt",
+            "sorted by item id (the GUI's NAME mode)"
+        );
+        assert_eq!(found[0].count, 3);
+        assert_eq!(found[1].item, "minecraft:stone");
+        assert_eq!(found[1].count, 96, "64 + 32, the whole count");
+        assert!(
+            merge_counts(&[]).is_empty(),
+            "nothing found, nothing listed"
+        );
+    }
+
+    #[test]
+    fn the_scan_reply_names_the_items_and_the_energy_left_or_the_missing_power() {
+        let found = merge_counts(&[("minecraft:stone".to_owned(), 64)]);
+        assert_eq!(
+            scan_line(4_900, &found),
+            "minecraft:stone 64 (4900/50000 FE)"
+        );
+        assert_eq!(
+            scan_line(4_900, &[]),
+            "empty (4900/50000 FE)",
+            "an empty scan still says what it cost"
+        );
+        assert_eq!(no_power_line(99), "no power (99/50000 FE)");
     }
 }

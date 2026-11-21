@@ -3,6 +3,7 @@
   "icon": "rftoolsstorage:modular_storage",
   "items": [
     "rftoolsstorage:modular_storage",
+    "rftoolsstorage:storage_scanner",
     "rftoolsstorage:storage_module0"
   ]
 }
