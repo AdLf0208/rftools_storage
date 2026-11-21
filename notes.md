@@ -13,23 +13,25 @@ differences, are in [`FINDINGS.md`](FINDINGS.md).
 publishing (ARCHITECTURE.md §8); the port carries the upstream MIT notice in
 [`LICENSE`](LICENSE) and its provenance in [`LICENSE-NOTICE.md`](LICENSE-NOTICE.md).
 
-**Format: the SDK package (2026-11-18), version 0.2.2.** One flat `.hmod` —
+**Format: the SDK package (2026-11-18), version 0.2.3.** One flat `.hmod` —
 `horizon-mod.toml` + `Cargo.toml` + `src/` + `assets/` + `data/` — built by the
 launcher against SDK nightly **`0a875da91dbb0fdcb7ba8c42c11341aa229af51a`** with
 horizon-mixins **`e59da9094f0c2fdda6c627fe9eff22dec6a906f0`** (see
 [`## Migration to the SDK format`](#migration-to-the-sdk-format--version-020) and
-[`## Slice 2`](#slice-2--the-storages-menu-version-022)).
+[`## Slice 2`](#slice-2--the-storages-menu-version-022),
+[`## Slice 3`](#slice-3--the-module-s-card-slot-version-023)).
 The retired `.hnmod` container pinned Horizon `1d63e0a5…` / mixins `5a64af93…`;
 `src/runtime.rs` was byte-identical to the retired
 `mixins/rftoolsstorage/runtime.rs` until the 2026-11-18 review fixes gave it the
 reach rule, and slice 2 added the menu's two rules.
 
 Status: **ported-partial** — slice 1 (the modular storage block with a tier-1
-storage module) and slice 2 (its **menu**: a 100-slot grid opened by a right
-click, its slot rules and the padlock) are implemented and verified in a
-launcher-built game at the pin (four legs: default, control, barrel
-counterfactual, `SELFTEST=1`; `ports/_shared/evidence/rftoolsstorage-e2e/`). The
-gap list below is the rest of the mod.
+storage module), slice 2 (its **menu**: a 100-slot grid opened by a right click,
+its slot rules and the padlock) and slice 3 (the menu's **card slot**, where the
+module itself lives, so it can be taken back out) are implemented and verified in
+a launcher-built game at the pin (five legs: default, control, barrel
+counterfactual, `SELFTEST=1`, `NEGATIVE=1`; `ports/_shared/evidence/rftoolsstorage-e2e/`).
+The gap list below is the rest of the mod.
 
 ## Class + tier and the approach
 
@@ -119,6 +121,32 @@ gap list below is the rest of the mod.
 6. The `facing` comes from the template's rule (the face you click) rather than
    McJtyLib's "face the placer": the port does not inject `state_for_placement`,
    so the front is the clicked face. The block accepts a click on any face.
+7. **The card slot's rule cannot be per-slot** (slice 3): the engine consults the
+   card slot's `menu_slot_rules` answer while it plans a click on **another** slot,
+   and a refusal there blocks that click (measured: with the card's rule strict, a
+   click on a locked storage's grid was refused). So the card slot answers "a
+   storage module, or anything once it holds one" — `runtime::card_accepts` — and
+   only an *empty* card slot says "module only". Upstream says "module only" and
+   "nothing while locked"; the two cases the port differs in are ones the engine's
+   own slot caps already cover (a second module cannot stack) or that cannot arise
+   (a locked storage always holds its module, because taking it out is what leaves
+   the storage unlocked).
+8. **A non-module in the card slot sets no capacity**, and a module is what makes
+   the storage work: put a stone there and the readout is `0/0 empty no module`;
+   the stone is an ordinary item slot's, returned by a click. Upstream refuses the
+   stone at `mayPlace` time; see deviation 7 for why the port cannot.
+9. **The block's lock byte outlives the module.** A storage whose card slot is
+   emptied reads "no module" and takes a module (the pin has no `may_pickup` rule,
+   so the module's own removal cannot be refused while locked); the byte stays
+   where it is, so the lock returns with the module. A module-less storage is never
+   *shown* locked and never guards anything (`Storage::accepts` needs the module).
+10. **A refused click in the card slot can show on the client until the menu is
+    opened again.** The engine's client-side prediction applies a click on the card
+    slot without asking the mod's rule, and a server refusal sends no correction,
+    so `ctl screen` (and a player's own screen) shows the stack there until the
+    next menu open re-syncs it. The server never takes it: `/rftoolsstorage info`
+    and the reopened grid are the truth, and the e2e asserts both. Grid slots do
+    not do this (their refusals are predicted).
 
 ## Upstream defects fixed
 
@@ -140,11 +168,14 @@ None. The two candidates were checked and left alone, on purpose:
   remote storage block.
 - The type modules (`generic`/`oredict`), the filter module, the dump module, the
   storage control module, the tablet, and the crafting grid.
-- The GUI's **list controls** (search, sort, compact, cycle, visible-size), the
-  **module slot and the three card slots** (upstream's GUI has them; here the
-  sneak click installs the module and nothing takes it out), the module tooltip,
-  JEI/TOP/XNet/RFToolsUtility compat, the `/rftoolsstorage list|restore` commands
-  and the config. (The padlock and the storage grid itself are slice 2.)
+- The GUI's **list controls** (search, sort, compact, cycle, visible-size) and the
+  **two card slots beside the module's** (the type module is `@todo 1.14` upstream,
+  and the filter slot takes RFToolsBase's `FilterModuleItem`, which this port does
+  not have), the module tooltip, JEI/TOP/XNet/RFToolsUtility compat, the
+  `/rftoolsstorage list|restore` commands and the config. (The padlock and the
+  storage grid are slice 2; the **module slot** is slice 3. `list`/`restore` are
+  keyed by upstream's world-level `StorageHolder` UUID map, which this port
+  replaced — deviation 1 — so they have nothing to list.)
 - The `rftoolsbase:machine_frame` ingredient and `rftoolsbase`'s casing textures
   in the model chain (the port copied the textures into its own namespace, so
   only the recipe needs RFToolsBase installed).
@@ -164,7 +195,7 @@ retired helper files and their mapping are in
 | `run_mod_command` | their answers |
 | `screen` / `screen_draw` / `screen_click` (BlockEntityPart, API 19/20) | the menu's 366 x 210 layout, the title, the inventory label and the padlock; a press on the padlock's rectangle answers button 0 |
 | `menu_button` (BlockEntityPart, API 20) | the padlock: flip the lock of a storage that has a module, answer on the action bar, push the state into the menu's data slot |
-| `menu_slot_rules` (MenuPart, API 130) | a grid slot takes a stack only while locked, and only when it is empty or holds that same kind |
+| `menu_slot_rules` (MenuPart, API 130) | a grid slot takes a stack only while locked, and only when it is empty or holds that same kind; the card slot takes a storage module (and, once it holds one, anything — deviation 7) |
 | `player_container_open` (API 152) | our menu's open fills the data slot with the block's real lock state (data slots are not saved) |
 | `PlayerRef::open_menu` | the plain click opens the menu itself: the block's `end_rod` template has no use of its own, so the mod asks for it as `BlockMenuProvider` would |
 | ~~`server_tick`~~ | **retired**: it existed only to resend a LAN guest's inventory after the old `native_give_stack`, which bypassed the inventory sync. `PlayerRef::give_stack` is `/give` with the vanilla sync, so the workaround (and its `Mutex` state) is gone, not a gap |
@@ -487,6 +518,151 @@ differential.
 4. **`menu_slot_rules` asks per slot and stack** while a click plans: answer from the block
    entity's saved compound (one read per slot) and nothing else; a shift-click asks many.
 
+## Slice 3 — the module's card slot (version 0.2.3)
+
+The gap line slice 2 left: *"the **module slot and the three card slots** (upstream's GUI have
+them; here the sneak click installs the module and nothing takes it out)"*. Upstream's
+`ModularStorageContainer` keeps the module in a real card slot
+(`SLOT_STORAGE_MODULE = 0`, `mayPlace` = `if (isLocked()) return false;` then
+`stack.getItem() instanceof StorageModuleItem`), so a module can be swapped; the port only had
+the sneak click, which is one-way.
+
+- **The slot.** The block's container is **101 slots**: 0..99 the storage (tier 1's hundred) and
+  100 the **card slot**, holding the module item itself. `faces`/`inputs`/`outputs` stay 0..99, so
+  hoppers never reach the card (upstream's card handler is not the block's item capability). The
+  menu type declares 101 slots and the screen places the card above the grid (8, 4), with the
+  padlock moved to (32, 6).
+- **The truth is the item.** The tier comes from the card slot's stack (`module_tier`), not from
+  the saved compound, so taking the module out *is* the removal — the game's own item move, no
+  command and no new hook. `write_storage` never writes the card slot, and writes no storage slot
+  at all while no module is in.
+- **The contents outlive the module.** A block with an empty card slot keeps its hundred slots
+  (hidden: `0/0 empty no module`), and the module back in the slot finds them — upstream's own
+  model (its contents live in a world-level map keyed by the module), with this port's one store
+  per block (deviation 1).
+- **The rule.** `runtime::card_accepts` (a storage module, or anything once it holds one — see
+  deviation 7 for the measurement that forced the second half) and `runtime::slot_accepts` (the
+  grid's, unchanged from slice 2).
+- **A 0.2.2 block is migrated, not lost.** 0.2.2 recorded the tier in the compound's `module` key.
+  A block found with that key and an empty card slot has the module item written into the slot
+  (and the key cleared) the first time its menu opens, its padlock is pressed, a click reaches it
+  or `/rftoolsstorage info` reads it — so no published world loses its module.
+- **The sneak click still installs**, now *into the slot* (`put_card`), so both paths leave the
+  module where the menu can take it back out.
+
+### Red → green (the rules)
+
+`slot_accepts`/`card_accepts` were stubbed to `false` and the suite run
+(`ports/_shared/evidence/rftoolsstorage/slice3-red.log`, `TEST_EXIT:101`):
+
+```
+test runtime::tests::a_module_goes_in_only_while_unlocked_and_only_once ... FAILED
+test runtime::tests::the_card_slot_takes_a_module_and_never_blocks_another_slot ... FAILED
+test runtime::tests::the_grid_takes_a_stack_only_when_locked_and_in_a_slot_of_its_own ... FAILED
+...
+test result: FAILED. 18 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+```
+
+The slice's other new rules had their own red in the first design — `module_id`, the detach/hide
+gate and the storage accessors — `slice3-red-first-design.log`, `16 passed; 5 failed`:
+
+```
+test runtime::tests::a_moduleless_storage_reads_as_empty_whatever_the_block_holds ... FAILED
+test runtime::tests::a_module_id_round_trips_through_its_tier ... FAILED
+test runtime::tests::a_removed_module_hides_the_contents_and_its_return_finds_them ... FAILED
+...
+test result: FAILED. 16 passed; 5 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+```
+
+Implemented, then **21 passed, 0 failed** (`sdk-test.log`).
+
+### The card slot's answer: what the engine actually asks (measured)
+
+The first design gave the card slot upstream's own per-slot rule. In game that *broke the grid*:
+a click on a **locked** storage's first storage slot stored nothing. Instrumenting the hook (the
+asked index and an answer encoded into `max_stack`, read back through the readout — the probe is
+in this slice's history, not in the package) showed:
+
+| click on | the ask the engine applies |
+|---|---|
+| the menu's first slot (300) | `slot = 0` |
+| the menu's hundredth slot (399) | `slot = 99` |
+| the card slot (400) | `slot = 100` |
+
+so the index is honest — but the engine also consults the **card slot** while it plans a click on
+another slot, and a `may_place = false` there blocks the click. That is why `card_accepts` answers
+"anything" once the card holds the module: the alternative was a storage whose grid refused every
+stack while locked. Recorded as deviation 7 and as an engine issue worth reporting: *a
+`menu_slot_rules` refusal on one slot must not cancel a click on another*.
+
+### In game (`ports/_shared/evidence/rftoolsstorage-e2e/`)
+
+| Leg | Log | Verdict |
+|---|---|---|
+| default, the launcher-built package | `e2e-cardslot.log` | **PASS** + `EXIT:0` |
+| control (the same Nightly without the package) | `e2e-cardslot-control.log` | **PASS** + `EXIT:0` — `{"error":"unknown item rftoolsstorage:modular_storage"}` |
+| counterfactual (a vanilla barrel in the same rig) | `e2e-cardslot-counterfactual.log` | **PASS** + `EXIT:0` — a 27-slot chest menu with no card slot at 400 |
+| `SELFTEST=1` (asserts the barrel's 27-slot menu on the storage) | `e2e-cardslot-selftest.log` | **FAIL** + `EXIT:1` — *"the storage's menu shows 101 slots, not 27: the card-slot assertion is alive"* |
+| `NEGATIVE=1` (asserts the card slot *took* the stone) | `e2e-cardslot-negative.log` | **FAIL** + `EXIT:1` — *"the card slot refused the stone … so this inverted assertion fails as it must"* |
+
+What `e2e-cardslot.log` asserts, in order (every number before and after): the block places and
+reads `0/0 empty no module`; **the menu shows 101 container slots** and the card slot is empty;
+**a stone is refused by the card slot** — the server reads `0/0` and the stone is still in the
+inventory, and the reopened menu's card slot is empty; **a `storage_module0` put into the card
+slot sets the storage** (`0/6400 empty unlocked`, none left in the inventory, the reopened menu's
+card slot holds it ×1); **it comes back out through the slot** (`0/0 empty no module`, the module
+in the inventory) — the gap this slice closes; **the sneak click still installs it** (and leaves
+it in the slot); unlocked, the grid still refuses a stack; the padlock locks; a locked storage
+stores 64 through the grid (`64/6400`, the re-synced grid shows 64 in slot 300); while locked, the
+sneak gesture refuses a module (`locked — unlock it first`); **the module comes out of the card
+slot and the block keeps its contents** — `0/0 empty no module`, then the module back in the slot
+reads **`64/6400 minecraft:stone locked`**: the 64 stone survived the module's removal; one kind a
+slot (dirt refused by the stone's slot, then the grid's last slot, 399, takes it, `128/6400`); a
+click on a filled slot gives the stack back; `/rftoolsstorage lock` toggles; **the storage fills to
+6,400 with the card slot untouched** and a further click moves nothing; a withdrawal
+(`6400 -> 6336`) is taken back; **a relaunch keeps the contents, the lock, the grid and the module
+in the card slot**; the carried `storage_module0` recipe crafts in a real crafting table (and a
+stick/a block where its keys go craft nothing).
+
+### Coverage (every jar family in this port)
+
+| Family | State |
+|---|---|
+| `modular_storage` block, its states/models/loot/tag | **tested** (place + read back, `e2e-cardslot.log`) |
+| the storage slot rules (locked, one kind a slot, 64 a slot, 100 slots) | **tested** (grid clicks + the readout, `e2e-cardslot.log`; rules in `runtime` tests) |
+| the menu: 100-slot grid, the card slot, the padlock, the screen | **tested** (`e2e-cardslot.log`) |
+| the **module slot**: install, remove, the tier it sets, the contents it keeps | **tested** (`e2e-cardslot.log`: 0 → 6400 → 64 kept across a removal → 6400/6400) |
+| the quick gestures (module, insert, seal, withdraw) | **tested** (`e2e-cardslot.log`) |
+| the 0.2.2 module migration (compound `module` → the card slot's item) | **unit-tested** rule (`module_id` round trip); the glue path runs on the first menu open, padlock press, click or `/info` of an old block. **Not in game**: building a 0.2.2-saved block needs a world file this harness does not write |
+| `storage_module0` recipe | **tested** — crafted in a real table, result ×1, reaches the inventory; a stick in the iron's cell crafts nothing |
+| `modular_storage` recipe | **blocked** on `rftoolsbase:machine_frame` (a stone block in that cell crafts nothing; RFToolsBase is not in this build) |
+| tiers 2-4 (`storage_module1..3`) | **blocked**(container per block, menu ≤ 256 slots) |
+| the two card slots beside the module's (type module = `@todo 1.14`; filter = RFToolsBase's item) | **not ported** (upstream's type slot is dead code; the filter item belongs to a port this build does not carry) |
+| the remote module/block, `storage_scanner`, `crafting_manager` | **not ported** (later slices) |
+| the list controls (search/sort/compact/cycle/visible-size) | **not ported** (next slice; the pin's screen is a fixed slot layout) |
+| commands `info`/`lock` | **tested** (`e2e-cardslot.log`, parsed replies) |
+| `/rftoolsstorage list|restore`, config, compat | **not ported** (`list`/`restore` need upstream's UUID store) |
+
+### Traps this slice paid for
+
+1. **A mod menu's client copy is not the truth.** A click the server refuses in the *card* slot
+   stays on the client's screen until the menu is reopened (no corrective packet is sent for a
+   refusal), while a grid slot's refusal is predicted locally and shows at once. Every slot read
+   in the e2e goes through `sync_menu` (close + reopen) and every state claim through
+   `/rftoolsstorage info`.
+2. **`ctl command "clear @s"` clears nothing from the console path.** It answers `ok:true`
+   anyway (the campaign's known trap), so leftovers double the counts; `clear @a` is the form
+   that works (`ctl command` runs as the console, which has no `@s`).
+3. **`ctl container` writes the container's first empty slot, card slot included.** The fill loop
+   stops at the storage's hundred slots and asserts the card slot still holds the module.
+4. **A locked storage can be emptied of its module.** The pin's menu rules gate placement only
+   (there is no `may_pickup` answer a mod can give), so the port lets the module come out and
+   treats a module-less storage as unlocked and inert — the alternative would be a block whose
+   module could never go back in.
+5. **A storage slot's stack limit is the item's, not our rule's.** The engine clamps
+   `max_stack` to 1..99 and then to the item's own size; a module is `stacksTo(1)`, so a click
+   puts one in and leaves the rest on the cursor (the e2e gives exactly one).
+
 Skills: superpowers/using-superpowers, brainstorming, writing-plans, test-driven-development, systematic-debugging, verification-before-completion; BeautifulRust/rust-best-practices
 
 ## Verification
@@ -494,6 +670,24 @@ Skills: superpowers/using-superpowers, brainstorming, writing-plans, test-driven
 Full evidence in [`VALIDATION.md`](VALIDATION.md); the e2e logs are in
 `ports/_shared/evidence/rftoolsstorage-e2e/` (the game legs) and
 `ports/_shared/evidence/rftoolsstorage/` (the ladder, package and fits).
+
+**0.2.3 — the card slot (2026-11-21, pin `0a875da`)**
+
+| Step | Command | Result |
+|---|---|---|
+| Red proof | `cargo test` with `slot_accepts`/`card_accepts` stubbed | **3 failed**, 18 passed (`slice3-red.log`, `TEST_EXIT:101`); the detach/hide rules' own red is `slice3-red-first-design.log` (`5 failed`, `TEST_EXIT:101`); both quoted above |
+| Runtime + glue tests | `cargo test` | **21 passed**, 0 failed (`sdk-test.log`, `TEST_EXIT:0`) |
+| Lints | `cargo clippy --all-targets -- -D warnings` | `CLIPPY_EXIT:0`, 0 warnings (`sdk-clippy.log`) |
+| Formatting | `rustfmt --edition 2024 --check src/{lib,support,runtime}.rs` | `FMT_EXIT:0` (`sdk-test.log`) |
+| SDK gate | `cargo horizon-mod check` | EXIT 0 — *"…uses 395 items of the API (… 13 hooks …). Made for 0a875da."* (`sdk-check.log`) |
+| Package | `rm -f Cargo.lock && cargo horizon-mod build`, twice | **57,648 B**, SHA-256 `7e070957…2f3f`, **`cmp`-identical**; 58 entries, no `Cargo.lock` (`sdk-sha256.txt`) |
+| Package check | `cargo horizon-mod check rftoolsstorage.hmod` | `rftoolsstorage 0.2.3 (native-mod, format native-1/0a875da…/e59da90…, for 26.3)`, **57,648 B**, `7e070957…2f3f`, EXIT 0 (`sdk-check.log`) |
+| Fits the pin | `cargo horizon-mod fits rftoolsstorage.hmod --build 0a875da` | `0a875da  made for`, EXIT 0 (`sdk-check.log`) |
+| Fits another build | `cargo horizon-mod fits rftoolsstorage.hmod --build 0b14f8a` | `0b14f8a  fits`, EXIT 0 (`sdk-check.log`) |
+| In game | `build-slot.sh run --step e2e -- bash tools/e2e.sh` | **PASS** + `EXIT:0` (`e2e-cardslot.log`); control `EXIT:0`, counterfactual `EXIT:0`, `SELFTEST=1` **FAIL** + `EXIT:1`, `NEGATIVE=1` **FAIL** + `EXIT:1` (`e2e-cardslot-*.log`) |
+| e2e gate | `check-e2e-logs.py rftoolsstorage-e2e --strict` | `logs=11 ok=11`, exit 0 |
+| Package gate | `verify-sdk-package.py rftoolsstorage` | `1/1 package(s) verified`, exit 0 |
+| Skills gate | `check-skills.py --notes ports/rftoolsstorage --strict` | `Skills line present`, PASS |
 
 **0.2.2 — the menu (2026-11-21, pin `0a875da`)**
 

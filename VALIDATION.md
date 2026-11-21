@@ -2,13 +2,13 @@
 
 Slice 1 (the `modular_storage` block with a tier-1 storage module).
 
-**Version 0.2.2 is the current SDK package (2026-11-21):** one flat `.hmod`, SDK
+**Version 0.2.3 is the current SDK package (2026-11-21):** one flat `.hmod`, SDK
 nightly `0a875da91dbb0fdcb7ba8c42c11341aa229af51a`, mixins
-`e59da9094f0c2fdda6c627fe9eff22dec6a906f0`. **§0b is this slice's evidence (the
-menu) and is where the in-game legs are**; §0 is the 0.2.0 migration and its
-staged ladder; §1–§6 are the retired 0.1.0 `.hnmod` run (pin `1d63e0a5…` /
-`5a64af93…`), kept as history. The 0.2.x `tools/e2e.sh` runs on a launcher-built
-game (`ports/tools/launcher-game.sh`).
+`e59da9094f0c2fdda6c627fe9eff22dec6a906f0`. **§0c is this slice's evidence (the
+card slot) and is where the in-game legs are**; §0b is slice 2's (the menu) and
+§0 the 0.2.0 migration; §1–§6 are the retired 0.1.0 `.hnmod` run (pin `1d63e0a5…`
+/ `5a64af93…`), kept as history. The 0.2.x `tools/e2e.sh` runs on a
+launcher-built game (`ports/tools/launcher-game.sh`).
 
 Every command below ran through `ports/tools/build-slot.sh` (a lease per step);
 in 0.1.0 compile steps forwarded to the second machine and game legs ran locally
@@ -38,6 +38,85 @@ All steps in one lease (`--job sdk-rfs --step check`), then a repeat
 installed then). The launcher wrapper `ports/tools/launcher-game.sh` later built
 and exported a game carrying the package, and §0b has the in-game legs for
 0.2.2. The 0.1.0 logs in §4 stay as history.
+
+## 0c. The card slot — version 0.2.3 (2026-11-21)
+
+Slice 3: the menu's **card slot** (`ModularStorageContainer.SLOT_STORAGE_MODULE`) — the module
+item lives in container slot 100, so it can be put in and taken back out. Ladder and package
+logs: `ports/_shared/evidence/rftoolsstorage/`; game legs:
+`ports/_shared/evidence/rftoolsstorage-e2e/`.
+
+| Step | Command | Result | Log |
+|---|---|---|---|
+| red proof | `cargo test` with `slot_accepts`/`card_accepts` stubbed | **FAILED. 18 passed; 3 failed**, `TEST_EXIT:101` | `slice3-red.log` |
+| red proof, the detach/hide rules | the same, first design | **FAILED. 16 passed; 5 failed**, `TEST_EXIT:101` | `slice3-red-first-design.log` |
+| tests | `cargo test` | `running 21 tests` → **21 passed**, 0 failed, `TEST_EXIT:0` | `sdk-test.log` |
+| lints | `cargo clippy --all-targets -- -D warnings` | `Finished`, **CLIPPY_EXIT:0**, 0 warnings | `sdk-clippy.log` |
+| format | `rustfmt --edition 2024 --check src/{lib,support,runtime}.rs` | `FMT_EXIT:0` | `sdk-test.log` |
+| SDK gate | `cargo horizon-mod check` | **CHECK_EXIT:0** — *"RFTools Storage uses 395 items of the API (5 Part kinds, 1 capability, 101 fields or variants, 13 hooks, 33 hook arguments, 2 macros, 119 methods, 25 traits, 96 types). Made for 0a875da."* | `sdk-check.log` |
+| package | `rm -f Cargo.lock && cargo horizon-mod build`, twice | **57,648 B**, SHA-256 `7e0709577e4e29761207c95b163ceb8a1e30ff0bf829bfb52f54fc3aacba2f3f`, **`cmp`-identical** | `sdk-sha256.txt` |
+| package check | `cargo horizon-mod check rftoolsstorage.hmod` | `rftoolsstorage 0.2.3 (native-mod, format native-1/0a875da…/e59da90…, for 26.3)`, **57,648 bytes**, `7e070957…2f3f`, **FILE_CHECK_EXIT:0** | `sdk-check.log` |
+| entries | `unzip -l rftoolsstorage.hmod` | **58 files**, no `Cargo.lock`; the packaged `src/lib.rs`, `src/support.rs`, `src/runtime.rs` and `data/.../menu/modular_storage.json` are byte-identical to the tree | `sdk-sha256.txt` |
+| fits, the pin | `cargo horizon-mod fits rftoolsstorage.hmod --build 0a875da` | `0a875da  made for`, **FITS_PIN_EXIT:0** | `sdk-check.log` |
+| fits, another build | `cargo horizon-mod fits rftoolsstorage.hmod --build 0b14f8a` | `0b14f8a  fits`, **FITS_OTHER_EXIT:0** | `sdk-check.log` |
+| in game | `build-slot.sh run --job W1-rftoolsstorage --step e2e -- bash tools/e2e.sh` | **PASS** + `EXIT:0` | `rftoolsstorage-e2e/e2e-cardslot.log` |
+| control | the same leg on the Nightly **without** the package | **PASS** + `EXIT:0` (`{"error":"unknown item rftoolsstorage:modular_storage"}`) | `e2e-cardslot-control.log` |
+| counterfactual | a vanilla barrel in the same rig | **PASS** + `EXIT:0` — 27 slots, no card slot at 400, its first slot takes the stack | `e2e-cardslot-counterfactual.log` |
+| selftest | `SELFTEST=1` (asserts a 27-slot menu on the storage) | **FAIL** + `EXIT:1` — *"the storage's menu shows 101 slots, not 27: the card-slot assertion is alive"* | `e2e-cardslot-selftest.log` |
+| negative | `NEGATIVE=1` (asserts the card slot took the stone) | **FAIL** + `EXIT:1` — *"the card slot refused the stone (…), so this inverted assertion fails as it must"* | `e2e-cardslot-negative.log` |
+| e2e gate | `python3 ports/tools/check-e2e-logs.py rftoolsstorage-e2e --strict` | `logs=11  ok=11`, exit 0 | — |
+| package gate | `python3 ports/tools/verify-sdk-package.py rftoolsstorage` | `1/1 package(s) verified`, exit 0 | — |
+| skills gate | `python3 ports/tools/check-skills.py --notes ports/rftoolsstorage --strict` | `Skills line present`, PASS | — |
+
+The default leg's transcript (abridged; the log has every `ctl` reply):
+
+```
+== a fresh block: no module, and the readout says so ==
+readout: rftoolsstorage:modular_storage: 0/0 empty no module
+== the plain click opens the storage's menu: 100 storage slots and the card slot ==
+panel origin 30,15; the menu shows 101 container slots; the card slot: 'empty'
+== CONTROL A: the card slot refuses a stack that is not a storage module ==
+the click left the open menu showing 'minecraft:stone'; the server reads: … 0/0 empty no module; stone in the inventory: 64
+reopened, the card slot is 'empty'
+== a storage module goes into the card slot (upstream's SLOT_STORAGE_MODULE) ==
+readout: … 0/6400 empty unlocked; modules in the inventory: 0
+the reopened menu's card slot: '1 rftoolsstorage:storage_module0'
+== …and it comes back out through the card slot (nothing could take it out before) ==
+the card slot after taking the module out: 'empty'
+readout: … 0/0 empty no module; modules in the inventory: 1
+== a storage module in the hand still installs (the sneak gesture, now into the slot) ==
+action bar: 'Modular Storage: module installed, 100 slots'; readout: … 0/6400 empty unlocked; modules in the hand: 0
+the gesture left the module in the card slot: 'rftoolsstorage:storage_module0'
+== CONTROL B: unlocked, the menu's grid still refuses a stack ==
+the click left the open menu showing '0' in slot 300; the server reads: … 0/6400 empty unlocked
+== the panel's padlock seals it (upstream's lockButton) ==
+action bar: 'Modular Storage: locked'; readout: … 0/6400 empty locked
+== a locked storage stores the stack put into a grid slot ==
+stored: 64 (the server); stone in the hand: 0
+the re-synced grid's slot 300: '64 minecraft:stone'
+== while locked, the card slot takes no module (the sneak gesture says so) ==
+action bar: 'Modular Storage: locked — unlock it first'; …; modules in the hand: 1
+== the module comes out of the card slot, and the block keeps its contents ==
+the card slot after taking the module out: 'empty'
+readout with the module out: … 0/0 empty no module; modules in the inventory: 1
+== …and the module back in the card slot finds the 64 stone it left ==
+readout after the module came back: … 64/6400 minecraft:stone locked
+== one kind a slot: dirt is refused by the stone's slot ==
+after the dirt click on the stone's slot: … 64/6400 minecraft:stone locked
+…and takes the grid's last one: the re-synced grid's slot 399 holds: '64 minecraft:dirt'
+…
+== the contents, the lock, the grid and the module's slot survive a relaunch ==
+relaunch: 6400 -> 6400 (state locked); the reopened grid shows 64 in slot 300, the card slot 'rftoolsstorage:storage_module0'
+== the carried storage-module recipe crafts in a real crafting table ==
+the grid's result: 'rftoolsstorage:storage_module0 x1'
+the module recipe with a stick instead of iron: 'empty'
+the storage recipe with a stone block where rftoolsbase:machine_frame belongs: 'empty'
+PASS: … EXIT:0
+```
+
+**Not run:** a client screenshot of the card slot (`--offscreen` + `ctl screenshot`: the panel is
+asserted through `ctl screen`/`ctl ui`, not by pixels), and the 0.2.2 module migration in a real
+world (it needs a 0.2.2-saved block; its rule is unit-tested, see `notes.md` § Slice 3 coverage).
 
 ## 0b. The menu — version 0.2.2 (2026-11-21)
 

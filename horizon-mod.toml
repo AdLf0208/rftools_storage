@@ -1,14 +1,15 @@
 id = "rftoolsstorage"
 name = "RFTools Storage"
-version = "0.2.2"
+version = "0.2.3"
 description = """RFTools Storage for Horizon: the modular storage block. A storage module in the
-block sets its capacity (tier 1: 100 slots, one item kind a slot, 64 a slot), and the block
-stores nothing until it is locked. A right click opens the storage's own menu -- a 10 x 10 grid
-of its slots with the player's inventory beside it and a padlock on the panel; the grid takes a
-stack only while locked and only in a slot of its own kind. While sneaking, a click is the quick
-path instead: a module in hand installs, a held stack inserts, an empty hand seals or gives a
-stack back. /rftoolsstorage info|lock remain the readout and the operator's lock; they need an
-operator or a player within 8 blocks, and the lock only ever touches this mod's own block."""
+block's card slot sets its capacity (tier 1: 100 slots, one item kind a slot, 64 a slot), and the
+block stores nothing until it is locked. A right click opens the storage's own menu -- a 10 x 10 grid
+of its slots with the player's inventory beside it, the card slot that holds the module and a padlock
+on the panel; the grid takes a stack only while locked and only in a slot of its own kind, and the
+module can be put in or taken back out through its slot. While sneaking, a click is the quick path
+instead: a module in hand installs, a held stack inserts, an empty hand seals or gives a stack back.
+/rftoolsstorage info|lock remain the readout and the operator's lock; they need an operator or a
+player within 8 blocks, and the lock only ever touches this mod's own block."""
 authors = ["McJty"]
 # A native mod: Rust in src/, compiled by the launcher against the game build [native] pins,
 # beside data/ and assets/. The id is the resource namespace and the only identity: Cargo's

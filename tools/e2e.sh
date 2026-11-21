@@ -1,42 +1,41 @@
 #!/usr/bin/env bash
-# In-game check for RFTools Storage slice 2: the modular storage block and its menu.
+# In-game check for RFTools Storage slice 3: the storage's card slot.
 #
 # Default run (offscreen renderer, creative launch, then survival where a break
 # must drop):
 #   1. `rftoolsstorage:modular_storage` places and answers its readout
 #      (`0/0 empty no module`);
-#   2. CONTROL A — the plain click opens the storage's own menu (100 slots and
-#      the player's 36, the panel 366 x 210), and with no module neither the menu
-#      nor the sneak gesture stores: the slot stays empty, the readout stays
-#      `0/0`, the stone stays in the hand;
-#   3. a `storage_module0` in hand installs on a sneak click, and the block reads
-#      `0/6400 empty unlocked`;
-#   4. CONTROL B — unlocked, the menu's grid still refuses the stone (upstream's
-#      `if (!isLocked()) return false` on the slot), and so does the gesture;
-#   5. the panel's padlock seals it (upstream's `lockButton`), and a locked
-#      storage stores a stack put into a grid slot (`64/6400`);
-#   6. one kind a slot: dirt is refused by the slot holding stone and takes the
-#      next one (`128/6400`, 2 kinds);
-#   7. a click on a filled grid slot takes the stack back (`64/6400`);
-#   8. `/rftoolsstorage lock` unlocks and re-locks the block (the GUI button's
-#      other half), contents unchanged;
-#   9. the storage fills to 6,400 and the grid refuses the next stack — and takes
-#      it again after one stack is withdrawn through the grid (the control inside
-#      the same block);
-#  10. quitting and relaunching the same world keeps the contents, the lock and
-#      the grid, and the padlock shows the truth on the reopened menu;
-#  11. the carried `storage_module0` recipe crafts in a real crafting table and
-#      the crafted module reaches the inventory; a stick in the iron's cell and
-#      a stone block where `rftoolsbase:machine_frame` belongs craft nothing (the
-#      `modular_storage` recipe needs that mod, which this build does not have);
+#   2. the plain click opens the menu: 100 storage slots **and the card slot**
+#      (101 container slots), the panel 366 x 210;
+#   3. CONTROL A — the card slot refuses a stack that is not a storage module: the
+#      stone stays on the cursor, the card slot stays empty, the readout stays
+#      `0/0`;
+#   4. a `storage_module0` put into the card slot installs it (`0/6400 empty
+#      unlocked`, the item in slot 400, none left in the inventory);
+#   5. it comes back out through the slot (`0/0 empty no module`, the item in the
+#      inventory) — the gesture upstream's GUI has and this port did not;
+#   6. the sneak click still installs it (`0/6400 empty unlocked`, slot 400 holds
+#      it), and CONTROL B — unlocked, the grid still refuses the stone;
+#   7. the padlock seals it and a locked storage stores a stack put into a grid
+#      slot (`64/6400`); while locked, the sneak gesture refuses a module;
+#   8. the module comes out of the card slot and the block keeps its contents:
+#      `0/0 empty no module`, and the module back in the slot finds them
+#      (`64/6400 minecraft:stone unlocked`) — the number this slice is about;
+#   9. one kind a slot, a click on a filled slot, `/rftoolsstorage lock`, the fill
+#      to 6,400 with the card slot untouched, and the withdrawal/re-insert;
+#  10. quitting and relaunching keeps the contents, the lock **and the module in
+#      the card slot**;
+#  11. the carried `storage_module0` recipe crafts in a real crafting table; a
+#      stick in the iron's cell and a stone block where
+#      `rftoolsbase:machine_frame` belongs craft nothing;
 #  12. CONTROL C (COUNTERFACTUAL=1 replaces the block with a vanilla barrel):
-#      the same click opens a chest menu with 27 slots, not 100, and the barrel
-#      takes the stack the storage refuses while unlocked — so the 100-slot grid
-#      and its refusal are the port's own code.
+#      the same click opens a 27-slot chest menu and its slot takes the stack the
+#      storage refuses while unlocked.
 #
 # SELFTEST=1 keeps the scenario and asserts the barrel's 27-slot menu on the
-# storage, so the run MUST fail with a `FAIL:` verdict: the menu assertion is not
-# vacuous.
+# storage, so the run MUST fail with a `FAIL:` verdict. NEGATIVE=1 stops after
+# the card slot's refusal and asserts that a stone WAS taken, so that assertion
+# is proved able to fail too.
 #
 # Since the SDK migration (2026-11-18) the mod is one flat `.hmod` the launcher
 # compiles into the game, so GAME must name a game the launcher built with it:
@@ -60,17 +59,20 @@ RES=${RES:-${HORIZON_RES:-/home/adlf/Desktop/horizon/.local/horizon-client/26.3}
 SOCK=${SOCK:-/tmp/opencode/rftoolsstorage-e2e.sock}
 COUNTERFACTUAL=${COUNTERFACTUAL:-0}
 SELFTEST=${SELFTEST:-0}
+NEGATIVE=${NEGATIVE:-0}
 
 STORAGE=rftoolsstorage:modular_storage
 MODULE=rftoolsstorage:storage_module0
 CAPACITY=6400
-# The port's menu: 100 storage slots, then the player's 36. The panel is
-# 366 x 210 (`src/support.rs`), and the padlock sits at [8, 6] with a 46 x 16
-# rectangle, so its centre is (31, 14) from the panel's top left.
-MENU_SLOTS=100
+# The port's menu: 100 storage slots, then the card slot, then the player's 36.
+# The ctl numbers a container slot `300 + index`, so the card slot (index 100) is
+# 400. The panel is 366 x 210 (`src/support.rs`): the padlock sits at [32, 6] with
+# a 46 x 16 rectangle, so its centre is (55, 14) from the panel's top left.
+MENU_SLOTS=101
+CARD=400
 PANEL_W=366
 PANEL_H=210
-LOCK_X=31
+LOCK_X=55
 LOCK_Y=14
 
 [ -x "$CTL" ] || { echo "missing horizon-ctl: $CTL" >&2; exit 1; }
@@ -162,6 +164,14 @@ open_menu() { # open_menu X Y Z FACE -> the storage's menu, panel origin in OX/O
     ctl wait-for screen container --timeout 10 >/dev/null \
         || fail "the click did not open a menu (screen=$(ctl state | jq -r '.screen // ""'))"
     panel_origin
+}
+# The open menu re-synced from the server: a mod menu's client copy can keep a
+# click it predicted that the server refused (or miss one it accepted) until the
+# menu is opened again, so every slot read after a click goes through this.
+sync_menu() {
+    ctl close >/dev/null 2>&1 || true
+    ctl wait 4 >/dev/null
+    open_menu "$X" "$Y" "$Z1" "$facing"
 }
 press_lock() { ctl click-at "$((OX + LOCK_X))" "$((OY + LOCK_Y))" >/dev/null || fail "the padlock press did not send"; ctl wait 6 >/dev/null; }
 # Puts the stack the player holds in `ITEM` on the cursor: a left click on its
@@ -261,21 +271,24 @@ if [ "$COUNTERFACTUAL" = 1 ]; then
     line=$(info "$X" "$Y" "$Z1")
     echo "readout: $line"
     echo "$line" | grep -q 'not a modular storage' || fail "the barrel answered as a storage: $line"
-    ctl command "clear @s" >/dev/null
+    ctl command "clear @a" >/dev/null
     ctl give minecraft:stone 64 >/dev/null
     ctl wait 4
     open_menu "$X" "$Y" "$Z1" "$facing"
     barrel_slots=$(menu_slots)
     echo "the barrel's menu shows $barrel_slots container slots"
-    [ "$barrel_slots" = 27 ] || fail "the barrel's menu shows $barrel_slots slots, expected 27 (our storage's 100 would mean the grid is not ours)"
-    carry minecraft:stone
+    [ "$barrel_slots" = 27 ] || fail "the barrel's menu shows $barrel_slots slots, expected 27 (our storage's $MENU_SLOTS would mean the grid is not ours)"
+    # The barrel has no card slot: the same click on our slot 400 lands past the
+    # barrel's 27 and takes nothing.
+    [ "$CARD" -ge $((300 + barrel_slots)) ] || fail "the card slot is inside a barrel's menu, so the differential proves nothing"
+    carry minecraft:stone >/dev/null
     ctl click-slot 300 >/dev/null
     ctl wait 2 >/dev/null
     barrel_stone=$(slot_count 300)
     echo "the barrel took $barrel_stone into its first slot (the storage refuses an unlocked stack)"
     [ "$barrel_stone" = 64 ] || fail "the barrel took $barrel_stone, expected 64"
     ctl close >/dev/null 2>&1 || true
-    echo "PASS: the same click opens a 27-slot chest menu on a barrel and its slot takes the stack, so the 100-slot grid and the locked-only rule are the port's own" 
+    echo "PASS: the same click opens a 27-slot chest menu on a barrel, which has no card slot at 400, and its first slot takes the stack, so the storage's menu, its card slot and the locked-only rule are the port's own"
     exit 0
 fi
 
@@ -284,39 +297,83 @@ line=$(info "$X" "$Y" "$Z1")
 echo "readout: $line"
 echo "$line" | grep -q "^$STORAGE: 0/0 empty no module$" || fail "unexpected empty readout: $line"
 
-say "CONTROL A: the plain click opens the storage's menu, and with no module it stores nothing"
-ctl command "clear @s" >/dev/null
+say "the plain click opens the storage's menu: 100 storage slots and the card slot"
+ctl command "clear @a" >/dev/null
 ctl give minecraft:stone 64 >/dev/null || fail "cannot give stone"
 ctl wait 6
 open_menu "$X" "$Y" "$Z1" "$facing"
 slots=$(menu_slots)
-echo "panel origin $OX,$OY; the menu shows $slots container slots"
+card=$(slot_item "$CARD")
+echo "panel origin $OX,$OY; the menu shows $slots container slots; the card slot: '${card:-empty}'"
 [ "$slots" = "$MENU_SLOTS" ] || fail "the menu shows $slots container slots, expected $MENU_SLOTS"
-src=$(carry minecraft:stone)
-ctl click-slot 300 >/dev/null
-ctl wait 2 >/dev/null
-taken=$(slot_count 300)
-echo "slot 300 after the click with no module: '$taken' (the stack stays on the cursor)"
-[ "${taken:-0}" = 0 ] || fail "a storage with no module took $taken into slot 300"
-put_back "$src"
+[ -z "$card" ] || fail "a fresh storage's card slot holds '$card'"
+
+say "CONTROL A: the card slot refuses a stack that is not a storage module"
+carry minecraft:stone >/dev/null
+ctl click-slot "$CARD" >/dev/null
+ctl wait 4 >/dev/null
+predicted=$(slot_item "$CARD")
 ctl close >/dev/null 2>&1 || true
 ctl wait 4 >/dev/null
-quick "$X" "$Y" "$Z1" "$facing"
-bar=$(action_bar)
-amount=$(info_amount "$X" "$Y" "$Z1")
+line=$(info "$X" "$Y" "$Z1")
 left=$(count_item minecraft:stone)
-echo "action bar: '$bar'; stored: ${amount:-none}; stone in the hand: $left"
-case "$bar" in
-    *"no storage module"*) ;;
-    *) fail "the refusal did not name the missing module: '$bar'" ;;
-esac
-[ "${amount:-0}" = 0 ] || fail "a storage with no module stored $amount"
-[ "$left" = 64 ] || fail "the block took $((64 - left)) stone without a module"
+echo "the click left the open menu showing '$predicted'; the server reads: $line; stone in the inventory: $left"
+if [ "$NEGATIVE" = 1 ]; then
+    say "NEGATIVE: the run must fail — it asserts the card slot took the stone"
+    echo "$line" | grep -q "^$STORAGE: 0/0 empty no module$" || fail "the card slot took the stone: the port's rule is broken, not this assertion"
+    fail "the card slot refused the stone (the server reads $line), so this inverted assertion fails as it must"
+fi
+echo "$line" | grep -q "^$STORAGE: 0/0 empty no module$" || fail "the card slot took the stone: the server reads $line"
+[ "$left" = 64 ] || fail "the refused card-slot click lost $((64 - left)) stone"
+# The client's prediction of a refused click is corrected when the menu syncs again.
+open_menu "$X" "$Y" "$Z1" "$facing"
+reopened=$(slot_item "$CARD")
+echo "reopened, the card slot is '${reopened:-empty}'"
+[ -z "$reopened" ] || fail "the card slot shows '$reopened' after the menu reopened"
+ctl close >/dev/null 2>&1 || true
+ctl wait 4 >/dev/null
 
-say "a storage module installs from the hand (sneak click)"
-ctl command "clear @s" >/dev/null
+say "a storage module goes into the card slot (upstream's SLOT_STORAGE_MODULE)"
+ctl command "clear @a" >/dev/null
 ctl give "$MODULE" 1 >/dev/null || fail "cannot give the module"
 ctl wait 6
+open_menu "$X" "$Y" "$Z1" "$facing"
+carry "$MODULE" >/dev/null
+ctl click-slot "$CARD" >/dev/null
+ctl wait 4 >/dev/null
+ctl close >/dev/null 2>&1 || true
+ctl wait 4 >/dev/null
+line=$(info "$X" "$Y" "$Z1")
+modules=$(count_item "$MODULE")
+echo "readout: $line; modules in the inventory: $modules"
+echo "$line" | grep -q "^$STORAGE: 0/$CAPACITY empty unlocked$" || fail "the card slot's module did not set the storage: $line"
+[ "$modules" = 0 ] || fail "the module was not taken from the inventory"
+open_menu "$X" "$Y" "$Z1" "$facing"
+card=$(slot_item "$CARD")
+card_count=$(slot_count "$CARD")
+echo "the reopened menu's card slot: '$card_count $card'"
+[ "$card" = "$MODULE" ] || fail "the card slot holds '$card', expected $MODULE"
+[ "$card_count" = 1 ] || fail "the card slot holds $card_count, expected 1"
+
+say "…and it comes back out through the card slot (nothing could take it out before)"
+ctl click-slot "$CARD" >/dev/null
+ctl wait 2 >/dev/null
+dst=$(empty_inv_slot)
+[ -n "$dst" ] || fail "no empty inventory slot for the withdrawn module"
+ctl click-slot "$dst" >/dev/null || fail "cannot put the module into the inventory"
+ctl wait 4 >/dev/null
+card=$(slot_item "$CARD")
+echo "the card slot after taking the module out: '${card:-empty}'"
+[ -z "$card" ] || fail "the card slot still holds '$card'"
+ctl close >/dev/null 2>&1 || true
+ctl wait 4 >/dev/null
+line=$(info "$X" "$Y" "$Z1")
+modules=$(count_item "$MODULE")
+echo "readout: $line; modules in the inventory: $modules"
+echo "$line" | grep -q "^$STORAGE: 0/0 empty no module$" || fail "a storage with no module reads: $line"
+[ "$modules" = 1 ] || fail "the card slot gave back $modules modules, expected 1"
+
+say "a storage module in the hand still installs (the sneak gesture, now into the slot)"
 ctl select "$MODULE" >/dev/null || fail "cannot select the module"
 ctl wait 6
 quick "$X" "$Y" "$Z1" "$facing"
@@ -326,21 +383,39 @@ modules=$(count_item "$MODULE")
 echo "action bar: '$bar'; readout: $line; modules in the hand: $modules"
 echo "$line" | grep -q "^$STORAGE: 0/$CAPACITY empty unlocked$" || fail "unexpected readout after the module: $line"
 [ "$modules" = 0 ] || fail "the module was not taken from the hand"
+open_menu "$X" "$Y" "$Z1" "$facing"
+card=$(slot_item "$CARD")
+echo "the gesture left the module in the card slot: '$card'"
+[ "$card" = "$MODULE" ] || fail "the gesture did not leave the module in the card slot ('$card')"
+ctl close >/dev/null 2>&1 || true
+ctl wait 4 >/dev/null
 
 say "CONTROL B: unlocked, the menu's grid still refuses a stack"
-ctl command "clear @s" >/dev/null
+ctl command "clear @a" >/dev/null
 ctl give minecraft:stone 64 >/dev/null
 ctl wait 6
 open_menu "$X" "$Y" "$Z1" "$facing"
-src=$(carry minecraft:stone)
+carry minecraft:stone >/dev/null
 ctl click-slot 300 >/dev/null
-ctl wait 2 >/dev/null
-refused=$(slot_count 300)
-echo "slot 300 after the unlocked click: '$refused'"
-[ "${refused:-0}" = 0 ] || fail "an unlocked storage took $refused into slot 300"
-put_back "$src"
+ctl wait 4 >/dev/null
+predicted=$(slot_count 300)
 ctl close >/dev/null 2>&1 || true
 ctl wait 4 >/dev/null
+line=$(info "$X" "$Y" "$Z1")
+echo "the click left the open menu showing '$predicted' in slot 300; the server reads: $line"
+echo "$line" | grep -q "^$STORAGE: 0/$CAPACITY empty unlocked$" || fail "an unlocked storage took the stack: $line"
+# The client's prediction of a refused click is corrected when the menu syncs again.
+open_menu "$X" "$Y" "$Z1" "$facing"
+refused=$(slot_count 300)
+echo "reopened, slot 300 is '$refused'"
+[ "${refused:-0}" = 0 ] || fail "the reopened grid shows $refused in slot 300"
+ctl close >/dev/null 2>&1 || true
+ctl wait 4 >/dev/null
+ctl command "clear @a" >/dev/null
+ctl give minecraft:stone 64 >/dev/null
+ctl wait 6
+ctl select minecraft:stone >/dev/null
+ctl wait 6
 quick "$X" "$Y" "$Z1" "$facing"
 bar=$(action_bar)
 amount=$(info_amount "$X" "$Y" "$Z1")
@@ -354,7 +429,7 @@ esac
 [ "$left" = 64 ] || fail "an unlocked storage took $((64 - left)) stone"
 
 say "the panel's padlock seals it (upstream's lockButton)"
-ctl command "clear @s" >/dev/null
+ctl command "clear @a" >/dev/null
 ctl wait 4
 open_menu "$X" "$Y" "$Z1" "$facing"
 press_lock
@@ -364,45 +439,127 @@ echo "action bar: '$bar'; readout: $line"
 echo "$line" | grep -q "^$STORAGE: 0/$CAPACITY empty locked$" || fail "the padlock did not lock: $line"
 
 say "a locked storage stores the stack put into a grid slot"
-ctl command "clear @s" >/dev/null
+ctl command "clear @a" >/dev/null
 ctl give minecraft:stone 64 >/dev/null
 ctl wait 6
 open_menu "$X" "$Y" "$Z1" "$facing"
 carry minecraft:stone >/dev/null
 ctl click-slot 300 >/dev/null
 ctl wait 4 >/dev/null
+ctl close >/dev/null 2>&1 || true
+ctl wait 4 >/dev/null
+amount=$(info_amount "$X" "$Y" "$Z1")
+left=$(count_item minecraft:stone)
+echo "stored: $amount (the server); stone in the hand: $left"
+[ "$amount" = 64 ] || fail "the storage holds $amount, expected 64"
+[ "$left" = 0 ] || fail "the storage left $left stone in the hand"
+sync_menu
 stored=$(slot_count 300)
 item=$(slot_item 300)
-echo "slot 300 now: '$stored $item'"
+echo "the re-synced grid's slot 300: '$stored $item'"
 [ "$stored" = 64 ] || fail "slot 300 holds $stored, expected 64"
 [ "$item" = minecraft:stone ] || fail "slot 300 holds $item, expected minecraft:stone"
 ctl close >/dev/null 2>&1 || true
-amount=$(info_amount "$X" "$Y" "$Z1")
-left=$(count_item minecraft:stone)
-echo "stored: $amount; stone in the hand: $left"
-[ "$amount" = 64 ] || fail "the storage holds $amount, expected 64"
-[ "$left" = 0 ] || fail "the storage left $left stone in the hand"
+ctl wait 4 >/dev/null
 
-say "one kind a slot: dirt is refused by the stone's slot and takes the grid's last one"
-ctl command "clear @s" >/dev/null
+say "while locked, the card slot takes no module (the sneak gesture says so)"
+ctl command "clear @a" >/dev/null
+ctl give "$MODULE" 1 >/dev/null || fail "cannot give a module"
+ctl wait 6
+ctl select "$MODULE" >/dev/null || fail "cannot select the module"
+ctl wait 6
+quick "$X" "$Y" "$Z1" "$facing"
+bar=$(action_bar)
+line=$(info "$X" "$Y" "$Z1")
+modules=$(count_item "$MODULE")
+echo "action bar: '$bar'; readout: $line; modules in the hand: $modules"
+case "$bar" in
+    *locked*) ;;
+    *) fail "a locked storage did not refuse the module: '$bar'" ;;
+esac
+[ "$modules" = 1 ] || fail "a locked storage took the module from the hand"
+open_menu "$X" "$Y" "$Z1" "$facing"
+card=$(slot_item "$CARD")
+echo "the card slot still holds: '$card'"
+[ "$card" = "$MODULE" ] || fail "the card slot lost its module ('$card')"
+ctl close >/dev/null 2>&1 || true
+ctl wait 4 >/dev/null
+
+say "the module comes out of the card slot, and the block keeps its contents"
+ctl command "clear @a" >/dev/null
+ctl wait 4 >/dev/null
+open_menu "$X" "$Y" "$Z1" "$facing"
+ctl click-slot "$CARD" >/dev/null
+ctl wait 2 >/dev/null
+dst=$(empty_inv_slot)
+[ -n "$dst" ] || fail "no empty inventory slot for the withdrawn module"
+ctl click-slot "$dst" >/dev/null || fail "cannot put the module into the inventory"
+ctl wait 4 >/dev/null
+card=$(slot_item "$CARD")
+echo "the card slot after taking the module out: '${card:-empty}'"
+[ -z "$card" ] || fail "the card slot still holds '$card'"
+ctl close >/dev/null 2>&1 || true
+ctl wait 4 >/dev/null
+line=$(info "$X" "$Y" "$Z1")
+modules=$(count_item "$MODULE")
+echo "readout with the module out: $line; modules in the inventory: $modules"
+echo "$line" | grep -q "^$STORAGE: 0/0 empty no module$" || fail "a storage whose card slot is empty reads: $line"
+[ "$modules" = 1 ] || fail "the card slot gave back $modules modules, expected 1"
+
+say "…and the module back in the card slot finds the 64 stone it left"
+open_menu "$X" "$Y" "$Z1" "$facing"
+carry "$MODULE" >/dev/null
+ctl click-slot "$CARD" >/dev/null
+ctl wait 4 >/dev/null
+line=$(info "$X" "$Y" "$Z1")
+echo "readout after the module came back: $line"
+# The block's own lock byte outlived the module (the storage is shown unlocked
+# and takes a module while it is out), so the storage is locked again with it.
+echo "$line" | grep -q "^$STORAGE: 64/$CAPACITY minecraft:stone locked$" || fail "the contents did not survive the module's removal: $line"
+ctl close >/dev/null 2>&1 || true
+ctl wait 4 >/dev/null
+
+say "one kind a slot: dirt is refused by the stone's slot"
+ctl command "clear @a" >/dev/null
 ctl give minecraft:dirt 64 >/dev/null
 ctl wait 6
 open_menu "$X" "$Y" "$Z1" "$facing"
 carry minecraft:dirt >/dev/null
 ctl click-slot 300 >/dev/null
-ctl wait 2 >/dev/null
+ctl wait 4 >/dev/null
+ctl close >/dev/null 2>&1 || true
+ctl wait 4 >/dev/null
+line=$(info "$X" "$Y" "$Z1")
+echo "after the dirt click on the stone's slot: $line"
+echo "$line" | grep -q "^$STORAGE: 64/$CAPACITY minecraft:stone locked$" || fail "the stone's slot took the dirt: $line"
+sync_menu
 still=$(slot_item 300)
-echo "slot 300 after the dirt click: '$still' (stone keeps its slot)"
+echo "the re-synced grid's slot 300: '$still' (the stone keeps its slot)"
 [ "$still" = minecraft:stone ] || fail "slot 300 became '$still', expected the stone to stay"
+ctl close >/dev/null 2>&1 || true
+ctl wait 4 >/dev/null
+
+say "…and takes the grid's last one"
+ctl command "clear @a" >/dev/null
+ctl give minecraft:dirt 64 >/dev/null
+ctl wait 6
+open_menu "$X" "$Y" "$Z1" "$facing"
+carry minecraft:dirt >/dev/null
 ctl click-slot 399 >/dev/null
 ctl wait 4 >/dev/null
-dirt=$(slot_count 399)
-echo "slot 399 (the last of the grid) now holds $dirt dirt"
-[ "$dirt" = 64 ] || fail "slot 399 holds '$dirt', expected 64 dirt"
 ctl close >/dev/null 2>&1 || true
+ctl wait 4 >/dev/null
 line=$(info "$X" "$Y" "$Z1")
 echo "readout: $line"
 echo "$line" | grep -q "^$STORAGE: 128/$CAPACITY minecraft:stone locked$" || fail "unexpected readout after the dirt: $line"
+sync_menu
+dirt=$(slot_count 399)
+dirt_item=$(slot_item 399)
+echo "the re-synced grid's slot 399 (the last of the grid) holds: '$dirt $dirt_item'"
+[ "$dirt" = 64 ] || fail "slot 399 holds '$dirt', expected 64 dirt"
+[ "$dirt_item" = minecraft:dirt ] || fail "slot 399 holds '$dirt_item'"
+ctl close >/dev/null 2>&1 || true
+ctl wait 4 >/dev/null
 
 say "a click on a filled grid slot takes the stack back"
 open_menu "$X" "$Y" "$Z1" "$facing"
@@ -435,9 +592,11 @@ say "fill the storage to its tier-1 capacity (6,400) and watch the grid refuse m
 # The harness fills the block entity's own container slots (`ctl container`
 # writes slot by slot, first empty first, and answers an error once they are all
 # taken); the refusal below is the storage's own capacity, and the readout is
-# the assertion.
+# the assertion. The cap is the storage's hundred slots: the card slot is not one
+# of them, and `ctl container` does not know that (it writes the first empty slot
+# of the container, card slot included).
 writes=0
-while [ "$writes" -lt 120 ]; do
+while [ "$writes" -lt 99 ]; do
     if ctl container "$X" "$Y" "$Z1" minecraft:stone 64 | jq -e 'has("error") | not' >/dev/null 2>&1; then
         writes=$((writes + 1))
     else
@@ -449,24 +608,30 @@ line=$(info "$X" "$Y" "$Z1")
 echo "readout: $line"
 echo "$line" | grep -q "^$STORAGE: $CAPACITY/$CAPACITY minecraft:stone locked$" || fail "the filled storage reads: $line"
 open_menu "$X" "$Y" "$Z1" "$facing"
-ctl command "clear @s" >/dev/null
+card=$(slot_item "$CARD")
+echo "the card slot with the storage full: '$card'"
+[ "$card" = "$MODULE" ] || fail "the fill wrote into the card slot ('$card')"
+ctl command "clear @a" >/dev/null
 ctl give minecraft:stone 64 >/dev/null
 ctl wait 6
-slot=$(carry minecraft:stone)
+carry minecraft:stone >/dev/null
 ctl click-slot 300 >/dev/null
-ctl wait 2 >/dev/null
-full_item=$(slot_item 300)
-full_count=$(slot_count 300)
-echo "slot 300 with the storage full: '$full_count $full_item' (nothing fits, the stack stays on the cursor)"
-[ "$full_item" = minecraft:stone ] || fail "slot 300 holds '$full_item'"
-[ "$full_count" = 64 ] || fail "slot 300 holds $full_count, expected its own 64"
-put_back "$slot"
+ctl wait 4 >/dev/null
 ctl close >/dev/null 2>&1 || true
+ctl wait 4 >/dev/null
 amount=$(info_amount "$X" "$Y" "$Z1")
 left=$(count_item minecraft:stone)
-echo "stored: $amount; stone in the hand: $left"
+echo "stored: $amount; stone in the hand: $left (nothing fits, the stack stays)"
 [ "$amount" = "$CAPACITY" ] || fail "a full storage changed to $amount"
 [ "$left" = 64 ] || fail "a full storage took $((64 - left)) stone"
+sync_menu
+full_item=$(slot_item 300)
+full_count=$(slot_count 300)
+echo "the re-synced grid's slot 300 with the storage full: '$full_count $full_item'"
+[ "$full_item" = minecraft:stone ] || fail "slot 300 holds '$full_item'"
+[ "$full_count" = 64 ] || fail "slot 300 holds $full_count, expected its own 64"
+ctl close >/dev/null 2>&1 || true
+ctl wait 4 >/dev/null
 
 say "…and takes it again once one stack is withdrawn through the grid"
 inv_before=$(count_item minecraft:stone)
@@ -492,7 +657,7 @@ echo "the grid gave $withdrawn ($CAPACITY -> $before); the gesture took it back:
 [ "$amount" = "$CAPACITY" ] || fail "the storage did not take the stack back: $amount"
 [ "$left" = "$inv_before" ] || fail "the re-inserted stack left $left in the inventory, expected $inv_before"
 
-say "the contents, the lock and the grid survive a relaunch"
+say "the contents, the lock, the grid and the module's slot survive a relaunch"
 before1=$(info_amount "$X" "$Y" "$Z1")
 echo "quit with $before1 stored"
 ctl quit >/dev/null 2>&1 || true
@@ -508,15 +673,17 @@ echo "relaunch: $before1 -> $after1 (state $state1)"
 [ "$state1" = "locked" ] || fail "the lock did not survive the relaunch (state $state1)"
 open_menu "$X" "$Y" "$Z1" "$facing"
 reopened=$(slot_count 300)
+kept_card=$(slot_item "$CARD")
 unlocked_bar=$(action_bar)
-echo "the reopened grid shows $reopened in slot 300; action bar: '$unlocked_bar'"
+echo "the reopened grid shows $reopened in slot 300, the card slot '$kept_card'; action bar: '$unlocked_bar'"
 [ "$reopened" = 64 ] || fail "the reopened grid shows $reopened in slot 300, expected 64"
+[ "$kept_card" = "$MODULE" ] || fail "the card slot lost its module across the relaunch ('$kept_card')"
 
 say "the carried storage-module recipe crafts in a real crafting table"
 TX=$((X + 4))
 TY=$Y
 TZ=$Z1
-ctl command "clear @s" >/dev/null
+ctl command "clear @a" >/dev/null
 for item in minecraft:chest minecraft:gold_nugget minecraft:iron_ingot minecraft:quartz minecraft:redstone; do
     ctl give "$item" 4 >/dev/null
 done
@@ -546,7 +713,7 @@ ctl close >/dev/null 2>&1 || true
 ctl wait 4 >/dev/null
 
 say "control: a stick in the iron's cell, and a block where the machine frame goes, craft nothing"
-ctl command "clear @s" >/dev/null
+ctl command "clear @a" >/dev/null
 for item in minecraft:chest minecraft:gold_nugget minecraft:stick minecraft:quartz minecraft:redstone; do
     ctl give "$item" 4 >/dev/null
 done
@@ -566,7 +733,7 @@ ctl close >/dev/null 2>&1 || true
 ctl wait 4 >/dev/null
 # The modular_storage recipe needs `rftoolsbase:machine_frame`, a mod that is
 # not in this build: the same pattern with a stone block there crafts nothing.
-ctl command "clear @s" >/dev/null
+ctl command "clear @a" >/dev/null
 for item in minecraft:chest minecraft:stone minecraft:quartz minecraft:redstone; do
     ctl give "$item" 8 >/dev/null
 done
@@ -589,10 +756,16 @@ ctl close >/dev/null 2>&1 || true
 ctl wait 4 >/dev/null
 
 if [ "$SELFTEST" = 1 ]; then
-    say "SELFTEST: assert the barrel's 27-slot menu on the storage (must fail)"
+    say "SELFTEST: assert a barrel's 27-slot menu on the storage (must fail)"
+    # Back to the storage: the crafting phases left the player at the table.
+    ctl tp "$X.5" "$((Y + 1))" "$((Z1 + 2)).5" >/dev/null || true
+    ctl wait 8 >/dev/null
+    open_menu "$X" "$Y" "$Z1" "$facing"
     slots=$(menu_slots)
-    [ "$slots" = 27 ] || fail "the storage's menu shows $slots slots, not 27: the grid assertion is alive"
+    card=$(slot_item "$CARD")
+    echo "the storage's menu shows $slots container slots, the card slot '$card'"
+    [ "$slots" = 27 ] || fail "the storage's menu shows $slots slots, not 27: the card-slot assertion is alive"
 fi
 
 ctl close >/dev/null 2>&1 || true
-echo "PASS: the plain click opens the storage's own 100-slot menu and the padlock on its panel seals it, the carried storage-module recipe crafts in a crafting table (and a stick/a block where its keys are crafts nothing), the grid refuses stacks with no module and while unlocked (one kind a slot), stores and gives back stacks by click, reads 6400/6400 when full and refuses more (taking it again after a withdrawal), keeps its contents, lock and grid across a relaunch, and a barrel's chest menu and unlocked slot do not behave this way"
+echo "PASS: the plain click opens the storage's own menu — 100 storage slots and the card slot, whose module sets the capacity and which refuses anything else and any second module, and takes the module back out (the contents it left come back with it) — with the padlock sealing it, the grid refusing stacks with no module and while unlocked (one kind a slot), stores and gives back stacks by click, reads 6400/6400 when full and refuses more (taking it again after a withdrawal), keeps its contents, lock, grid and module across a relaunch, the carried storage-module recipe crafting in a table (and a stick/a block where its keys are crafting nothing), and a barrel's chest menu and unlocked slot do not behave this way"

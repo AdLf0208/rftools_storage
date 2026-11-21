@@ -48,6 +48,37 @@ pub fn module_tier(item: &str) -> Option<u8> {
     }
 }
 
+/// The id of a tier's storage module item (`StorageModuleItem`'s registry
+/// names). A block that recorded its tier before the card slot held the item
+/// (`notes.md`, slice 3) gets this item written into the slot.
+#[must_use]
+pub fn module_id(tier: u8) -> String {
+    format!("rftoolsstorage:storage_module{tier}")
+}
+
+/// Whether a menu **storage slot** holding `stored` takes a stack of `incoming`:
+/// upstream's `Slot.mayPlace` on a storage slot, which is
+/// `if (!isLocked()) return false;` and then
+/// `getItemHandler().isItemValid(slot, stack)` — a slot is empty or already
+/// holds that kind (`ItemStack.isSameItemSameComponents`).
+#[must_use]
+pub fn slot_accepts(locked: bool, stored: Option<&str>, incoming: &str) -> bool {
+    locked && stored.is_none_or(|held| held == incoming)
+}
+
+/// Whether the menu's **card slot** takes `item`: upstream's `mayPlace` on
+/// `ModularStorageContainer.SLOT_STORAGE_MODULE` — a storage module while the
+/// block is unlocked, which `!= occupied` covers because a locked storage keeps
+/// its module — and, once it holds one, anything: the engine consults the card
+/// slot's answer while it plans a click on **another** slot, and a refusal there
+/// blocks that click (`notes.md`, "the card slot's answer must not block another
+/// slot"). The modules are `stacksTo(1)`, so the engine's cap keeps a second one
+/// out.
+#[must_use]
+pub fn card_accepts(occupied: bool, item: &str) -> bool {
+    occupied || module_tier(item).is_some()
+}
+
 /// How many items a store of `slots` slots holds when each holds a stack of
 /// `max_stack` (`min(64, the item's stack size)`, upstream's `getStackLimit`).
 #[must_use]
@@ -108,6 +139,17 @@ impl Storage {
         }
     }
 
+    /// A storage as its block holds it: `tier`'s module in the card slot or `None`,
+    /// the lock, and the block's own `slots` (contents, module or not).
+    #[must_use]
+    pub fn from_block(tier: Option<u8>, locked: bool, slots: Vec<Option<Slot>>) -> Self {
+        Self {
+            slots,
+            tier,
+            locked,
+        }
+    }
+
     /// Installs a module: only while unlocked, and a module already in place is
     /// not replaced. Resizes to the new tier, keeping what fits
     /// (`StorageEntry.resize`: a smaller module may lose the tail).
@@ -120,17 +162,17 @@ impl Storage {
         true
     }
 
-    /// Takes the module out: only while unlocked. The contents stay, so the
-    /// same module (or another) finds them again. No gesture reaches it in this
-    /// slice (upstream pulls it from the GUI's module slot); the next slice's
-    /// module swap uses it.
-    #[allow(dead_code)]
-    pub fn remove_module(&mut self) -> Option<u8> {
-        if self.locked {
-            return None;
-        }
-        self.slots.clear();
-        self.tier.take()
+    /// The module came out of the card slot: the block keeps its contents
+    /// (upstream's world-level entry, `notes.md` deviation 1), so the storage
+    /// shows and accepts nothing until a module is back, and then finds them. The
+    /// view drops the lock with it — a storage with no module has nothing to guard,
+    /// and the pin's menu rules only gate placement (no `may_pickup`), so a lock
+    /// the view kept would leave no way to put the module back. The block's own
+    /// byte stays where it is and the lock returns with the module.
+    pub fn detach_module(&mut self) -> Option<u8> {
+        let tier = self.tier.take()?;
+        self.locked = false;
+        Some(tier)
     }
 
     /// Flips the lock. Needs a module; false when there is none.
@@ -149,15 +191,24 @@ impl Storage {
         self.locked && self.tier.is_some()
     }
 
-    /// The slot count the module gives.
+    /// The slot count the module gives: none without a module, whatever the
+    /// block's slots still hold.
     #[must_use]
     pub fn slot_count(&self) -> usize {
-        self.slots.len()
+        if self.tier.is_some() {
+            self.slots.len()
+        } else {
+            0
+        }
     }
 
-    /// How many items are stored, all kinds together.
+    /// How many items are stored, all kinds together: none without a module (the
+    /// block keeps them, the storage does not show them).
     #[must_use]
     pub fn total(&self) -> u32 {
+        if self.tier.is_none() {
+            return 0;
+        }
         self.slots
             .iter()
             .flatten()
@@ -165,22 +216,30 @@ impl Storage {
     }
 
     /// How many slots hold something (upstream's `getNumStacks`, the module
-    /// tooltip's "Contents: n/m"). The next slice's tooltip reads it.
+    /// tooltip's "Contents: n/m"); none without a module.
     #[must_use]
-    #[allow(dead_code)]
     pub fn stacks_used(&self) -> u32 {
+        if self.tier.is_none() {
+            return 0;
+        }
         u32::try_from(self.slots.iter().flatten().count()).unwrap_or(u32::MAX)
     }
 
-    /// The first stored kind, in slot order.
+    /// The first stored kind, in slot order; none without a module.
     #[must_use]
     pub fn first_kind(&self) -> Option<&Kind> {
+        // No module, no visible contents.
+        self.tier?;
         self.slots.iter().flatten().next().map(|slot| &slot.kind)
     }
 
-    /// How many items the store holds when full, for an item of `max_stack`.
+    /// How many items the store holds when full, for an item of `max_stack`; 0
+    /// without a module.
     #[must_use]
     pub fn capacity(&self, max_stack: u32) -> u32 {
+        if self.tier.is_none() {
+            return 0;
+        }
         capacity(self.slots.len(), max_stack)
     }
 
@@ -243,10 +302,11 @@ impl Storage {
     }
 
     /// Whether the store refuses every further item of `kind` (full for it):
-    /// every slot is full, or holds another kind.
+    /// every slot is full, or holds another kind. Without a module it refuses
+    /// everything.
     #[must_use]
     pub fn is_full_for(&self, kind: &Kind, max_stack: u32) -> bool {
-        if self.slots.is_empty() {
+        if self.tier.is_none() || self.slots.is_empty() {
             return true;
         }
         let per_slot = max_stack.clamp(1, SLOT_LIMIT);
@@ -268,9 +328,13 @@ impl Storage {
         }
     }
 
-    /// `"<stored>/<capacity> <item>"`, or `"0/<capacity> empty"`.
+    /// `"<stored>/<capacity> <item>"`, or `"0/<capacity> empty"`; a storage with
+    /// no module reads `"0/0 empty"` whatever its block holds.
     #[must_use]
     pub fn summary(&self, max_stack: u32) -> String {
+        if self.tier.is_none() {
+            return "0/0 empty".to_owned();
+        }
         let capacity = self.capacity(max_stack);
         match self.first_kind() {
             Some(kind) => format!("{}/{} {}", self.total(), capacity, kind.label),
@@ -284,16 +348,6 @@ fn slots_of(tier: u8) -> usize {
     TIER_SLOTS
         .get(usize::from(tier))
         .map_or(0, |n| usize::try_from(*n).unwrap_or(0))
-}
-
-/// Whether the menu's grid slot holding `stored` takes a stack of `incoming`:
-/// upstream's `Slot.mayPlace` on a storage slot, which is
-/// `if (!isLocked()) return false;` and then
-/// `getItemHandler().isItemValid(slot, stack)` — a slot is empty or already
-/// holds that kind (`ItemStack.isSameItemSameComponents`).
-#[must_use]
-pub fn slot_accepts(locked: bool, stored: Option<&str>, incoming: &str) -> bool {
-    locked && stored.is_none_or(|held| held == incoming)
 }
 
 /// What the padlock button answers.
@@ -402,7 +456,10 @@ mod tests {
         assert_eq!(storage.state_word(), "locked");
         assert!(storage.accepts());
         assert!(!storage.install(1), "a locked storage takes no module");
-        assert_eq!(storage.remove_module(), None, "a locked storage keeps it");
+        assert!(
+            card_accepts(true, "rftoolsstorage:storage_module0"),
+            "a card slot holding the module does not block a click elsewhere"
+        );
     }
 
     #[test]
@@ -545,7 +602,7 @@ mod tests {
         }
         assert_eq!(storage.stacks_used(), 150);
         assert!(storage.toggle_lock());
-        assert_eq!(storage.remove_module(), Some(1));
+        assert_eq!(storage.detach_module(), Some(1));
         assert_eq!(storage.slot_count(), 0, "no module, no capacity");
         assert_eq!(storage.total(), 0);
         // The contents are the block's, so a smaller module finds what fits.
@@ -556,6 +613,28 @@ mod tests {
             storage.insert(&stone(), 64, 64);
         }
         assert_eq!(storage.total(), 6_400);
+    }
+
+    #[test]
+    fn the_padlock_needs_a_module_and_then_flips_the_lock() {
+        let mut empty = Storage::empty();
+        assert_eq!(lock_press(&mut empty), LockPress::NoModule);
+        assert!(!empty.locked, "a module-less press changes nothing");
+        let mut storage = Storage::with_tier(0);
+        assert_eq!(lock_press(&mut storage), LockPress::Locked);
+        assert!(storage.locked);
+        assert!(storage.accepts(), "a locked storage with a module stores");
+        assert_eq!(lock_press(&mut storage), LockPress::Unlocked);
+        assert!(!storage.locked);
+        assert!(!storage.accepts());
+    }
+
+    #[test]
+    fn a_readout_or_lock_needs_an_operator_reach_or_the_same_level() {
+        assert!(may_inspect(true, false, f64::MAX), "an operator");
+        assert!(may_inspect(false, true, 5.0), "a player in reach");
+        assert!(!may_inspect(false, true, 8.5), "out of reach");
+        assert!(!may_inspect(false, false, 1.0), "another level");
     }
 
     #[test]
@@ -581,24 +660,73 @@ mod tests {
     }
 
     #[test]
-    fn the_padlock_needs_a_module_and_then_flips_the_lock() {
-        let mut empty = Storage::empty();
-        assert_eq!(lock_press(&mut empty), LockPress::NoModule);
-        assert!(!empty.locked, "a module-less press changes nothing");
-        let mut storage = Storage::with_tier(0);
-        assert_eq!(lock_press(&mut storage), LockPress::Locked);
-        assert!(storage.locked);
-        assert!(storage.accepts(), "a locked storage with a module stores");
-        assert_eq!(lock_press(&mut storage), LockPress::Unlocked);
-        assert!(!storage.locked);
-        assert!(!storage.accepts());
+    fn the_card_slot_takes_a_module_and_never_blocks_another_slot() {
+        // Upstream's card-slot `mayPlace`: a StorageModuleItem, while unlocked. The
+        // occupied case answers true so the engine's plan for another slot's click
+        // is not blocked by it (`notes.md`).
+        assert!(card_accepts(false, "rftoolsstorage:storage_module0"));
+        assert!(
+            !card_accepts(false, "minecraft:stone"),
+            "no stack in the card slot"
+        );
+        assert!(
+            !card_accepts(false, "rftoolsstorage:dump_module"),
+            "a screen module is not a storage module"
+        );
+        assert!(
+            card_accepts(true, "minecraft:stone"),
+            "an occupied card slot answers yes to anything"
+        );
     }
 
     #[test]
-    fn a_readout_or_lock_needs_an_operator_reach_or_the_same_level() {
-        assert!(may_inspect(true, false, f64::MAX), "an operator");
-        assert!(may_inspect(false, true, 5.0), "a player in reach");
-        assert!(!may_inspect(false, true, 8.5), "out of reach");
-        assert!(!may_inspect(false, false, 1.0), "another level");
+    fn a_module_id_round_trips_through_its_tier() {
+        assert_eq!(module_id(0), "rftoolsstorage:storage_module0");
+        for tier in 0..=3 {
+            assert_eq!(module_tier(&module_id(tier)), Some(tier), "tier {tier}");
+        }
+    }
+
+    #[test]
+    fn a_removed_module_hides_the_contents_and_its_return_finds_them() {
+        let mut storage = locked(0);
+        assert_eq!(storage.insert(&stone(), 64, 64), 64);
+        assert!(storage.toggle_lock());
+        assert_eq!(storage.detach_module(), Some(0));
+        assert!(storage.tier.is_none());
+        assert!(!storage.locked, "a storage with no module is never locked");
+        assert!(!storage.accepts());
+        assert_eq!(storage.slot_count(), 0, "no module, no capacity");
+        assert_eq!(storage.total(), 0, "the contents wait for a module");
+        assert_eq!(storage.summary(64), "0/0 empty");
+        assert_eq!(
+            storage.insert(&dirt(), 64, 64),
+            0,
+            "no module stores nothing"
+        );
+        assert!(storage.install(0), "no lock stops the module coming back");
+        assert_eq!(storage.slot_count(), 100);
+        assert!(storage.toggle_lock());
+        assert_eq!(storage.total(), 64, "the module finds the contents it left");
+        assert_eq!(storage.summary(64), "64/6400 minecraft:stone");
+    }
+
+    #[test]
+    fn a_moduleless_storage_reads_as_empty_whatever_the_block_holds() {
+        let contents = vec![
+            Some(Slot {
+                kind: stone(),
+                count: 64,
+            }),
+            None,
+        ];
+        let storage = Storage::from_block(None, false, contents);
+        assert_eq!(storage.slots.len(), 2, "the block still holds them");
+        assert_eq!(storage.slot_count(), 0);
+        assert_eq!(storage.capacity(64), 0);
+        assert_eq!(storage.total(), 0);
+        assert_eq!(storage.stacks_used(), 0);
+        assert_eq!(storage.summary(64), "0/0 empty");
+        assert_eq!(storage.state_word(), "no module");
     }
 }

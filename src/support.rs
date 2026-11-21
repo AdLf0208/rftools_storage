@@ -18,35 +18,44 @@ use mod_api::item::containers::ModBlockEntityFields;
 use mod_api::{
     self, BlockEntityEvent, BlockEntityPart, BlockEntityRef, BlockKey, BlockPart, ClientHost,
     Command, CommandArgumentValue, CommandSource, Compound, Flow, Hand, Host, HostSide,
-    HostTransaction, InteractionResult, ItemStack, LevelRef, LevelSide, MenuButtonEvent,
-    MenuContainer, MenuPart, MenuSlotRulesEvent, ModContainer, PlayerContainerOpenEvent,
-    RegisterCommandsEvent, Registrar, RegistrationContext, RightClickBlockEvent,
-    RunModCommandEvent, Screen, ScreenClickEvent, ScreenDrawEvent, ScreenEvent, ServerHost, Tag,
-    Text, Transaction,
+    HostTransaction, Identifier, InteractionResult, ItemStack, LevelRef, LevelSide,
+    MenuButtonEvent, MenuContainer, MenuPart, MenuSlotRulesEvent, ModContainer,
+    PlayerContainerOpenEvent, RegisterCommandsEvent, Registrar, RegistrationContext,
+    RightClickBlockEvent, RunModCommandEvent, Screen, ScreenClickEvent, ScreenDrawEvent,
+    ScreenEvent, ServerHost, Tag, Text, Transaction,
 };
 
 use crate::runtime::{
-    Kind, LEVEL_ADMINS, LockPress, SLOT_LIMIT, Slot, Storage, lock_press, may_inspect, module_tier,
-    slot_accepts,
+    Kind, LEVEL_ADMINS, LockPress, SLOT_LIMIT, Slot, Storage, card_accepts, lock_press,
+    may_inspect, module_id, module_tier, slot_accepts,
 };
 
 /// The block this slice implements, exactly as the content declares it.
 const BLOCK: &str = crate::runtime::MODULAR_STORAGE;
 /// The block-entity type this mod declares for that block.
 const BE_TYPE: &str = "rftoolsstorage:storage_block_entity";
-/// The saved compound key of the installed module's tier.
+/// The saved compound key of the installed module's tier. Only a block saved
+/// before the card slot (0.2.2) has it: [`adopt_legacy_module`] moves it into the
+/// slot, and every write clears it, so a removed module cannot come back.
 const KEY_MODULE: &str = "module";
 /// The saved compound key of the lock (a byte, as upstream's lockable entity).
 const KEY_LOCKED: &str = "locked";
-/// No module in the saved compound. A stored sentinel rather than a missing
-/// key: `merge_data` sets a key but cannot remove one, and the round trip is
-/// internal — [`read_storage`] reads any value outside `0..=3` as no module.
+/// No module recorded in the saved compound. A stored sentinel rather than a
+/// missing key: `merge_data` sets a key but cannot remove one, and the round trip
+/// is internal — [`legacy_tier`] reads any value outside `0..=3` as no module.
 const NO_MODULE: i32 = -1;
-/// The container's slot count: the tier-1 module's 100 (`TIER_SLOTS[0]`). A
+/// The container's storage slots: the tier-1 module's 100 (`TIER_SLOTS[0]`). A
 /// block's container is declared once per block, not per instance, so only the
 /// tier this slice carries is wired (notes.md, deviation 4); the menu declares
-/// the same 100 slots and the screen places them in its 10 x 10 grid.
-const CONTAINER_SLOTS: usize = 100;
+/// the same hundred plus the card slot and the screen places them in its grid.
+const STORAGE_SLOTS: usize = 100;
+/// The card slot, after the storage slots: upstream's `SLOT_STORAGE_MODULE`, which
+/// holds the module item itself. Hoppers never reach it ([`register`] leaves it out
+/// of the faces and of `inputs`/`outputs`, as upstream's card handler is not the
+/// block's item capability).
+const MODULE_SLOT: usize = STORAGE_SLOTS;
+/// The container's slot count: the storage's hundred and the card slot.
+const CONTAINER_SLOTS: usize = STORAGE_SLOTS + 1;
 /// The action-bar prefix every readout carries.
 const READOUT: &str = "Modular Storage: ";
 /// The menu type the carried content declares
@@ -72,8 +81,12 @@ const GRID_Y: f32 = 26.0;
 const SLOT_PITCH: f32 = 18.0;
 const INVENTORY_X: f32 = 200.0;
 const INVENTORY_Y: f32 = 26.0;
-/// The padlock button's rectangle, relative to the panel's top left.
-const LOCK_BUTTON: [f32; 4] = [8.0, 6.0, 46.0, 16.0];
+/// The card slot's top left, above the grid's first column (upstream's GUI keeps
+/// it at the panel's left edge, `(5, 157)` in its own layout).
+const MODULE_SLOT_AT: [f32; 2] = [GRID_X, 4.0];
+/// The padlock button's rectangle, relative to the panel's top left: beside the
+/// card slot, so the title clears both.
+const LOCK_BUTTON: [f32; 4] = [32.0, 6.0, 46.0, 16.0];
 
 /// The block key the click compares the loaded block against. A `BlockKey` only
 /// names itself through a host, so it is asked for once, at registration.
@@ -100,9 +113,10 @@ pub(crate) fn register(registrar: &mut dyn Registrar, _cx: &RegistrationContext)
         .block_entity_part(&kind, StorageBlock)
         .expect("one Part per block-entity type");
     registrar.menu_part(MENU, StorageMenu);
-    let all: Vec<usize> = (0..CONTAINER_SLOTS).collect();
-    // Upstream's `CapType.ITEMS` handler answers every side, and a hopper may
-    // both fill and empty it.
+    let storage: Vec<usize> = (0..STORAGE_SLOTS).collect();
+    // Upstream's `CapType.ITEMS` handler answers every side with the storage slots
+    // only (its cards are a separate handler the capability never exposes), and a
+    // hopper may both fill and empty it.
     // `..Default::default()` keeps a field a later game build adds from breaking
     // this literal (`cargo horizon-mod check` asks for it).
     #[expect(
@@ -111,9 +125,9 @@ pub(crate) fn register(registrar: &mut dyn Registrar, _cx: &RegistrationContext)
     )]
     let container = ModContainer {
         slots: CONTAINER_SLOTS,
-        faces: std::array::from_fn(|_| all.clone()),
-        inputs: all.clone(),
-        outputs: all,
+        faces: std::array::from_fn(|_| storage.clone()),
+        inputs: storage.clone(),
+        outputs: storage,
         // The block's use opens this menu, as a chest's does: the mod's own
         // surface instead of the slice-1 right-click substitute.
         menu: Some(MENU.to_owned()),
@@ -173,10 +187,10 @@ impl BlockEntityPart for StorageBlock {
     }
 }
 
-/// The menu's layout: slot `index` of the grid at its column and row, the
-/// player's inventory to the right of it.
+/// The menu's layout: slot `index` of the grid at its column and row, then the
+/// card slot above it, and the player's inventory to the right.
 fn menu_screen() -> Screen {
-    let slots = (0..CONTAINER_SLOTS)
+    let mut slots: Vec<Option<[f32; 2]>> = (0..STORAGE_SLOTS)
         .map(|index| {
             let column = index % GRID_COLS;
             let row = index / GRID_COLS;
@@ -186,14 +200,15 @@ fn menu_screen() -> Screen {
             ])
         })
         .collect();
+    slots.push(Some(MODULE_SLOT_AT));
     Screen {
         width: SCREEN_WIDTH,
         height: SCREEN_HEIGHT,
         slots,
         inventory_y: INVENTORY_Y,
         inventory_x: INVENTORY_X,
-        // The panel's title, the inventory's label and the padlock are drawn
-        // here, so the engine leaves its own labels out.
+        // The panel's title, the inventory's label, the card slot's frame and the
+        // padlock are drawn here, so the engine leaves its own labels out.
         own_labels: true,
         own_background: false,
         ..Screen::default()
@@ -246,7 +261,15 @@ fn press_lock(host: &mut dyn ServerHost, event: &mut MenuButtonEvent<'_>) {
         return;
     }
     let fields = &mut *event.entity;
-    let mut storage = read_storage(&*host, Some(&fields.nbt), &[]);
+    // A 0.2.2 block's module moves into the card slot here, so the padlock acts on
+    // it (and the open menu shows it).
+    adopt_legacy_fields(&*host, fields);
+    let module = fields
+        .items
+        .get(MODULE_SLOT)
+        .and_then(Option::as_ref)
+        .cloned();
+    let mut storage = read_storage(&*host, Some(&fields.nbt), &fields.items, module.as_ref());
     let line = match lock_press(&mut storage) {
         LockPress::NoModule => {
             // Nothing to lock: the block keeps its state, the button says why.
@@ -294,14 +317,25 @@ pub(crate) fn on_player_container_open(
     let Some(entity) = host.block_entity(level, pos) else {
         return;
     };
+    // A block saved by 0.2.2 gets its module back as the slot's item before the
+    // player sees the menu, so it can be taken out or swapped.
+    adopt_legacy_module(host, entity);
     let data = entity.data(&*host);
-    let locked = matches!(field(data.as_ref(), KEY_LOCKED), Some(Tag::Byte(1)));
+    let module = module_at(&*host, entity);
+    let locked = read_storage(&*host, data.as_ref(), &[], module.as_ref()).locked;
     let _ = entity.set_data_slots(host, vec![i32::from(locked)]);
 }
 
-/// The storage menu's slot rules (`native_menu_slot_rules`): upstream's
-/// `Slot.mayPlace` on a storage slot — nothing while unlocked, and one kind a
-/// slot — derived from the block entity the menu belongs to.
+/// The storage menu's slot rules (`native_menu_slot_rules`): a storage slot is
+/// upstream's grid `mayPlace` (locked, and empty or the same kind), and the card
+/// slot takes a storage module.
+///
+/// The card slot's answer is "anything, once it holds the module" on purpose: the
+/// engine consults it while it plans a click on another slot and a refusal there
+/// blocks that click (measured: with the card's rule strict, a click on a locked
+/// storage's grid was refused). What it must not do is waste a click meant for a
+/// storage slot, so only an *empty* card slot answers "module only" — which is
+/// exactly when a non-module has no business being in the menu at all.
 pub(crate) struct StorageMenu;
 
 #[mod_api::horizon_part]
@@ -317,6 +351,14 @@ impl MenuPart for StorageMenu {
             return;
         };
         let incoming = kind_of(host, event.stack);
+        if event.slot == MODULE_SLOT {
+            let occupied = event
+                .context
+                .slot(MenuContainer::Main, MODULE_SLOT)
+                .is_some();
+            event.may_place = card_accepts(occupied, &incoming.label);
+            return;
+        }
         let stored = event
             .context
             .slot(MenuContainer::Main, event.slot)
@@ -329,14 +371,15 @@ impl MenuPart for StorageMenu {
     }
 }
 
-/// Whether the storage at `pos` is locked; `None` when no storage stands there.
+/// Whether the storage at `pos` is locked; `None` when no storage stands there. A
+/// storage with no module in its card slot is never locked: the block's byte may
+/// outlive the module (deviation 9), and a lock that guards nothing must not let a
+/// stack into the menu, where nothing would write it.
 fn lock_at(host: &dyn Host, pos: [i32; 3]) -> Option<bool> {
     let entity = entity_at(host, pos)?;
     let data = entity.data(host);
-    Some(matches!(
-        field(data.as_ref(), KEY_LOCKED),
-        Some(Tag::Byte(1))
-    ))
+    let module = module_at(host, entity).is_some();
+    Some(module && matches!(field(data.as_ref(), KEY_LOCKED), Some(Tag::Byte(1))))
 }
 
 // --- reading and writing the block entity ---------------------------------
@@ -389,10 +432,11 @@ fn block_id_at(host: &dyn Host, pos: [i32; 3]) -> String {
         .map_or_else(String::new, |block| block.id(host))
 }
 
-/// The container's slots, read one by one (a mod block entity's item storage is
-/// per slot; a refused read is an empty slot).
+/// The container's storage slots, read one by one (a mod block entity's item
+/// storage is per slot; a refused read is an empty slot). The card slot is not
+/// one of them.
 fn read_slots(host: &dyn Host, entity: BlockEntityRef) -> Vec<Option<ItemStack>> {
-    (0..CONTAINER_SLOTS)
+    (0..STORAGE_SLOTS)
         .map(|slot| {
             let slot = u32::try_from(slot).unwrap_or(u32::MAX);
             entity.item_slot(host, slot).ok().flatten()
@@ -400,31 +444,91 @@ fn read_slots(host: &dyn Host, entity: BlockEntityRef) -> Vec<Option<ItemStack>>
         .collect()
 }
 
-/// One saved field by its Java key. The compound is keyed by Java's lossless
-/// UTF-16 strings, which the API does not export by name, so the lookup spells
-/// the key the way Java does and compares the stored units (as the quarry port
-/// does): this keeps the package on the one SDK path dependency the launcher
-/// resolves by itself.
-fn field<'a>(data: Option<&'a Compound>, name: &str) -> Option<&'a Tag> {
-    let units: Vec<u16> = name.encode_utf16().collect();
-    data?
-        .iter()
-        .find(|(key, _)| key.0 == units)
-        .map(|(_, tag)| tag)
+/// The stack in the card slot, when one is in it: the storage module whose tier
+/// the storage's capacity is.
+fn module_at(host: &dyn Host, entity: BlockEntityRef) -> Option<ItemStack> {
+    let slot = u32::try_from(MODULE_SLOT).ok()?;
+    entity.item_slot(host, slot).ok().flatten()
 }
 
-/// The storage a block entity holds: its module and lock from the saved
-/// compound, its contents from the container slots.
-fn read_storage(host: &dyn Host, data: Option<&Compound>, slots: &[Option<ItemStack>]) -> Storage {
-    let tier = match field(data, KEY_MODULE) {
+/// The tier a block saved before the card slot (0.2.2) records in its compound,
+/// where the module used to live. `None` once [`adopt_legacy_module`] has moved
+/// it into the slot, or for any value outside the tiers.
+fn legacy_tier(data: Option<&Compound>) -> Option<u8> {
+    match field(data, KEY_MODULE) {
         Some(Tag::Int(n)) if (0..=3).contains(n) => Some(*n as u8),
         _ => None,
+    }
+}
+
+/// `tier`'s module item as a stack, when this game's registry has it.
+fn module_stack(host: &dyn Host, tier: u8) -> Option<ItemStack> {
+    let id = Identifier::parse(&module_id(tier)).ok()?;
+    let item = host.item_key(&id)?;
+    Some(ItemStack::of(item))
+}
+
+/// A 0.2.2 block kept its module in the saved compound; the card slot is where it
+/// lives now. Moves it there once (and clears the key), so such a world keeps its
+/// storage: after this, a block with an empty card slot is a block with no module.
+fn adopt_legacy_module(host: &mut dyn ServerHost, entity: BlockEntityRef) {
+    if module_at(&*host, entity).is_some() {
+        return;
+    }
+    let data = entity.data(&*host);
+    let Some(tier) = legacy_tier(data.as_ref()) else {
+        return;
     };
-    let mut storage = match tier {
-        Some(tier) => Storage::with_tier(tier),
-        None => Storage::empty(),
+    let Some(stack) = module_stack(&*host, tier) else {
+        return;
     };
-    storage.locked = matches!(field(data, KEY_LOCKED), Some(Tag::Byte(1)));
+    let slot = u32::try_from(MODULE_SLOT).unwrap_or(u32::MAX);
+    let mut cleared = Compound::new();
+    cleared.insert(KEY_MODULE.into(), Tag::Int(NO_MODULE));
+    let _ = host.transaction(|host, tx| -> Result<(), ()> {
+        entity
+            .set_item_slot(host, tx, slot, Some(stack.clone()))
+            .map_err(|_| ())?;
+        entity.merge_data(host, cleared.clone()).map_err(|_| ())?;
+        Ok(())
+    });
+}
+
+/// [`adopt_legacy_module`] for a menu button's view of the block entity, which is
+/// the field set a `menu_button` call may write.
+fn adopt_legacy_fields(host: &dyn Host, fields: &mut ModBlockEntityFields) {
+    if fields.items.get(MODULE_SLOT).is_some_and(Option::is_some) {
+        return;
+    }
+    let Some(tier) = legacy_tier(Some(&fields.nbt)) else {
+        return;
+    };
+    let Some(stack) = module_stack(host, tier) else {
+        return;
+    };
+    if fields.items.len() <= MODULE_SLOT {
+        fields.items.resize(CONTAINER_SLOTS, None);
+    }
+    fields.items[MODULE_SLOT] = Some(stack);
+    fields.nbt.insert(KEY_MODULE.into(), Tag::Int(NO_MODULE));
+}
+
+/// The storage a block entity holds: its module from the card slot (or, before
+/// [`adopt_legacy_module`], from the compound), its lock from the saved compound,
+/// its contents from the storage slots. The lock only counts with a module in
+/// place: a card slot emptied while locked takes the lock with it, because the pin
+/// gates placement only and a lock with no module could never be opened again.
+fn read_storage(
+    host: &dyn Host,
+    data: Option<&Compound>,
+    slots: &[Option<ItemStack>],
+    module: Option<&ItemStack>,
+) -> Storage {
+    let tier = module
+        .and_then(|stack| module_tier(&stack.item().id(host)))
+        .or_else(|| legacy_tier(data));
+    let mut storage = Storage::from_block(tier, false, vec![None; slots.len()]);
+    storage.locked = tier.is_some() && matches!(field(data, KEY_LOCKED), Some(Tag::Byte(1)));
     for (index, slot) in storage.slots.iter_mut().enumerate() {
         let Some(stack) = slots.get(index).and_then(Option::as_ref) else {
             continue;
@@ -438,6 +542,19 @@ fn read_storage(host: &dyn Host, data: Option<&Compound>, slots: &[Option<ItemSt
         });
     }
     storage
+}
+
+/// One saved field by its Java key. The compound is keyed by Java's lossless
+/// UTF-16 strings, which the API does not export by name, so the lookup spells
+/// the key the way Java does and compares the stored units (as the quarry port
+/// does): this keeps the package on the one SDK path dependency the launcher
+/// resolves by itself.
+fn field<'a>(data: Option<&'a Compound>, name: &str) -> Option<&'a Tag> {
+    let units: Vec<u16> = name.encode_utf16().collect();
+    data?
+        .iter()
+        .find(|(key, _)| key.0 == units)
+        .map(|(_, tag)| tag)
 }
 
 /// The stack a slot keeps when it holds `kind`: the one it had (components
@@ -470,9 +587,12 @@ fn same_stack(left: Option<&ItemStack>, right: Option<&ItemStack>) -> bool {
     }
 }
 
-/// Writes `storage` back: the module and lock into the saved compound, the
-/// slots into the container's `Items`. A slot that holds a kind keeps the stack
-/// it had; a slot that just filled takes the stack the player used (`held`).
+/// Writes `storage` back: the lock into the saved compound and the contents into
+/// the storage slots. A slot that holds a kind keeps the stack it had; a slot that
+/// just filled takes the stack the player used (`held`). The card slot is never
+/// written here — its module is the game's own item, moved by the player's clicks —
+/// and a storage with no module writes no storage slot, so the block keeps what it
+/// holds until a module is back.
 fn write_storage(
     host: &mut dyn ServerHost,
     tx: &Transaction,
@@ -482,13 +602,16 @@ fn write_storage(
     held: Option<&ItemStack>,
 ) -> Result<(), ()> {
     let mut data = Compound::new();
-    data.insert(
-        KEY_MODULE.into(),
-        Tag::Int(storage.tier.map_or(NO_MODULE, i32::from)),
-    );
+    // The module is the card slot's item now; the key only carries a 0.2.2 block's
+    // tier into `adopt_legacy_module`, and clearing it keeps a removed module from
+    // coming back.
+    data.insert(KEY_MODULE.into(), Tag::Int(NO_MODULE));
     data.insert(KEY_LOCKED.into(), Tag::Byte(i8::from(storage.locked)));
     entity.merge_data(host, data).map_err(|_| ())?;
-    let wanted: Vec<Option<ItemStack>> = (0..CONTAINER_SLOTS)
+    if storage.tier.is_none() {
+        return Ok(());
+    }
+    let wanted: Vec<Option<ItemStack>> = (0..STORAGE_SLOTS)
         .map(|index| {
             let slot = storage.slots.get(index)?.as_ref()?;
             let mut stack = template(host, before, held, &slot.kind)?;
@@ -526,9 +649,13 @@ fn mutate_checked<R>(
         return None;
     }
     let entity = entity_at(host, pos)?;
+    // One representation: a 0.2.2 block's recorded module becomes the card slot's
+    // item before the change reads it.
+    adopt_legacy_module(host, entity);
     let before = read_slots(host, entity);
     let data = entity.data(host);
-    let mut storage = read_storage(host, data.as_ref(), &before);
+    let module = module_at(&*host, entity);
+    let mut storage = read_storage(&*host, data.as_ref(), &before, module.as_ref());
     let result = change(&mut storage, &before)?;
     host.transaction(|host, tx| write_storage(host, tx, entity, &storage, &before, held))
         .ok()?;
@@ -595,8 +722,9 @@ fn read_at(host: &dyn Host, pos: [i32; 3]) -> Option<Read> {
     let entity = entity_at(host, pos)?;
     let slots = read_slots(host, entity);
     let data = entity.data(host);
+    let module = module_at(host, entity);
     Some(Read {
-        storage: read_storage(host, data.as_ref(), &slots),
+        storage: read_storage(host, data.as_ref(), &slots, module.as_ref()),
         slots,
     })
 }
@@ -683,10 +811,10 @@ pub(crate) fn on_right_click_block(
     if let HostSide::Server(host) = host {
         match click.stack {
             None => empty_hand(host, click.pos, click.player),
-            Some(stack) => match module_tier(&stack.item().id(host)) {
-                Some(tier) => install(host, click.pos, click.player, stack, tier),
-                None => insert(host, click.pos, click.player, stack),
-            },
+            Some(stack) if module_tier(&stack.item().id(host)).is_some() => {
+                install(host, click.pos, click.player, stack);
+            }
+            Some(stack) => insert(host, click.pos, click.player, stack),
         }
     }
     *event.cancellation_result = InteractionResult::Success;
@@ -756,11 +884,18 @@ fn empty_hand(host: &mut dyn ServerHost, pos: [i32; 3], uuid: u128) {
     withdraw(host, pos, uuid);
 }
 
-/// A storage module in hand goes into the block's module slot (only while
-/// unlocked and empty, as upstream's `mayPlace`).
-fn install(host: &mut dyn ServerHost, pos: [i32; 3], uuid: u128, held: &ItemStack, tier: u8) {
-    let installed = mutate(host, pos, None, |storage, _| storage.install(tier)).unwrap_or(false);
-    let line = if installed {
+/// A storage module in hand goes into the block's **card slot** — upstream's
+/// `SLOT_STORAGE_MODULE` — only while unlocked and empty (its `mayPlace`). The
+/// item stays there as the storage's module, so the menu can take it back out.
+fn install(host: &mut dyn ServerHost, pos: [i32; 3], uuid: u128, held: &ItemStack) {
+    let state = read_at(host, pos).map(|read| read.storage);
+    let placed = match state {
+        None => false,
+        Some(storage) if storage.locked => false,
+        Some(storage) if storage.tier.is_some() => false,
+        Some(_) => put_card(host, pos, held),
+    };
+    let line = if placed {
         take_from_hand(host, uuid, held, 1);
         match read_at(host, pos) {
             Some(read) => format!(
@@ -777,6 +912,31 @@ fn install(host: &mut dyn ServerHost, pos: [i32; 3], uuid: u128, held: &ItemStac
         }
     };
     action_bar(host, uuid, line);
+}
+
+/// Puts one of `held` into the card slot (the card holds a whole module: the
+/// items are `stacksTo(1)`), and clears a 0.2.2 block's recorded tier so the two
+/// cannot disagree.
+fn put_card(host: &mut dyn ServerHost, pos: [i32; 3], held: &ItemStack) -> bool {
+    let Some(entity) = entity_at(host, pos) else {
+        return false;
+    };
+    let mut one = held.clone();
+    if one.set_count(1).is_err() {
+        return false;
+    }
+    let slot = u32::try_from(MODULE_SLOT).unwrap_or(u32::MAX);
+    let mut data = Compound::new();
+    data.insert(KEY_MODULE.into(), Tag::Int(NO_MODULE));
+    host.transaction(|host, tx| -> Result<(), ()> {
+        entity
+            .set_item_slot(host, tx, slot, Some(one.clone()))
+            .map_err(|_| ())?;
+        entity.merge_data(host, data.clone()).map_err(|_| ())?;
+        let _ = entity.set_changed(host);
+        Ok(())
+    })
+    .is_ok()
 }
 
 /// The held stack goes in, as much as fits.
@@ -931,17 +1091,24 @@ pub(crate) fn on_run_mod_command(
                 (true, None) => format!("{block}: not a modular storage"),
             }
         }
-        "info" => match read_at(host, pos) {
-            Some(read) => {
-                let max_stack = read_max_stack(host, &read);
-                format!(
-                    "{block}: {} {}",
-                    read.storage.summary(max_stack),
-                    read.storage.state_word()
-                )
+        "info" => {
+            // A 0.2.2 block's module moves into the card slot on the first read,
+            // so the readout and the menu agree from then on.
+            if let Some(entity) = entity_at(&*host, pos) {
+                adopt_legacy_module(host, entity);
             }
-            None => format!("{block}: not a modular storage"),
-        },
+            match read_at(&*host, pos) {
+                Some(read) => {
+                    let max_stack = read_max_stack(&*host, &read);
+                    format!(
+                        "{block}: {} {}",
+                        read.storage.summary(max_stack),
+                        read.storage.state_word()
+                    )
+                }
+                None => format!("{block}: not a modular storage"),
+            }
+        }
         _ => return Flow::Continue,
     };
     feedback(host, &line);
