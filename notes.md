@@ -13,13 +13,14 @@ differences, are in [`FINDINGS.md`](FINDINGS.md).
 publishing (ARCHITECTURE.md §8); the port carries the upstream MIT notice in
 [`LICENSE`](LICENSE) and its provenance in [`LICENSE-NOTICE.md`](LICENSE-NOTICE.md).
 
-**Format: the SDK package (2026-11-18), version 0.2.3.** One flat `.hmod` —
+**Format: the SDK package (2026-11-18), version 0.2.4.** One flat `.hmod` —
 `horizon-mod.toml` + `Cargo.toml` + `src/` + `assets/` + `data/` — built by the
 launcher against SDK nightly **`0a875da91dbb0fdcb7ba8c42c11341aa229af51a`** with
 horizon-mixins **`e59da9094f0c2fdda6c627fe9eff22dec6a906f0`** (see
 [`## Migration to the SDK format`](#migration-to-the-sdk-format--version-020) and
 [`## Slice 2`](#slice-2--the-storages-menu-version-022),
-[`## Slice 3`](#slice-3--the-module-s-card-slot-version-023)).
+[`## Slice 3`](#slice-3--the-module-s-card-slot-version-023),
+[`## Slice 4`](#slice-4--the-contents-travel-on-the-item-version-024)).
 The retired `.hnmod` container pinned Horizon `1d63e0a5…` / mixins `5a64af93…`;
 `src/runtime.rs` was byte-identical to the retired
 `mixins/rftoolsstorage/runtime.rs` until the 2026-11-18 review fixes gave it the
@@ -27,10 +28,11 @@ reach rule, and slice 2 added the menu's two rules.
 
 Status: **ported-partial** — slice 1 (the modular storage block with a tier-1
 storage module), slice 2 (its **menu**: a 100-slot grid opened by a right click,
-its slot rules and the padlock) and slice 3 (the menu's **card slot**, where the
-module itself lives, so it can be taken back out) are implemented and verified in
-a launcher-built game at the pin (five legs: default, control, barrel
-counterfactual, `SELFTEST=1`, `NEGATIVE=1`; `ports/_shared/evidence/rftoolsstorage-e2e/`).
+its slot rules and the padlock), slice 3 (the menu's **card slot**, where the
+module itself lives, so it can be taken back out) and slice 4 (**a broken block's
+contents travel on its own item**, with the lock and the module, and come back on
+placement) are implemented and verified in a launcher-built game at the pin (the
+legs are listed per slice below; `ports/_shared/evidence/rftoolsstorage-e2e/`).
 The gap list below is the rest of the mod.
 
 ## Class + tier and the approach
@@ -114,10 +116,12 @@ The gap list below is the rest of the mod.
    slots) cannot be wired through the container path — and a menu type holds at
    most 256 slots, so tiers 2 and 3 would not fit beside the player's 36 either.
    The runtime carries the whole table and its tests.
-5. **A break spills the contents** as loose drops instead of carrying them in
-   the item: `minecraft:copy_components` covers only vanilla block entities at
-   this pin (ARCHITECTURE §3), and upstream's loot list names `mcjtylib:*`
-   components this port does not have. Nothing is lost either way.
+5. ~~A break spills the contents as loose drops instead of carrying them in the
+   item.~~ **Fixed in slice 4** (0.2.4): a player's break that drops the block moves
+   the container's stacks aside before the removal and puts them on the block's own
+   item as `minecraft:block_entity_data`; a level-side break (piston, water,
+   explosion, `/setblock … destroy`) still spills them, as vanilla does when its block
+   entity gets no say. See [`## Slice 4`](#slice-4--the-contents-travel-on-the-item-version-024).
 6. The `facing` comes from the template's rule (the face you click) rather than
    McJtyLib's "face the placer": the port does not inject `state_for_placement`,
    so the front is the clicked face. The block accepts a click on any face.
@@ -663,6 +667,146 @@ stick/a block where its keys go craft nothing).
    `max_stack` to 1..99 and then to the item's own size; a module is `stacksTo(1)`, so a click
    puts one in and leaves the rest on the cursor (the e2e gives exactly one).
 
+## Slice 4 — the contents travel on the item (version 0.2.4)
+
+The gap line slice 3 left, verbatim from [`## Deliberate deviations`](#deliberate-deviations) 5 and
+[`FINDINGS.md`](FINDINGS.md) §4:
+
+> **A break spills the contents** as loose drops instead of carrying them in the item.
+
+Upstream keeps a broken storage's contents for the module (`StorageHolder`, keyed by the module's
+UUID), so placing the block back with its module finds them; this port keeps one store per block
+(deviation 1), so the equivalent is the block's **own item** carrying them. It fits the
+**machines** tier: a block entity's saved data, an item component and the carried rules — no new
+family, no renderer, no new vanilla hook.
+
+**Pin:** Horizon `0a875da91dbb0fdcb7ba8c42c11341aa229af51a`, horizon-mixins
+`e59da9094f0c2fdda6c627fe9eff22dec6a906f0`, mod API `0.2`, game 26.3. **Version 0.2.4.**
+
+### What it does
+
+- **Break.** `BlockPart::on_destroyed_by_player` (`IBlockExtension.onDestroyedByPlayer`, asked
+  before the removal) checks `will_harvest` — a creative break or a tool the block refuses drops
+  nothing and keeps the vanilla spill — reads the container's 101 slots with
+  `ItemStack::to_nbt` + `Slot`, writes them under the saved key `carried`, **empties the slots**
+  and remembers the saved data for the drop. The engine's own container spill
+  (`PreRemove::Contents`) then finds an empty container: nothing scatters.
+- **The payload.** `Hooks::block_drops` reads the stash and puts the saved data on the block's own
+  drop as `minecraft:block_entity_data` tagged
+  `id = "rftoolsstorage:storage_block_entity"` (vanilla's `TypedEntityData.loadInto` loads a
+  payload only when its `id` names the block entity). **`Items` is stripped**: the engine spills a
+  mod container's stacks itself, so a payload that also carried them would duplicate every stack.
+- **Place.** `ItemPart::on_block_placed_by` on `rftoolsstorage:modular_storage` restores the
+  carried stacks — the card slot's module and the lock (both in the payload) with them — then
+  clears the key so they travel once. `runtime::carried_slot_in` and `runtime::restored_count`
+  clamp it: only the container's 100 slots and the card slot, each at most the item's own stack
+  size (a `/give`n payload naming 200 stone places 64).
+- **The block's own recovery.** The same `carried` key stays in the block entity's saved data
+  until the removal, so a removal the level refuses (the block stays) loses nothing:
+  `adopt_carried` puts the contents back on the next menu open, click, padlock or `/info`, the way
+  `adopt_legacy_module` does for a 0.2.2 block.
+
+### Red → green (the rules)
+
+`carried_slot_in`/`restored_count` were stubbed (`false` / `count`) and the suite run
+(`ports/_shared/evidence/rftoolsstorage/slice4-red.log`, `TEST_EXIT:101`):
+
+```
+---- runtime::tests::a_carried_slot_comes_back_clamped_and_only_where_the_block_has_one stdout ----
+
+thread 'runtime::tests::a_carried_slot_comes_back_clamped_and_only_where_the_block_has_one' panicked at src/runtime.rs:663:9:
+assertion failed: carried_slot_in(100, 100, 0)
+...
+test result: FAILED. 21 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out
+TEST_EXIT:101
+```
+
+Implemented, then **24 passed, 0 failed** (`sdk-test.log`): the runtime's 21 and three glue tests,
+one of the runtime's and two of the glue's new — `a_carried_slot_comes_back_clamped_and_only_where_the_block_has_one`,
+`the_payload_carries_the_contents_and_never_items` and `a_break_that_moved_nothing_aside_carries_nothing`.
+
+### In game (`ports/_shared/evidence/rftoolsstorage-e2e/`)
+
+| Leg | Log | Verdict |
+|---|---|---|
+| default, the launcher-built package | `e2e-carried.log` | **PASS** + `EXIT:0` |
+| control (the same Nightly without the package) | `e2e-carried-control.log` | **FAIL** + `EXIT:1` — `{"error":"unknown item rftoolsstorage:modular_storage"}` |
+| counterfactual (a vanilla barrel in the same rig) | `e2e-carried-counterfactual.log` | **PASS** + `EXIT:0` — a 27-slot chest menu whose first slot takes the stack |
+| `SELFTEST=1` (asserts the break *spilled* the contents) | `e2e-carried-selftest.log` | **FAIL** + `EXIT:1` — *"the survival break carried the storage's contents on the block's item (1 drop(s) on the ground, 0 stone spilled), so this inverted assertion fails as it must"* |
+
+What `e2e-carried.log` asserts (every number before and after; the earlier phases are slice 2/3's
+and still pass): a fresh storage at the rig's edge takes a module, locks and stores 64 stone; the
+player switches to **survival** and mines it with a diamond pickaxe, and the break's own reply is
+`{"drops":{"rftoolsstorage:modular_storage":1},"picked_up":{},"items_left_on_ground":1}` — **no
+`minecraft:stone`**, one item on the ground; the picked-up item's `SelectedItem` is
+
+```
+{components: {"minecraft:block_entity_data": {carried: [{count: 64, Slot: 0b, id: "minecraft:stone"},
+ {count: 1, Slot: 100b, id: "rftoolsstorage:storage_module0"}], module: -1,
+ id: "rftoolsstorage:storage_block_entity", locked: 1b}}, count: 1, id: "rftoolsstorage:modular_storage"}
+```
+
+— the contents, the lock and the module, and **no `Items`**; placed back, the block's **own saved
+data** (`/data get block`, no mod code in the path) reads `Items[0] = 64 x minecraft:stone`,
+`Items[1]` slot `100` = the module, `carried = []`; `/rftoolsstorage info` reads
+`64/6400 minecraft:stone locked` and the reopened menu's slot 300 holds 64 with the module in the
+card slot; an item doctored to 200 stone places 64; and the **level-side counterfactual** — the
+same block, `/setblock … destroy` — spills `stone 64, modules 1, storage items 1`, drops an item
+with no payload, and the block placed back reads `0/0 empty no module` (`0/6400` with the module
+put back).
+
+### Coverage (the families this slice changes)
+
+| Family | State |
+|---|---|
+| a broken storage's contents on its item (`minecraft:block_entity_data`, no `Items`) | **tested** — break, payload, clamp, place-back (`e2e-carried.log`) |
+| the lock and the card slot's module travelling with the contents | **tested** — `locked: 1b` and slot 100 in the payload; `Items[1]` slot 100 after placement |
+| a doctored payload clamped to the slot | **tested in game** (200 → 64) and by `restored_count` |
+| a level-side break (no player) | **tested (the opposite)** — spills the stacks, plain block item (`e2e-carried.log`) |
+| a removal the level refuses | rule unit-tested (`carried_slot_in`), the `adopt_carried` path is the same one the 0.2.2 migration uses; not forced in game |
+
+### Deviations this slice adds
+
+1. **A transient break stash.** `block_drops` runs after the removal and the engine snapshots the
+   block entity's saved data *before* it (measured), so the stash is a short-lived list in the mod
+   keyed by `(dimension, pos)` and expiring after 2 s (functionalstorage's shape). It holds one
+   break's data for the same tick; nothing survives a relaunch. The same data is also written into
+   the block entity's saved data for the refused-removal recovery above.
+2. **A level-side break does not carry the contents.** A piston, water, an explosion or
+   `/setblock … destroy` gives no `onDestroyedByPlayer` moment, so the vanilla spill stands. That is
+   the differential, and it matches vanilla: a block entity gets no say there either.
+3. **The carried key is this port's, not `Items`.** The payload moves the container's stacks under
+   `carried`, so vanilla's placement does not apply them itself; `on_block_placed_by` writes them
+   with the clamp. The alternative — carrying `Items` — duplicates every stack (the engine spills
+   them as well).
+4. **`block_drops` never trusts the event's saved data.** The engine reads it before the removal
+   (see the trap below); reading it would attach a *pre-break* copy (with `Items`) or nothing. The
+   stash is the source, and the payload's `Items` stripping is a second guard.
+
+### Traps this slice paid for
+
+1. **`BlockEntityRef::data()` in `block_drops` is the pre-removal snapshot, not the stash.** The
+   engine snapshots the block entity for `block_drops` **before** `onDestroyedByPlayer` runs
+   (`live_block_entity` → `saved_block_entity_data` → `hold_broken`), so the event's saved data has
+   the container's `Items` and none of the break's own writes. The first version trusted it and
+   dropped a plain item while the stone vanished into the emptied container; the mod-side stash is
+   the fix.
+2. **One Part object answers both its halves.** `StorageBlock` implements `BlockPart` and
+   `BlockEntityPart`, and `Registrar::block_entity_part` attaches it to the type: the break's
+   `on_destroyed_by_player` fired from the first build (the container's spill stopped, which is how
+   the "hook did not run" theory was disproved — the payload was missing for a different reason,
+   trap 1). A separate `block_part(block, …)` call is only needed for a Part whose block is not its
+   block-entity type.
+3. **`ctl place` refuses a cell the player's box overlaps** ("the player is standing in that cell"),
+   and after `ctl collect` walks the player onto the drop the box is in the block's own cell. The
+   e2e stands two blocks clear and places in creative (the payload path is mode-independent); the
+   retry prints the player's position when a placement is refused.
+4. **A saved `Slot` is a byte** (`Slot: 0b`, `100b`), so `data get … Items[1].Slot` prints `100b`,
+   not `100`; and an item NBT `count` must fit the writer: `count: 200b` is refused, `count: 200`
+   is not.
+5. **`ctl break`'s reply is the server's report** (`drops`, `picked_up`, `items_left_on_ground`):
+   the spill check is `drops["minecraft:stone"] == 0`, not an entity count on the client.
+
 Skills: superpowers/using-superpowers, brainstorming, writing-plans, test-driven-development, systematic-debugging, verification-before-completion; BeautifulRust/rust-best-practices
 
 ## Verification
@@ -670,6 +814,27 @@ Skills: superpowers/using-superpowers, brainstorming, writing-plans, test-driven
 Full evidence in [`VALIDATION.md`](VALIDATION.md); the e2e logs are in
 `ports/_shared/evidence/rftoolsstorage-e2e/` (the game legs) and
 `ports/_shared/evidence/rftoolsstorage/` (the ladder, package and fits).
+
+**0.2.4 — the contents travel on the item (2026-11-21, pin `0a875da`)**
+
+| Step | Command | Result |
+|---|---|---|
+| Red proof | `cargo test` with `carried_slot_in`/`restored_count` stubbed | **FAILED. 21 passed; 1 failed**, `TEST_EXIT:101` (`slice4-red.log`); quoted above |
+| Runtime + glue tests | `cargo test` | **24 passed**, 0 failed (`sdk-test.log`, `TEST_EXIT:0`) |
+| Lints | `cargo clippy --all-targets -- -D warnings` | `CLIPPY_EXIT:0`, 0 warnings (`sdk-clippy.log`) |
+| Formatting | `rustfmt --edition 2024 --check src/{lib,support,runtime}.rs` | `FMT_EXIT:0` (`sdk-test.log`) |
+| SDK gate | `cargo horizon-mod check` | EXIT 0 — *"…uses 458 items of the API (… 16 hooks …). Made for 0a875da."* (`sdk-check.log`) |
+| Package | `rm -f Cargo.lock && cargo horizon-mod build`, twice | **64,513 B**, SHA-256 `a2d6add4…d90d60`, **`cmp`-identical**; 58 entries, no `Cargo.lock` (`sdk-build.log`, `sdk-sha256.txt`) |
+| Package check | `cargo horizon-mod check rftoolsstorage.hmod` | `rftoolsstorage 0.2.4 (native-mod, format native-1/0a875da…/e59da90…, for 26.3)`, **64,513 B**, `a2d6add4…d90d60`, EXIT 0 (`sdk-check.log`) |
+| Fits the pin | `cargo horizon-mod fits rftoolsstorage.hmod --build 0a875da91dbb…` (same build as `0a875da`) | `0a875da  made for`, EXIT 0, sha `a2d6add4…d90d60` (`sdk-fits.log`) |
+| Fits another build | `cargo horizon-mod fits rftoolsstorage.hmod --build 0b14f8acfd…` (same build as `0b14f8a`) | `0b14f8a  fits`, EXIT 0, sha `a2d6add4…d90d60` (`sdk-fits.log`) |
+| In game | `build-slot.sh run --step e2e -- bash tools/e2e.sh` | **PASS** + `EXIT:0` (`e2e-carried.log`) |
+| Control | the same rig on the Nightly without the package | **FAIL** + `EXIT:1` (`e2e-carried-control.log`) |
+| Counterfactual | a vanilla barrel in the same rig | **PASS** + `EXIT:0` (`e2e-carried-counterfactual.log`) |
+| Selftest | `SELFTEST=1` (asserts the break spilled the contents) | **FAIL** + `EXIT:1` (`e2e-carried-selftest.log`) |
+| e2e gate | `check-e2e-logs.py rftoolsstorage-e2e --strict` | `logs=4 ok=4`, exit 0 |
+| Package gate | `verify-sdk-package.py rftoolsstorage` | `1/1 package(s) verified`, exit 0 |
+| Skills gate | `check-skills.py --notes ports/rftoolsstorage --strict` | `Skills line present`, PASS |
 
 **0.2.3 — the card slot (2026-11-21, pin `0a875da`)**
 

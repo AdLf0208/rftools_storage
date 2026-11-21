@@ -1,6 +1,6 @@
 id = "rftoolsstorage"
 name = "RFTools Storage"
-version = "0.2.3"
+version = "0.2.4"
 description = """RFTools Storage for Horizon: the modular storage block. A storage module in the
 block's card slot sets its capacity (tier 1: 100 slots, one item kind a slot, 64 a slot), and the
 block stores nothing until it is locked. A right click opens the storage's own menu -- a 10 x 10 grid

@@ -32,10 +32,29 @@
 #      the same click opens a 27-slot chest menu and its slot takes the stack the
 #      storage refuses while unlocked.
 #
-# SELFTEST=1 keeps the scenario and asserts the barrel's 27-slot menu on the
-# storage, so the run MUST fail with a `FAIL:` verdict. NEGATIVE=1 stops after
-# the card slot's refusal and asserts that a stone WAS taken, so that assertion
-# is proved able to fail too.
+# Slice 4 adds the contents-on-the-item phases:
+#  13. a **survival break carries the storage's contents on its own item**: a locked
+#      storage holding 64 stone and its module drops ONE item — the block's own, whose
+#      `minecraft:block_entity_data` names `rftoolsstorage:storage_block_entity` and
+#      carries the 64 stone, the lock and the module, and **no `Items`** — so the
+#      engine's own container spill has nothing to scatter (the break's reply reports
+#      no `minecraft:stone` drop and exactly one item on the ground);
+#  14. placing that item back restores the 64 stone, the lock and the card slot's
+#      module (`/rftoolsstorage info` = `64/6400 minecraft:stone locked`), read first
+#      from the block's own saved data (`/data get block … Items[0].id`, no mod code
+#      in the path — the menu and `/info` also adopt a leftover stash);
+#  15. an item doctored to carry 200 stone places a 64-stone slot;
+#  16. COUNTERFACTUAL, in the same run: a **level-side break** (`/setblock … destroy`)
+#      never runs the player's break-time stash, so the stone and the module spill as
+#      loose items, the block item carries no payload, and the block placed back reads
+#      `0/0 empty no module` (`0/6400` once the module is put back) — the differential.
+#
+# SELFTEST=1 keeps the scenario and asserts that the survival break SPILLED the
+# contents, so the run MUST fail with a `FAIL:` verdict (the assertion the carry
+# phase relies on is proved able to fail). NEGATIVE=1 stops after the card slot's
+# refusal and asserts that a stone WAS taken, so that assertion is proved able to
+# fail too. CONTROL_GAME runs the same rig on the Nightly without the package and
+# fails there (`EXIT:1`): the block does not exist.
 #
 # Since the SDK migration (2026-11-18) the mod is one flat `.hmod` the launcher
 # compiles into the game, so GAME must name a game the launcher built with it:
@@ -188,6 +207,136 @@ put_back() { # put_back SLOT: the cursor stack into inventory slot SLOT
     ctl click-slot "$1" >/dev/null
     ctl wait 2 >/dev/null
 }
+# --- the contents on the broken item (slice 4) ------------------------------
+# A survival break: the drop path (`block_drops`) does not fire for a creative
+# break, so the carried-contents phases switch the player to survival. The break's
+# own reply is the server's report: `drops` is what the loot table and the
+# container's spill produced, `items_left_on_ground` how many of them the player
+# did not take.
+break_survival() { # x y z block
+    local x=$1 y=$2 z=$3 block=$4 held name
+    ctl tp "$((x - 3)).5" "$Y" "$((z + 1)).5" >/dev/null
+    ctl wait 6 >/dev/null
+    held=$(ctl inventory | jq -r '.held.item // ""')
+    [ "$held" = "minecraft:diamond_pickaxe" ] || fail "the pickaxe is not in hand: '$held'"
+    BREAK=$(ctl break "$x" "$y" "$z") || fail "$block did not break"
+    ctl wait 10 >/dev/null
+    name=$(block_name "$x" "$y" "$z")
+    [ "$name" = "minecraft:air" ] || fail "$block is still $name after mining"
+    [ "$(jq -r --arg i "$block" '.drops[$i] // 0' <<<"$BREAK")" -ge 1 ] \
+        || fail "the survival break of $block dropped nothing: $(jq -c '.drops' <<<"$BREAK")"
+    echo "  break: $(jq -c '{drops, picked_up, items_left_on_ground}' <<<"$BREAK")" >&2
+}
+
+# `/data get block X Y Z path`: the block entity's saved value with **no mod code in
+# the path** — the menu and `/rftoolsstorage info` also put a leftover carried stash
+# back, so the placement's own write is read here, not through a readout. A path
+# reply prints `<x>, <y>, <z> has the following block data: <value>`.
+data_block() { # x y z path
+    local x=$1 y=$2 z=$3 path=$4 line value
+    ctl command "data get block $x $y $z $path" >/dev/null
+    ctl wait 8 >/dev/null
+    line=$(ctl messages 12 | jq -r '.chat[]' | grep -m1 'has the following block data' || true)
+    [ -n "$line" ] || fail "no data get reply for $path at $x,$y,$z: $(ctl messages 6 | jq -c '.chat')"
+    value=${line##*has the following block data: }
+    value=${value#\"}
+    value=${value%\"}
+    echo "$value"
+}
+
+# `/data get entity @s SelectedItem`, waiting for the *new* reply (the chat is read
+# newest first, so a fixed wait can read the previous line). Sets `SELECTED_LINE`
+# (the whole server-side stack) and `HELD_COMPONENTS` (its SNBT). `ctl entities`'
+# `.item.components` is the client's mirror and does not carry a mod component
+# (measured at this pin), so the hand is read here.
+selected_item_line() { # [what]
+    local what=${1:-held} prev line i parsed
+    prev=$(ctl messages 20 | jq -r '.chat[]' | grep -m1 'has the following entity data' || true)
+    ctl command "data get entity @s SelectedItem" >/dev/null
+    line=$prev
+    for i in $(seq 1 25); do
+        ctl wait 4 >/dev/null
+        line=$(ctl messages 20 | jq -r '.chat[]' | grep -m1 'has the following entity data' || true)
+        [ -n "$line" ] && [ "$line" != "$prev" ] && break
+    done
+    [ -n "$line" ] && [ "$line" != "$prev" ] || fail "no /data get reply for the $what item"
+    SELECTED_LINE=$line
+    parsed=$(sed -n 's/.*entity data: \(.*\)$/\1/p' <<<"$line")
+    [ -n "$parsed" ] || fail "the SelectedItem reply did not parse: $line"
+    HELD_COMPONENTS=$parsed
+    echo "  $what: $line" >&2
+}
+
+# The same plain click and sneak click as `open_menu`/`quick`, without a face: these
+# blocks are placed by the agent, so the face it clicked (and the block's `facing`) is
+# not the one the first rig has, and `interact X Y Z FACE` refuses a face it cannot see.
+open_menu_any() { # x y z
+    ctl close >/dev/null 2>&1 || true
+    ctl wait 4 >/dev/null
+    ctl interact "$1" "$2" "$3" >/dev/null || true
+    ctl wait-for screen container --timeout 10 >/dev/null \
+        || fail "the click did not open a menu (screen=$(ctl state | jq -r '.screen // ""'))"
+    panel_origin
+}
+quick_any() { # x y z
+    ctl key shift down >/dev/null
+    ctl wait 6 >/dev/null
+    ctl interact "$1" "$2" "$3" >/dev/null
+    ctl key shift up >/dev/null
+    ctl wait 6 >/dev/null
+}
+
+# Stand two blocks in front of (x, z) on the rig's floor: `ctl place` and `ctl
+# interact` need the player in reach, and a cell the player's own box overlaps is
+# refused ("the player is standing in that cell"). The console `/tp` is used rather
+# than `ctl tp`: after `ctl collect` walks the player onto a drop, the walk can carry
+# them back into the cell, so the position is verified and set again.
+stand_at() { # x z [y]
+    local want_y=${3:-101} i arrived
+    for i in 1 2 3; do
+        ctl command "execute in minecraft:overworld run tp @s $1.5 $want_y $2.5" >/dev/null
+        ctl wait 8 >/dev/null
+        arrived=$(ctl state | jq -r --arg x "$1.5" --arg z "$2.5" \
+            '.player.position as $p
+             | ((($p[0] - ($x|tonumber)) | if . < 0 then -. else . end) < 1)
+               and ((($p[2] - ($z|tonumber)) | if . < 0 then -. else . end) < 1)')
+        [ "$arrived" = true ] && return 0
+    done
+    echo "  stand_at $1,$2: the player is at $(ctl state | jq -c '.player.position') after three teleports" >&2
+}
+
+# Walk onto the drop, select it in the hotbar and read it with the server's own view.
+pick_hold() { # x y z block
+    local x=$1 y=$2 z=$3 block=$4 slot
+    ctl collect 8 >/dev/null 2>&1 || true
+    ctl wait 10 >/dev/null
+    ctl tp "$x.5" "$Y" "$z.5" >/dev/null
+    ctl wait 30 >/dev/null
+    slot=$(ctl inventory | jq -r --arg i "$block" '[.hotbar[] | select(.item == $i) | .slot] | .[0] // ""')
+    [ -n "$slot" ] || fail "the dropped $block was not picked up: $(ctl inventory | jq -c '.hotbar')"
+    ctl select $((slot + 1)) >/dev/null
+    ctl wait 6 >/dev/null
+    selected_item_line "the dropped $block"
+}
+
+# Place the held item at a position, then check the block is there. `ctl place` needs
+# a solid neighbour in reach and an aim the ray reaches, so it is retried from the
+# same spot (a refusal keeps the stack; a consumed one does not, and is reported).
+place_held() { # x y z block
+    local x=$1 y=$2 z=$3 block=$4 i reply name
+    for i in 1 2 3; do
+        stand_at "$x" "$((z + 2))"
+        reply=$(ctl place "$x" "$Y" "$z" --item "$block" 2>&1) || true
+        ctl wait 8 >/dev/null
+        name=$(block_name "$x" "$Y" "$z")
+        [ "$name" = "$block" ] && return 0
+        echo "  place attempt $i at $x,$Y,$z from $(ctl state | jq -c '.player.position'): $reply (block: ${name:-unknown})" >&2
+        [ "$(count_item "$block")" != 0 ] \
+            || fail "$block left the inventory and is not at $x,$Y,$z"
+        ctl wait 10 >/dev/null
+    done
+    fail "$block did not place at $x,$Y,$z"
+}
 
 cleanup() {
     local status=$?
@@ -210,19 +359,17 @@ launch() {
 }
 
 if [ -n "$CONTROL_GAME" ]; then
-    say "control: the game without the package does not know the storage"
+    # The control is the same rig on the same Nightly with the package left out:
+    # the scenario cannot even start, so the leg MUST fail (`EXIT:1` in the log).
+    say "control: the same rig on the game without the package (must fail)"
     launch "$CONTROL_GAME"
     ctl command "fill -8 100 -8 8 100 8 minecraft:stone" >/dev/null
     ctl command "fill -8 101 -8 8 110 8 minecraft:air" >/dev/null
     ctl tp 0.5 101 3.5 >/dev/null
     ctl wait 20 >/dev/null
-    if ctl give "$STORAGE" 1 2>/dev/null | grep -q '"ok":true'; then
-        fail "the package-less game gave $STORAGE (the control is not a control)"
-    fi
     got=$(ctl give "$STORAGE" 1 2>&1 || true)
     echo "control give: $got"
-    echo "PASS: without the package the block does not exist, so nothing of this scenario can run"
-    exit 0
+    fail "without the package there is no $STORAGE to place, store in or break, so nothing of this scenario can run"
 fi
 
 say "launch (offscreen renderer, creative)"
@@ -755,17 +902,241 @@ echo "the storage recipe with a stone block where rftoolsbase:machine_frame belo
 ctl close >/dev/null 2>&1 || true
 ctl wait 4 >/dev/null
 
+say "a survival break carries the storage's contents on its own item"
+# A fresh block for this phase: 64 stone, locked, the module in the card slot.
+BX=$((X - 3))
+BY=$Y
+BZ=$Z1
+ctl command "clear @a" >/dev/null
+ctl setblock "$BX" "$((BY - 1))" "$BZ" minecraft:stone >/dev/null
+stand_at "$BX" "$((BZ + 2))"
+ctl give "$STORAGE" 1 >/dev/null || fail "cannot give $STORAGE for the carried-contents phase"
+ctl wait 6
+ctl select 1 >/dev/null || true
+ctl wait 6
+ctl place "$BX" "$BY" "$BZ" --item "$STORAGE" >/dev/null || fail "cannot place the carried-contents storage"
+ctl wait 6
+[ "$(block_name "$BX" "$BY" "$BZ")" = "$STORAGE" ] || fail "the second storage did not place"
+ctl wait 6
+ctl command "clear @a" >/dev/null
+ctl give "$MODULE" 1 >/dev/null || fail "cannot give a module for the carried-contents phase"
+ctl wait 6
+ctl select "$MODULE" >/dev/null || fail "cannot select the module"
+ctl wait 6
+stand_at "$BX" "$((BZ + 2))"
+quick_any "$BX" "$BY" "$BZ"
+line=$(info "$BX" "$BY" "$BZ")
+echo "readout after the module: $line"
+echo "$line" | grep -q "^$STORAGE: 0/$CAPACITY empty unlocked$" || fail "the second storage did not take the module: $line"
+lock "$BX" "$BY" "$BZ" >/dev/null
+ctl command "clear @a" >/dev/null
+ctl give minecraft:stone 64 >/dev/null
+ctl wait 6
+stand_at "$BX" "$((BZ + 2))"
+open_menu_any "$BX" "$BY" "$BZ"
+carry minecraft:stone >/dev/null
+ctl click-slot 300 >/dev/null
+ctl wait 4 >/dev/null
+ctl close >/dev/null 2>&1 || true
+ctl wait 4 >/dev/null
+line=$(info "$BX" "$BY" "$BZ")
+echo "readout before the break: $line"
+echo "$line" | grep -q "^$STORAGE: 64/$CAPACITY minecraft:stone locked$" || fail "the second storage does not hold 64 stone: $line"
+
+ctl command "gamemode survival" >/dev/null
+ctl wait 20 >/dev/null
+ctl command "clear @a" >/dev/null
+ctl give minecraft:diamond_pickaxe 1 >/dev/null || fail "cannot give the pickaxe"
+ctl wait 6
+ctl select minecraft:diamond_pickaxe >/dev/null || fail "cannot select the pickaxe"
+ctl wait 6
+break_survival "$BX" "$BY" "$BZ" "$STORAGE"
+# THE slice's assertion: the stone did not leave the block — one drop, the block's
+# own item, carrying its contents (`minecraft:block_entity_data`).
+echo "the break's drops: $(jq -c '.drops' <<<"$BREAK"); on the ground: $(jq -r '.items_left_on_ground' <<<"$BREAK")"
+[ "$(jq -r --arg i minecraft:stone '.drops[$i] // 0' <<<"$BREAK")" = 0 ] \
+    || fail "the break spilled the storage's stone: $(jq -c '.drops' <<<"$BREAK")"
+[ "$(jq -r '.items_left_on_ground' <<<"$BREAK")" = 1 ] \
+    || fail "the break left $(jq -r '.items_left_on_ground' <<<"$BREAK") drops on the ground, expected the block item alone"
+
+say "the dropped storage's item carries the contents, and never Items"
+pick_hold "$BX" "$BY" "$BZ" "$STORAGE"
+case "$SELECTED_LINE" in
+    *"minecraft:block_entity_data"*) ;;
+    *) fail "the dropped storage carries no block-entity data: $SELECTED_LINE" ;;
+esac
+case "$SELECTED_LINE" in
+    *"rftoolsstorage:storage_block_entity"*) ;;
+    *) fail "the payload does not name the block entity type: $SELECTED_LINE" ;;
+esac
+case "$SELECTED_LINE" in
+    *"carried: ["*) ;;
+    *) fail "the payload carries no contents: $SELECTED_LINE" ;;
+esac
+case "$SELECTED_LINE" in
+    *"Slot: 0b"*) ;;
+    *) fail "the contents are not in the container's first slot: $SELECTED_LINE" ;;
+esac
+case "$SELECTED_LINE" in
+    *'id: "minecraft:stone"'*) ;;
+    *) fail "the payload does not carry the 64 stone: $SELECTED_LINE" ;;
+esac
+case "$SELECTED_LINE" in
+    *"count: 64"*) ;;
+    *) fail "the payload does not carry 64 stone: $SELECTED_LINE" ;;
+esac
+case "$SELECTED_LINE" in
+    *"Items:"*) fail "the payload carries Items, so the engine would spill a second copy: $SELECTED_LINE" ;;
+    *) ;;
+esac
+case "$SELECTED_LINE" in
+    *"locked: 1b"*) ;;
+    *) fail "the payload lost the lock: $SELECTED_LINE" ;;
+esac
+
+say "placing it back restores the 64 stone, the lock and the card slot's module"
+# Back to creative for the placement: the drop path (`block_drops`, the stash, the
+# carried payload) is the same in both modes, and a creative place cannot consume the
+# one item this phase is about.
+ctl command "gamemode creative" >/dev/null
+ctl wait 20 >/dev/null
+place_held "$BX" "$BY" "$BZ" "$STORAGE"
+# The raw saved data, with no mod code in the path: the placement itself wrote the
+# slots back (the menu and /info would also adopt a leftover stash, so they are read
+# afterwards, not instead).
+stone_id=$(data_block "$BX" "$BY" "$BZ" "Items[0].id")
+stone_count=$(data_block "$BX" "$BY" "$BZ" "Items[0].count")
+module_slot=$(data_block "$BX" "$BY" "$BZ" "Items[1].Slot")
+module_slot=${module_slot%b}   # the saved slot is a byte (`100b`)
+module_id=$(data_block "$BX" "$BY" "$BZ" "Items[1].id")
+carried=$(data_block "$BX" "$BY" "$BZ" "carried")
+echo "the placed block's saved data: Items[0] = $stone_count x $stone_id, Items[1] (slot $module_slot) = $module_id, carried = $carried"
+[ "$stone_id" = "minecraft:stone" ] || fail "the placed block's first slot holds '$stone_id'"
+[ "$stone_count" = 64 ] || fail "the placed block's first slot holds $stone_count stone, expected 64"
+[ "$module_slot" = 100 ] || fail "the module came back into slot '$module_slot', expected the card slot (100)"
+[ "$module_id" = "$MODULE" ] || fail "the card slot holds '$module_id', expected $MODULE"
+[ -z "$carried" ] || [ "$carried" = "[]" ] || fail "the carried key was not consumed: $carried"
+line=$(info "$BX" "$BY" "$BZ")
+echo "readout after placing it back: $line"
+echo "$line" | grep -q "^$STORAGE: 64/$CAPACITY minecraft:stone locked$" || fail "the placed storage reads: $line"
+open_menu_any "$BX" "$BY" "$BZ"
+card=$(slot_item "$CARD")
+stored=$(slot_count 300)
+echo "the reopened menu: slot 300 holds $stored, the card slot '$card'"
+[ "$card" = "$MODULE" ] || fail "the card slot holds '$card' after the round trip"
+[ "$stored" = 64 ] || fail "slot 300 holds $stored after the round trip"
+ctl close >/dev/null 2>&1 || true
+
+say "a doctored payload comes back clamped to the slot"
+DX=$((X + 2))
+DZ=$Z1
+ctl command "clear @a" >/dev/null
+# `count: 200` is an int: a byte cannot name 200, and the engine's item reader takes either.
+ctl command 'give @s rftoolsstorage:modular_storage[minecraft:block_entity_data={id:"rftoolsstorage:storage_block_entity",locked:1b,carried:[{Slot:0b,id:"minecraft:stone",count:200},{Slot:100b,id:"rftoolsstorage:storage_module0",count:1}]}]' >/dev/null
+ctl wait 6
+[ "$(count_item "$STORAGE")" = 1 ] \
+    || fail "the doctored storage item was not given: $(ctl messages 6 | jq -c '.chat')"
+ctl setblock "$DX" "$((BY - 1))" "$DZ" minecraft:stone >/dev/null
+stand_at "$DX" "$((DZ + 2))"
+ctl select "$STORAGE" >/dev/null || fail "cannot select the doctored storage"
+ctl wait 6
+place_held "$DX" "$BY" "$DZ" "$STORAGE"
+count=$(data_block "$DX" "$BY" "$DZ" "Items[0].count")
+line=$(info "$DX" "$BY" "$DZ")
+echo "a payload naming 200 stone places $count and reads: $line"
+[ "$count" = 64 ] || fail "a doctored 200-stone payload placed $count stone, expected the slot's 64"
+echo "$line" | grep -q "^$STORAGE: 64/$CAPACITY minecraft:stone locked$" || fail "the doctored storage reads: $line"
+
+say "counterfactual: a level-side break spills the contents and carries nothing"
+# Away from the crafting table the recipe phases leave at (X + 4, Z1): its cell would
+# be inside the player's box and in the way of the placement's ray.
+CX=$X
+CZ=$((Z1 + 4))
+ctl command "clear @a" >/dev/null
+ctl setblock "$CX" "$((BY - 1))" "$CZ" minecraft:stone >/dev/null
+stand_at "$CX" "$((CZ + 2))"
+ctl give "$STORAGE" 1 >/dev/null || fail "cannot give the counterfactual storage"
+ctl wait 6
+ctl select "$STORAGE" >/dev/null || fail "cannot select the counterfactual storage"
+ctl wait 6
+place_held "$CX" "$BY" "$CZ" "$STORAGE"
+ctl command "clear @a" >/dev/null
+ctl give "$MODULE" 1 >/dev/null
+ctl wait 6
+ctl select "$MODULE" >/dev/null || fail "cannot select the counterfactual module"
+ctl wait 6
+stand_at "$CX" "$((CZ + 2))"
+quick_any "$CX" "$BY" "$CZ"
+lock "$CX" "$BY" "$CZ" >/dev/null
+ctl command "clear @a" >/dev/null
+ctl give minecraft:stone 64 >/dev/null
+ctl wait 6
+stand_at "$CX" "$((CZ + 2))"
+open_menu_any "$CX" "$BY" "$CZ"
+carry minecraft:stone >/dev/null
+ctl click-slot 300 >/dev/null
+ctl wait 4 >/dev/null
+ctl close >/dev/null 2>&1 || true
+ctl wait 4 >/dev/null
+line=$(info "$CX" "$BY" "$CZ")
+echo "the counterfactual storage before the level-side break: $line"
+echo "$line" | grep -q "^$STORAGE: 64/$CAPACITY minecraft:stone locked$" || fail "the counterfactual storage does not hold 64 stone: $line"
+# A level-side break (no player) never runs the break-time stash: the engine's own
+# container spill takes the stone and the module, and the block item stays plain.
+ctl command "setblock $CX $BY $CZ minecraft:air destroy" >/dev/null || fail "the level-side break was refused"
+ctl wait 12 >/dev/null
+[ "$(block_name "$CX" "$BY" "$CZ")" = "minecraft:air" ] || fail "the counterfactual storage is still there"
+# Walk onto the pile twice: a drop that lands in the block's own cell is only taken
+# when the player stands there.
+ctl command "execute in minecraft:overworld run tp @s $CX.5 $BY $CZ.5" >/dev/null
+ctl wait 10 >/dev/null
+ctl collect 8 >/dev/null 2>&1 || true
+ctl wait 20 >/dev/null
+ctl collect 8 >/dev/null 2>&1 || true
+ctl wait 20 >/dev/null
+stone_back=$(count_item minecraft:stone)
+modules_back=$(count_item "$MODULE")
+storages_back=$(count_item "$STORAGE")
+echo "the level-side break spilled: stone $stone_back, modules $modules_back, storage items $storages_back"
+[ "$storages_back" -ge 1 ] \
+    || echo "  on the ground: $(ctl entities 8 | jq -c '[.entities[]? | select(.kind == "item") | .item.id]')" >&2
+[ "$stone_back" = 64 ] || fail "the spilled stone came back as $stone_back, expected 64 on the ground"
+[ "$modules_back" = 1 ] || fail "the spilled module came back as $modules_back, expected 1"
+[ "$storages_back" = 1 ] || fail "the level-side break dropped $storages_back storage items, expected 1"
+slot=$(ctl inventory | jq -r --arg i "$STORAGE" '[.hotbar[] | select(.item == $i) | .slot] | .[0] // ""')
+[ -n "$slot" ] || fail "the spilled storage item is not in the hotbar"
+ctl select $((slot + 1)) >/dev/null
+ctl wait 6
+selected_item_line "the spilled storage item"
+case "$SELECTED_LINE" in
+    *"block_entity_data"*) fail "a level-side break carried the contents: $SELECTED_LINE" ;;
+    *) ;;
+esac
+ctl command "gamemode creative" >/dev/null
+ctl wait 20 >/dev/null
+ctl setblock "$CX" "$((BY - 1))" "$CZ" minecraft:stone >/dev/null
+place_held "$CX" "$BY" "$CZ" "$STORAGE"
+line=$(info "$CX" "$BY" "$CZ")
+echo "the placed block after a level-side break: $line"
+echo "$line" | grep -q "^$STORAGE: 0/0 empty no module$" || fail "the level-side break left contents: $line"
+ctl command "clear @a" >/dev/null
+ctl give "$MODULE" 1 >/dev/null
+ctl wait 6
+ctl select "$MODULE" >/dev/null || fail "cannot select the module for the counterfactual"
+ctl wait 6
+stand_at "$CX" "$((CZ + 2))"
+quick_any "$CX" "$BY" "$CZ"
+line=$(info "$CX" "$BY" "$CZ")
+echo "the same block with its module back: $line"
+echo "$line" | grep -q "^$STORAGE: 0/$CAPACITY empty unlocked$" || fail "the placed block has contents after a level-side break: $line"
+
 if [ "$SELFTEST" = 1 ]; then
-    say "SELFTEST: assert a barrel's 27-slot menu on the storage (must fail)"
-    # Back to the storage: the crafting phases left the player at the table.
-    ctl tp "$X.5" "$((Y + 1))" "$((Z1 + 2)).5" >/dev/null || true
-    ctl wait 8 >/dev/null
-    open_menu "$X" "$Y" "$Z1" "$facing"
-    slots=$(menu_slots)
-    card=$(slot_item "$CARD")
-    echo "the storage's menu shows $slots container slots, the card slot '$card'"
-    [ "$slots" = 27 ] || fail "the storage's menu shows $slots slots, not 27: the card-slot assertion is alive"
+    say "SELFTEST: assert the break spilled the contents (must fail)"
+    spilled=$(jq -r '.items_left_on_ground // 0' <<<"$BREAK")
+    stone=$(jq -r '.drops["minecraft:stone"] // 0' <<<"$BREAK")
+    echo "the survival break left $spilled drop(s) on the ground, $stone stone among them"
+    [ "${spilled:-0}" -ge 2 ] || fail "the survival break carried the storage's contents on the block's item ($spilled drop(s) on the ground, $stone stone spilled), so this inverted assertion fails as it must"
 fi
 
 ctl close >/dev/null 2>&1 || true
-echo "PASS: the plain click opens the storage's own menu — 100 storage slots and the card slot, whose module sets the capacity and which refuses anything else and any second module, and takes the module back out (the contents it left come back with it) — with the padlock sealing it, the grid refusing stacks with no module and while unlocked (one kind a slot), stores and gives back stacks by click, reads 6400/6400 when full and refuses more (taking it again after a withdrawal), keeps its contents, lock, grid and module across a relaunch, the carried storage-module recipe crafting in a table (and a stick/a block where its keys are crafting nothing), and a barrel's chest menu and unlocked slot do not behave this way"
+echo "PASS: a survival break carries the storage's 64 stone, lock and module on the block's own item as minecraft:block_entity_data (nothing spills, and the payload never carries Items), placing it back restores 64/6400 with the card slot's module, a doctored 200-stone payload places 64, a level-side break spills them instead and its block item carries nothing, and the plain click opens the storage's own menu — 100 storage slots and the card slot, whose module sets the capacity and which refuses anything else and any second module, and takes the module back out (the contents it left come back with it) — with the padlock sealing it, the grid refusing stacks with no module and while unlocked (one kind a slot), stores and gives back stacks by click, reads 6400/6400 when full and refuses more (taking it again after a withdrawal), keeps its contents, lock, grid and module across a relaunch, the carried storage-module recipe crafting in a table (and a stick/a block where its keys are crafting nothing), and a barrel's chest menu and unlocked slot do not behave this way"

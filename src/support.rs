@@ -8,26 +8,35 @@
 //! game, calls the runtime and writes the result back.
 //!
 //! The storage *is* the block entity's container slots: the pin saves a mod
-//! block entity's `Items` with its chunk, so a relaunch keeps them, and a broken
-//! block spills them as loose drops. `module` and `locked` ride the same saved
-//! compound, so the module and the lock survive a relaunch too.
+//! block entity's `Items` with its chunk, so a relaunch keeps them. `module` and
+//! `locked` ride the same saved compound, so the module and the lock survive a
+//! relaunch too.
+//!
+//! A **player's break** that drops the block moves the container's stacks aside
+//! into the same saved data before the removal (so the engine's own container
+//! spill finds nothing), the block's drop carries them as vanilla's
+//! `minecraft:block_entity_data` (`on_block_drops`), and placing the item writes
+//! them back (`StorageItem`). A break the port cannot carry (creative, a refused
+//! tool, a piston, water, an explosion) keeps the vanilla spill.
 
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use mod_api::item::containers::ModBlockEntityFields;
 use mod_api::{
-    self, BlockEntityEvent, BlockEntityPart, BlockEntityRef, BlockKey, BlockPart, ClientHost,
-    Command, CommandArgumentValue, CommandSource, Compound, Flow, Hand, Host, HostSide,
-    HostTransaction, Identifier, InteractionResult, ItemStack, LevelRef, LevelSide,
-    MenuButtonEvent, MenuContainer, MenuPart, MenuSlotRulesEvent, ModContainer,
-    PlayerContainerOpenEvent, RegisterCommandsEvent, Registrar, RegistrationContext,
-    RightClickBlockEvent, RunModCommandEvent, Screen, ScreenClickEvent, ScreenDrawEvent,
-    ScreenEvent, ServerHost, Tag, Text, Transaction,
+    self, BlockDropsEvent, BlockEntityEvent, BlockEntityPart, BlockEntityRef, BlockKey, BlockPart,
+    ClientHost, Command, CommandArgumentValue, CommandSource, Compound, Flow, Hand, Host, HostSide,
+    HostTransaction, Identifier, InteractionResult, ItemKey, ItemPart, ItemStack, LevelHost,
+    LevelRef, LevelSide, MenuButtonEvent, MenuContainer, MenuPart, MenuSlotRulesEvent,
+    ModContainer, OnBlockPlacedByEvent, OnDestroyedByPlayerEvent, PlayerContainerOpenEvent,
+    RegisterCommandsEvent, Registrar, RegistrationContext, RightClickBlockEvent,
+    RunModCommandEvent, Screen, ScreenClickEvent, ScreenDrawEvent, ScreenEvent, ServerHost, Tag,
+    Text, Transaction,
 };
 
 use crate::runtime::{
-    Kind, LEVEL_ADMINS, LockPress, SLOT_LIMIT, Slot, Storage, card_accepts, lock_press,
-    may_inspect, module_id, module_tier, slot_accepts,
+    Kind, LEVEL_ADMINS, LockPress, SLOT_LIMIT, Slot, Storage, card_accepts, carried_slot_in,
+    lock_press, may_inspect, module_id, module_tier, restored_count, slot_accepts,
 };
 
 /// The block this slice implements, exactly as the content declares it.
@@ -87,10 +96,22 @@ const MODULE_SLOT_AT: [f32; 2] = [GRID_X, 4.0];
 /// The padlock button's rectangle, relative to the panel's top left: beside the
 /// card slot, so the title clears both.
 const LOCK_BUTTON: [f32; 4] = [32.0, 6.0, 46.0, 16.0];
+/// The saved compound key a broken storage's contents wait under until its item
+/// carries them: the container's stacks, in vanilla's `Items` shape, moved aside
+/// before the removal so the engine's own container spill finds nothing to
+/// scatter (`notes.md`, slice 4).
+const KEY_CARRIED: &str = "carried";
+/// The vanilla component that moves a block entity's saved data on its item
+/// (`BlockEntity.applyComponentsFromItemStack`, `TypedEntityData.loadInto`).
+const BLOCK_ENTITY_DATA: &str = "minecraft:block_entity_data";
 
 /// The block key the click compares the loaded block against. A `BlockKey` only
 /// names itself through a host, so it is asked for once, at registration.
 static BLOCK_KEY: OnceLock<BlockKey> = OnceLock::new();
+/// The block's own item, resolved once at registration: `block_drops` runs with a
+/// read-only level host, which cannot name an item, and only this block's own
+/// drop takes the carried contents.
+static ITEM_KEY: OnceLock<ItemKey> = OnceLock::new();
 
 fn block_key() -> BlockKey {
     *BLOCK_KEY
@@ -113,6 +134,11 @@ pub(crate) fn register(registrar: &mut dyn Registrar, _cx: &RegistrationContext)
         .block_entity_part(&kind, StorageBlock)
         .expect("one Part per block-entity type");
     registrar.menu_part(MENU, StorageMenu);
+    // The block's own item: a placed storage takes back the contents a broken one
+    // put on it (`minecraft:block_entity_data`), upstream's contents-in-the-block.
+    let item = registrar.item_key(BLOCK);
+    let _ = ITEM_KEY.set(item);
+    registrar.item_part(item, StorageItem);
     let storage: Vec<usize> = (0..STORAGE_SLOTS).collect();
     // Upstream's `CapType.ITEMS` handler answers every side with the storage slots
     // only (its cards are a separate handler the capability never exposes), and a
@@ -141,7 +167,25 @@ pub(crate) fn register(registrar: &mut dyn Registrar, _cx: &RegistrationContext)
 struct StorageBlock;
 
 #[mod_api::horizon_part]
-impl BlockPart for StorageBlock {}
+impl BlockPart for StorageBlock {
+    /// A player's break that will drop the block (`IBlockExtension.onDestroyedByPlayer`,
+    /// asked before the removal): the contents move aside into the block entity's saved
+    /// data, so the engine's container spill finds an empty container, and
+    /// [`carried_payload`] puts them on the block's own drop.
+    ///
+    /// A break that drops nothing (a creative break, a tool the block refuses) keeps the
+    /// vanilla spill: the contents are not put on an item that will not be there.
+    fn on_destroyed_by_player(
+        &self,
+        host: &mut dyn ServerHost,
+        event: &mut OnDestroyedByPlayerEvent<'_>,
+    ) -> Option<bool> {
+        if event.will_harvest {
+            stash_carried(host, event.pos);
+        }
+        None
+    }
+}
 
 #[mod_api::horizon_part]
 impl BlockEntityPart for StorageBlock {
@@ -184,6 +228,25 @@ impl BlockEntityPart for StorageBlock {
     /// The padlock's press, on the server (`clickMenuButton`).
     fn menu_button(&self, host: &mut dyn ServerHost, event: &mut MenuButtonEvent<'_>) {
         press_lock(host, event);
+    }
+}
+
+/// The block's own item: a storage placed from a stack takes back the contents a
+/// broken one carried on it (`minecraft:block_entity_data`), as upstream's block
+/// finds the contents the module keyed.
+pub(crate) struct StorageItem;
+
+#[mod_api::horizon_part]
+impl ItemPart for StorageItem {
+    /// `BlockItemExtension.onBlockPlacedBy`, after the engine applied the item's
+    /// `minecraft:block_entity_data` to the new block entity: write the carried
+    /// stacks back into its slots, clamped, and clear the key so they travel once.
+    fn on_block_placed_by(&self, host: &mut dyn ServerHost, event: &mut OnBlockPlacedByEvent<'_>) {
+        let block = event.state.block().id(&*host);
+        if block != BLOCK {
+            return;
+        }
+        restore_carried(host, event.pos);
     }
 }
 
@@ -318,8 +381,10 @@ pub(crate) fn on_player_container_open(
         return;
     };
     // A block saved by 0.2.2 gets its module back as the slot's item before the
-    // player sees the menu, so it can be taken out or swapped.
+    // player sees the menu, so it can be taken out or swapped; a stash a refused
+    // removal left in the saved data comes back too.
     adopt_legacy_module(host, entity);
+    adopt_carried(host, pos);
     let data = entity.data(&*host);
     let module = module_at(&*host, entity);
     let locked = read_storage(&*host, data.as_ref(), &[], module.as_ref()).locked;
@@ -380,6 +445,257 @@ fn lock_at(host: &dyn Host, pos: [i32; 3]) -> Option<bool> {
     let data = entity.data(host);
     let module = module_at(host, entity).is_some();
     Some(module && matches!(field(data.as_ref(), KEY_LOCKED), Some(Tag::Byte(1))))
+}
+
+// --- the contents on the broken block's own item --------------------------
+
+/// `block_drops`: a broken storage's own item carries its contents, so placing the
+/// item puts them back (upstream's `ModularStorageTileEntity` keeps them for the
+/// module; this port keeps them for the block).
+///
+/// The drop's stacks are already built and the block entity is out of the world. The
+/// event's own saved data is not the break's: the engine snapshots it *before* the
+/// removal, so it holds the container as it stood, with `Items`. What travels is the
+/// stash [`stash_carried`] left for this break — its dimension and position, taken in
+/// the same tick. An explosion's blocks are gone before the event, and a level-side
+/// break (a piston, water, `/setblock destroy`) never runs the player's stash, so
+/// those spill as vanilla does.
+pub(crate) fn on_block_drops(level: &dyn LevelHost, event: &mut BlockDropsEvent<'_>) -> Flow {
+    if level.state_block(event.state) != Some(BLOCK) {
+        return Flow::Continue;
+    }
+    // The saved data the event holds is the one read *before* the break's removal
+    // (the engine snapshots it for `block_drops`), so the contents this break moved
+    // aside are not in it: the stash `stash_carried` left beside it is.
+    let pos = [event.pos.x, event.pos.y, event.pos.z];
+    let Some(saved) = take_carried(event.dimension.key().id(), pos) else {
+        return Flow::Continue;
+    };
+    let Some(patch) = carried_payload(&saved, BE_TYPE) else {
+        return Flow::Continue;
+    };
+    let Some(item) = ITEM_KEY.get().copied() else {
+        return Flow::Continue;
+    };
+    for drop in event.drops.iter_mut() {
+        if drop.stack.item() == item {
+            let _ = drop.stack.apply_components(&patch);
+        }
+    }
+    Flow::Continue
+}
+
+/// The `minecraft:block_entity_data` patch a broken storage's item carries: the
+/// block entity's saved data, tagged with its type id (vanilla loads a payload only
+/// when the `id` names the block entity it is placed as), with the contents under
+/// [`KEY_CARRIED`] and **never** `Items`.
+///
+/// `Items` must not travel: a mod container's stacks are the engine's own to spill
+/// (`PreRemove::Contents`), so a payload that also carried them would put every
+/// stack in the world twice. `None` when the break moved nothing aside — a plain
+/// block item, which is what a creative break or a level-side break leaves.
+#[must_use]
+pub(crate) fn carried_payload(saved: &Compound, type_id: &str) -> Option<Compound> {
+    let Some(Tag::List(entries)) = field(Some(saved), KEY_CARRIED) else {
+        return None;
+    };
+    if entries.is_empty() {
+        return None;
+    }
+    let mut payload = saved.clone();
+    for key in ["Items", "id", "x", "y", "z"] {
+        payload.remove(&key.into());
+    }
+    payload.insert("id".into(), Tag::String(type_id.into()));
+    let mut patch = Compound::new();
+    patch.insert(BLOCK_ENTITY_DATA.into(), Tag::Compound(payload));
+    Some(patch)
+}
+
+/// A break's contents, waiting for the block's own drop: the block entity's saved
+/// data as the break read it (with the contents under [`KEY_CARRIED`]), the level and
+/// the position it came from, and when. `block_drops` takes it in the same tick; the
+/// next push or lookup drops anything older than [`STASH_LIFETIME`], so a break whose
+/// drop never runs cannot be attached to a later break at the same position.
+struct Stash {
+    dimension: &'static str,
+    pos: [i32; 3],
+    data: Compound,
+    at: Instant,
+}
+
+/// How long an unconsumed break stash is kept.
+const STASH_LIFETIME: Duration = Duration::from_secs(2);
+
+/// The stashes of the breaks whose drops have not been built yet. Transient by
+/// design: a break is answered in the same tick, and nothing survives a relaunch.
+static STASHES: Mutex<Vec<Stash>> = Mutex::new(Vec::new());
+
+/// The stash list, with a poisoned lock treated as a list (a panic in another mod
+/// must not take this port's breaks with it).
+fn stashes() -> std::sync::MutexGuard<'static, Vec<Stash>> {
+    STASHES.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Keeps `data` for the drop of the break that just happened at `pos`.
+fn remember(dimension: &'static str, pos: [i32; 3], data: Compound) {
+    let mut guard = stashes();
+    guard.retain(|stash| stash.at.elapsed() < STASH_LIFETIME);
+    guard.push(Stash {
+        dimension,
+        pos,
+        data,
+        at: Instant::now(),
+    });
+}
+
+/// The stash of the break at `pos` in `dimension`, consumed.
+fn take_carried(dimension: &str, pos: [i32; 3]) -> Option<Compound> {
+    let mut guard = stashes();
+    guard.retain(|stash| stash.at.elapsed() < STASH_LIFETIME);
+    let index = guard
+        .iter()
+        .position(|stash| stash.dimension == dimension && stash.pos == pos)?;
+    Some(guard.remove(index).data)
+}
+
+/// Moves a break's contents aside and empties the container — so the engine's own
+/// spill of a mod container finds nothing to scatter — and remembers the saved data
+/// for [`on_block_drops`], which puts it on the block's own drop.
+///
+/// The stacks are written in vanilla's `Items` shape (`ItemStack::to_nbt` plus
+/// `Slot`), which is what the engine's own list is. One transaction: a refused write
+/// leaves the container as it was. The same compound also stays in the block
+/// entity's saved data, so a removal the level refuses (the block stays) loses
+/// nothing: [`adopt_carried`] puts the contents back on the next click or read.
+fn stash_carried(host: &mut dyn ServerHost, pos: [i32; 3]) {
+    let dimension = host.dimension();
+    let Some(level) = host.level(dimension) else {
+        return;
+    };
+    let Some(entity) = host.block_entity(level, pos) else {
+        return;
+    };
+    let Some(saved) = entity.data(&*host) else {
+        return;
+    };
+    let mut entries = Vec::new();
+    let mut filled = Vec::new();
+    for slot in 0..CONTAINER_SLOTS {
+        let index = u32::try_from(slot).unwrap_or(u32::MAX);
+        let Some(stack) = entity.item_slot(&*host, index).ok().flatten() else {
+            continue;
+        };
+        let Some(mut entry) = stack.to_nbt(&*host) else {
+            continue;
+        };
+        let Ok(slot) = i8::try_from(slot) else {
+            continue;
+        };
+        entry.insert("Slot".into(), Tag::Byte(slot));
+        entries.push(Tag::Compound(entry));
+        filled.push(index);
+    }
+    if entries.is_empty() {
+        return;
+    }
+    let mut carried = saved;
+    carried.insert(KEY_CARRIED.into(), Tag::List(entries));
+    let mut stash = Compound::new();
+    if let Some(list) = field(Some(&carried), KEY_CARRIED) {
+        stash.insert(KEY_CARRIED.into(), list.clone());
+    }
+    let written = host
+        .transaction(|host, tx| -> Result<(), ()> {
+            entity.merge_data(host, stash.clone()).map_err(|_| ())?;
+            for slot in filled {
+                entity.set_item_slot(host, tx, slot, None).map_err(|_| ())?;
+            }
+            let _ = entity.set_changed(host);
+            Ok(())
+        })
+        .is_ok();
+    if written {
+        remember(dimension, pos, carried);
+    }
+}
+
+/// Puts a carried payload's stacks back into the block's slots (the card slot
+/// included) and clears the carried key, so the contents travel once.
+///
+/// `runtime::restored_count`/`carried_slot_in` clamp it: an item doctored through
+/// `/give` may name any count in any slot, and the block keeps at most what its
+/// container holds. Also runs from the click paths ([`adopt_carried`]) for a stash a
+/// break left behind (a removal the level refused), so a stale stash is never lost.
+fn restore_carried(host: &mut dyn ServerHost, pos: [i32; 3]) {
+    let Some(level) = host.level(host.dimension()) else {
+        return;
+    };
+    let Some(entity) = host.block_entity(level, pos) else {
+        return;
+    };
+    let Some(data) = entity.data(&*host) else {
+        return;
+    };
+    let Some(Tag::List(entries)) = field(Some(&data), KEY_CARRIED) else {
+        return;
+    };
+    if entries.is_empty() {
+        return;
+    }
+    let mut placed = Vec::new();
+    for entry in entries {
+        let Tag::Compound(entry) = entry else {
+            continue;
+        };
+        let Some(slot) =
+            number(field(Some(entry), "Slot")).and_then(|slot| u32::try_from(slot).ok())
+        else {
+            continue;
+        };
+        if !carried_slot_in(STORAGE_SLOTS, MODULE_SLOT, slot) {
+            continue;
+        }
+        let Some(mut stack) = ItemStack::from_nbt(&*host, entry) else {
+            continue;
+        };
+        let count = restored_count(stack.count(), max_stack_of(&*host, &stack));
+        if count == 0 || stack.set_count(count).is_err() {
+            continue;
+        }
+        placed.push((slot, stack));
+    }
+    let mut consumed = Compound::new();
+    consumed.insert(KEY_CARRIED.into(), Tag::List(Vec::new()));
+    let _ = host.transaction(|host, tx| -> Result<(), ()> {
+        for (slot, stack) in placed {
+            entity
+                .set_item_slot(host, tx, slot, Some(stack))
+                .map_err(|_| ())?;
+        }
+        entity.merge_data(host, consumed.clone()).map_err(|_| ())?;
+        let _ = entity.set_changed(host);
+        Ok(())
+    });
+}
+
+/// [`restore_carried`] for the paths that read the block without placing it: a
+/// stash a refused removal left behind comes back the next time the block is
+/// opened, clicked or read, so nothing is stranded in its saved data.
+fn adopt_carried(host: &mut dyn ServerHost, pos: [i32; 3]) {
+    restore_carried(host, pos);
+}
+
+/// A numeric NBT tag as an integer: `Slot` and `count` are written as a byte or an
+/// int depending on the writer (`save::encode_items` writes a byte slot).
+fn number(tag: Option<&Tag>) -> Option<i64> {
+    match tag? {
+        Tag::Byte(n) => Some(i64::from(*n)),
+        Tag::Short(n) => Some(i64::from(*n)),
+        Tag::Int(n) => Some(i64::from(*n)),
+        Tag::Long(n) => Some(*n),
+        _ => None,
+    }
 }
 
 // --- reading and writing the block entity ---------------------------------
@@ -650,8 +966,10 @@ fn mutate_checked<R>(
     }
     let entity = entity_at(host, pos)?;
     // One representation: a 0.2.2 block's recorded module becomes the card slot's
-    // item before the change reads it.
+    // item before the change reads it, and a stash a refused removal left behind
+    // goes back into the slots it came from.
     adopt_legacy_module(host, entity);
+    adopt_carried(host, pos);
     let before = read_slots(host, entity);
     let data = entity.data(host);
     let module = module_at(&*host, entity);
@@ -1093,10 +1411,12 @@ pub(crate) fn on_run_mod_command(
         }
         "info" => {
             // A 0.2.2 block's module moves into the card slot on the first read,
-            // so the readout and the menu agree from then on.
+            // so the readout and the menu agree from then on; a carried stash a
+            // refused removal left behind comes back the same way.
             if let Some(entity) = entity_at(&*host, pos) {
                 adopt_legacy_module(host, entity);
             }
+            adopt_carried(host, pos);
             match read_at(&*host, pos) {
                 Some(read) => {
                     let max_stack = read_max_stack(&*host, &read);
@@ -1123,6 +1443,75 @@ fn feedback(host: &mut dyn ServerHost, line: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One carried slot in the shape `stash_carried` writes: vanilla's item escape
+    /// plus the slot, which is what `save::encode_items` writes for `Items`.
+    fn carried_entry(slot: i8, item: &str, count: i8) -> Tag {
+        Tag::compound([
+            ("Slot", Tag::Byte(slot)),
+            ("id", Tag::String(item.into())),
+            ("count", Tag::Byte(count)),
+        ])
+    }
+
+    #[test]
+    fn the_payload_carries_the_contents_and_never_items() {
+        // The break moved 64 stone (slot 0) and the module (slot 100) aside; a
+        // stray `Items` list is stripped: the engine spills a container's own
+        // stacks, so a payload that carried them too would put them in the world
+        // twice.
+        let saved = Compound::from_iter([
+            ("locked".into(), Tag::Byte(1)),
+            (
+                KEY_CARRIED.into(),
+                Tag::List(vec![
+                    carried_entry(0, "minecraft:stone", 64),
+                    carried_entry(100, "rftoolsstorage:storage_module0", 1),
+                ]),
+            ),
+            (
+                "Items".into(),
+                Tag::List(vec![carried_entry(0, "minecraft:stone", 64)]),
+            ),
+            (
+                "id".into(),
+                Tag::String("rftoolsstorage:storage_block_entity".into()),
+            ),
+        ]);
+        let patch = carried_payload(&saved, BE_TYPE).expect("a carried break travels");
+        let Some(Tag::Compound(payload)) = field(Some(&patch), BLOCK_ENTITY_DATA) else {
+            panic!("the patch holds no {BLOCK_ENTITY_DATA}");
+        };
+        assert!(
+            field(Some(payload), "Items").is_none(),
+            "the payload carries the container's stacks, which the engine spills itself"
+        );
+        assert!(
+            matches!(
+                field(Some(payload), "id"),
+                Some(Tag::String(id)) if id.to_string_lossy() == BE_TYPE
+            ),
+            "the payload is not tagged with the block entity type"
+        );
+        assert!(
+            matches!(field(Some(payload), "locked"), Some(Tag::Byte(1))),
+            "the lock did not travel with the contents"
+        );
+        let Some(Tag::List(entries)) = field(Some(payload), KEY_CARRIED) else {
+            panic!("the payload lost the carried contents");
+        };
+        assert_eq!(entries.len(), 2, "the contents and the card slot's module");
+    }
+
+    #[test]
+    fn a_break_that_moved_nothing_aside_carries_nothing() {
+        // A creative break, a refused tool, a piston, water, an explosion: no stash,
+        // so the item is plain and the contents take the vanilla spill.
+        let plain = Compound::from_iter([("locked".into(), Tag::Byte(0))]);
+        assert!(carried_payload(&plain, BE_TYPE).is_none());
+        let emptied = Compound::from_iter([(KEY_CARRIED.into(), Tag::List(Vec::new()))]);
+        assert!(carried_payload(&emptied, BE_TYPE).is_none());
+    }
 
     #[test]
     fn the_readout_says_what_the_player_must_do_first() {

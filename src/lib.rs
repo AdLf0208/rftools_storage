@@ -9,16 +9,22 @@
 //! an unlocked block or takes a stack out of a locked one. `/rftoolsstorage
 //! info|lock` remain the readout and the operator's lock.
 //!
+//! A broken storage's **contents travel on its own item** (slice 4): the break
+//! moves them aside into the block entity's saved data before the removal, the
+//! block's drop carries them as vanilla's `minecraft:block_entity_data`, and
+//! placing the item puts them back — the lock and the card slot's module with them.
+//!
 //! [`runtime`] is the pure engine (the module's slot count, one kind a slot, the
-//! lock, the menu's slot and padlock rules, the readout text) and [`support`] is
-//! the game glue. See `notes.md` for the slice boundary, the deliberate
-//! deviations and the gaps.
+//! lock, the menu's slot and padlock rules, the carried payload's clamp, the
+//! readout text) and [`support`] is the game glue. See `notes.md` for the slice
+//! boundary, the deliberate deviations and the gaps.
 pub mod runtime;
 mod support;
 
 use mod_api::{
-    self, Flow, Hooks, HostSide, PlayerContainerOpenEvent, RegisterCommandsEvent, Registrar,
-    RegistrationContext, RightClickBlockEvent, RunModCommandEvent, ServerHost,
+    self, BlockDropsEvent, Flow, Hooks, HostSide, LevelHost, PlayerContainerOpenEvent,
+    RegisterCommandsEvent, Registrar, RegistrationContext, RightClickBlockEvent,
+    RunModCommandEvent, ServerHost,
 };
 
 /// The mod holds no state of its own: the storage is the block entity's saved
@@ -37,6 +43,13 @@ impl Hooks for Mod {
     /// A plain click opens the menu; a sneaking one is the quick gesture.
     fn right_click_block(&self, host: HostSide<'_>, event: &mut RightClickBlockEvent<'_>) -> Flow {
         support::on_right_click_block(host, event)
+    }
+
+    /// A broken storage's own item carries its contents (`BlockDropsEvent`): the
+    /// break moved them aside before the removal, so the engine's container spill
+    /// found an empty container and they are not on the ground twice.
+    fn block_drops(&self, level: &dyn LevelHost, event: &mut BlockDropsEvent<'_>) -> Flow {
+        support::on_block_drops(level, event)
     }
 
     /// `/rftoolsstorage info` and `/rftoolsstorage lock`.

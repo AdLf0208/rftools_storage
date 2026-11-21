@@ -118,6 +118,63 @@ PASS: … EXIT:0
 asserted through `ctl screen`/`ctl ui`, not by pixels), and the 0.2.2 module migration in a real
 world (it needs a 0.2.2-saved block; its rule is unit-tested, see `notes.md` § Slice 3 coverage).
 
+## 0d. The contents travel on the item — version 0.2.4 (2026-11-21)
+
+Slice 4: a player's break that drops the block moves the container's stacks aside before the
+removal and the block's own item carries them as vanilla `minecraft:block_entity_data`; placing it
+back restores the contents, the lock and the card slot's module, clamped. Ladder and package logs:
+`ports/_shared/evidence/rftoolsstorage/`; game legs: `ports/_shared/evidence/rftoolsstorage-e2e/`.
+The 0.2.3 logs are in `retired-0.2.3/` (both evidence directories).
+
+| Step | Command | Result | Log |
+|---|---|---|---|
+| red proof | `cargo test` with `carried_slot_in`/`restored_count` stubbed | **FAILED. 21 passed; 1 failed**, `TEST_EXIT:101` | `slice4-red.log` |
+| tests | `cargo test` | `running 24 tests` → **24 passed**, 0 failed, `TEST_EXIT:0` | `sdk-test.log` |
+| lints | `cargo clippy --all-targets -- -D warnings` | **CLIPPY_EXIT:0**, 0 warnings | `sdk-clippy.log` |
+| format | `rustfmt --edition 2024 --check src/{lib,support,runtime}.rs` | `FMT_EXIT:0` | `sdk-test.log` |
+| SDK gate | `cargo horizon-mod check` | **CHECK_EXIT:0** — *"RFTools Storage uses 458 items of the API (5 Part kinds, 1 capability, 123 fields or variants, 16 hooks, 47 hook arguments, 2 macros, 135 methods, 26 traits, 103 types). Made for 0a875da."* | `sdk-check.log` |
+| package | `rm -f Cargo.lock && cargo horizon-mod build`, twice | **64,513 B**, SHA-256 `a2d6add422d7442671aa9ae79d9d66a678e88141b7ed20305a8cc794f7d90d60`, **`cmp`-identical**, 58 entries, no `Cargo.lock` | `sdk-build.log`, `sdk-sha256.txt` |
+| package check | `cargo horizon-mod check rftoolsstorage.hmod` | `rftoolsstorage 0.2.4 (native-mod, format native-1/0a875da…/e59da90…, for 26.3)`, **64,461 bytes**, **FILE_CHECK_EXIT:0** | `sdk-check.log` |
+| fits, the pin | `cargo horizon-mod fits rftoolsstorage.hmod --build 0a875da91dbb…` (the pin, by its full commit: the short name needs GitHub's release list, rate-limited at the re-run) | `0a875da  made for`, **FITS_PIN_EXIT:0**, sha `a2d6add4…d90d60` | `sdk-fits.log` |
+| fits, another build | `cargo horizon-mod fits rftoolsstorage.hmod --build 0b14f8acfd…` | `0b14f8a  fits`, **FITS_OTHER_EXIT:0**, sha `a2d6add4…d90d60` | `sdk-fits.log` |
+| in game | `build-slot.sh run --step e2e -- bash tools/e2e.sh` | **PASS** + `EXIT:0` | `e2e-carried.log` |
+| control | the same rig on the Nightly **without** the package | **FAIL** + `EXIT:1` (*"without the package there is no rftoolsstorage:modular_storage…"*) | `e2e-carried-control.log` |
+| counterfactual | a vanilla barrel in the same rig | **PASS** + `EXIT:0` — 27 slots, its first slot takes the stack | `e2e-carried-counterfactual.log` |
+| selftest | `SELFTEST=1` (asserts the break *spilled* the contents) | **FAIL** + `EXIT:1` — *"the survival break carried the storage's contents on the block's item (1 drop(s) on the ground, 0 stone spilled), so this inverted assertion fails as it must"* | `e2e-carried-selftest.log` |
+| e2e gate | `check-e2e-logs.py rftoolsstorage-e2e --strict` | `logs=4  ok=4`, exit 0 | — |
+| package gate | `verify-sdk-package.py rftoolsstorage` | `1/1 package(s) verified`, exit 0 | — |
+| skills gate | `check-skills.py --notes ports/rftoolsstorage --strict` | `Skills line present`, PASS | — |
+
+The default leg's new transcript (abridged; the log has every `ctl` reply):
+
+```
+== a survival break carries the storage's contents on its own item ==
+readout before the break: rftoolsstorage:modular_storage: 64/6400 minecraft:stone locked
+  break: {"drops":{"rftoolsstorage:modular_storage":1},"picked_up":{},"items_left_on_ground":1}
+the break's drops: {"rftoolsstorage:modular_storage":1}; on the ground: 1
+== the dropped storage's item carries the contents, and never Items ==
+  the dropped rftoolsstorage:modular_storage: Player… has the following entity data: {components:
+  {"minecraft:block_entity_data": {carried: [{count: 64, Slot: 0b, id: "minecraft:stone"},
+  {count: 1, Slot: 100b, id: "rftoolsstorage:storage_module0"}], module: -1,
+  id: "rftoolsstorage:storage_block_entity", locked: 1b}}, count: 1, id: "rftoolsstorage:modular_storage"}
+== placing it back restores the 64 stone, the lock and the card slot's module ==
+the placed block's saved data: Items[0] = 64 x minecraft:stone, Items[1] (slot 100) = rftoolsstorage:storage_module0, carried = []
+readout after placing it back: rftoolsstorage:modular_storage: 64/6400 minecraft:stone locked
+the reopened menu: slot 300 holds 64, the card slot 'rftoolsstorage:storage_module0'
+== a doctored payload comes back clamped to the slot ==
+a payload naming 200 stone places 64 and reads: rftoolsstorage:modular_storage: 64/6400 minecraft:stone locked
+== counterfactual: a level-side break spills the contents and carries nothing ==
+the level-side break spilled: stone 64, modules 1, storage items 1
+  the spilled storage item: Player… has the following entity data: {count: 1, id: "rftoolsstorage:modular_storage"}
+the placed block after a level-side break: rftoolsstorage:modular_storage: 0/0 empty no module
+the same block with its module back: rftoolsstorage:modular_storage: 0/6400 empty unlocked
+PASS: … EXIT:0
+```
+
+**Not run:** a real 0.2.3-saved block that a refused removal leaves with a stash (`adopt_carried`):
+the recovery path shares the 0.2.2 migration's code and its rule is unit-tested; forcing a refused
+`Level.removeBlock` needs a harness the campaign does not have.
+
 ## 0b. The menu — version 0.2.2 (2026-11-21)
 
 Slice 2: the block's own menu (a 100-slot grid opened by a right click), the screen

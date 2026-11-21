@@ -375,6 +375,23 @@ pub fn lock_press(storage: &mut Storage) -> LockPress {
     }
 }
 
+/// Whether a carried entry names a slot the block has: one of its `storage`
+/// slots, or the card slot at `card`. Anything else (a slot past the container,
+/// a doctored one) is dropped when the contents come back.
+#[must_use]
+pub fn carried_slot_in(storage: usize, card: usize, slot: u32) -> bool {
+    let slot = usize::try_from(slot).unwrap_or(usize::MAX);
+    slot < storage || slot == card
+}
+
+/// How many of a carried slot's items a placed block keeps: at most the item's
+/// own stack size, never past [`SLOT_LIMIT`]. A `/give`n item may name any count
+/// in any slot, and a block must never hold more than its container can.
+#[must_use]
+pub fn restored_count(count: u32, max_stack: u32) -> u32 {
+    count.min(max_stack.clamp(1, SLOT_LIMIT))
+}
+
 /// How far a player without operator permission may be from a storage to read
 /// or lock it.
 pub const INSPECT_RANGE: f64 = 8.0;
@@ -635,6 +652,40 @@ mod tests {
         assert!(may_inspect(false, true, 5.0), "a player in reach");
         assert!(!may_inspect(false, true, 8.5), "out of reach");
         assert!(!may_inspect(false, false, 1.0), "another level");
+    }
+
+    #[test]
+    fn a_carried_slot_comes_back_clamped_and_only_where_the_block_has_one() {
+        // A break moves the container's stacks aside and the item carries them;
+        // placing it back writes them into the block's own slots, the card slot
+        // included, clamped the way the engine clamps any write (slice 4).
+        assert!(carried_slot_in(100, 100, 0));
+        assert!(carried_slot_in(100, 100, 99));
+        assert!(
+            carried_slot_in(100, 100, 100),
+            "the card slot's module travels with the contents"
+        );
+        assert!(
+            !carried_slot_in(100, 100, 101),
+            "nothing past the container comes back"
+        );
+        assert_eq!(restored_count(64, 64), 64);
+        assert_eq!(
+            restored_count(200, 64),
+            64,
+            "a doctored count cannot overflow a slot"
+        );
+        assert_eq!(
+            restored_count(64, 16),
+            16,
+            "a slot holds at most the item's own stack size"
+        );
+        assert_eq!(restored_count(200, 1), 1, "a module stays one");
+        assert_eq!(
+            restored_count(1, 0),
+            1,
+            "a nonsense stack size still keeps one"
+        );
     }
 
     #[test]
