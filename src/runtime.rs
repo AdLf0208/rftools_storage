@@ -603,6 +603,93 @@ pub fn injectable_at(centre: [i32; 3], at: [i32; 3], scanner_there: bool) -> boo
     at != centre && !scanner_there
 }
 
+// --- the scanner's request path (slice 7) ---------------------------------
+
+/// The price of a request (`StorageScannerTileEntity.requestStack`): an explicit
+/// count is a tenth of `rfPerRequest` ("Less RF usage for requesting less
+/// items"), while a request with no count (upstream's `amount == -1`, a whole
+/// stack) is the full price.
+pub fn request_price(explicit: bool) -> u32 {
+    if explicit {
+        SCANNER_RF_PER_REQUEST / 10
+    } else {
+        SCANNER_RF_PER_REQUEST
+    }
+}
+
+/// How many items a request wants: the item's own stack size when the command
+/// gives no count (`amount == -1` becomes `getMaxStackSize()`), an explicit count
+/// capped at that size (a request is at most one stack — the GUI offers only 1
+/// and a whole stack), or none for a count of 0 (upstream pulls nothing and
+/// charges nothing).
+pub fn request_amount(explicit: Option<u32>, max_stack: u32) -> Option<u32> {
+    let max = max_stack.clamp(1, SLOT_LIMIT);
+    match explicit {
+        Some(0) => None,
+        Some(count) => Some(count.min(max)),
+        None => Some(max),
+    }
+}
+
+/// The out slot's answer to a request, before anything is pulled: upstream's
+/// guard — an empty slot has a whole stack of room, a slot of the same kind has
+/// its free room, and a slot of another kind or a full one refuses the request.
+/// `None` is the refusal. `out` is `(same item and components, its count)`.
+pub fn out_slot_room(out: Option<(bool, u32)>, max_stack: u32) -> Option<u32> {
+    let max = max_stack.clamp(1, SLOT_LIMIT);
+    match out {
+        None => Some(max),
+        Some((false, _)) => None,
+        Some((true, count)) => (count < max).then(|| max - count),
+    }
+}
+
+/// What a request did with the buffer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RequestCharge {
+    /// The buffer is below the price: nothing is pulled and nothing is spent.
+    NoPower,
+    /// Nothing was pulled: a request charges only when something came out.
+    Nothing,
+    /// The buffer after a paid request.
+    Paid(u32),
+}
+
+/// The request's charge rule: the buffer must cover the price before the walk
+/// (`if (getStoredPower() < rf) return;`), and a walk that pulled nothing
+/// charges nothing (`if (todo[0] == finalAmount) return;` before `consumeEnergy`).
+pub fn request_charge(stored: u32, price: u32, pulled: u32) -> RequestCharge {
+    if stored < price {
+        return RequestCharge::NoPower;
+    }
+    if pulled == 0 {
+        return RequestCharge::Nothing;
+    }
+    RequestCharge::Paid(stored - price)
+}
+
+/// `pulled <n> <item> (<after>/<max> FE)`.
+pub fn request_line(pulled: u32, item: &str, after: u32) -> String {
+    format!("pulled {pulled} {item} ({after}/{SCANNER_MAX_ENERGY} FE)")
+}
+
+/// The refusal when the buffer cannot pay the request's price, with the price.
+pub fn request_no_power_line(stored: u32, price: u32, amount: u32, item: &str) -> String {
+    format!(
+        "not enough power for {amount} {item}: costs {price}, have {stored}/{SCANNER_MAX_ENERGY} FE"
+    )
+}
+
+/// The refusal when the scanned inventories hold none of the requested kind.
+pub fn request_nothing_line(stored: u32, item: &str) -> String {
+    format!("nothing to pull for {item} ({stored}/{SCANNER_MAX_ENERGY} FE)")
+}
+
+/// The refusal when the out slot holds another kind (or is full).
+pub fn request_out_slot_line(stored: u32, held: &str) -> String {
+    format!("the out slot holds {held}; request refused ({stored}/{SCANNER_MAX_ENERGY} FE)")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1151,6 +1238,101 @@ mod tests {
         assert!(
             injectable_at(centre, [11, 64, -3], false),
             "the same cell is a target once no scanner stands there"
+        );
+    }
+
+    #[test]
+    fn a_request_with_a_count_costs_a_tenth_and_the_default_asks_a_whole_stack() {
+        // `requestStack`: `rf = rfPerRequest; if (amount >= 0) rf /= 10; if (amount
+        // == -1) amount = requested.getMaxStackSize();`
+        assert_eq!(request_price(true), 10, "an explicit count is cheaper");
+        assert_eq!(
+            request_price(false),
+            100,
+            "a whole-stack request is the full price"
+        );
+        assert_eq!(
+            request_amount(None, 64),
+            Some(64),
+            "no count asks a whole stack"
+        );
+        assert_eq!(request_amount(Some(32), 64), Some(32));
+        assert_eq!(
+            request_amount(Some(0), 64),
+            None,
+            "a count of 0 pulls nothing"
+        );
+        assert_eq!(
+            request_amount(Some(99), 64),
+            Some(64),
+            "a request is at most one stack"
+        );
+        assert_eq!(
+            request_amount(None, 16),
+            Some(16),
+            "an item's own stack size caps it"
+        );
+    }
+
+    #[test]
+    fn a_request_refuses_an_out_slot_of_another_kind_or_a_full_one() {
+        // Upstream's out-slot guard runs before the walk: `!isSameItemSameComponents`
+        // and `getCount() >= getMaxStackSize()` both `return`.
+        assert_eq!(
+            out_slot_room(None, 64),
+            Some(64),
+            "an empty out slot has a stack of room"
+        );
+        assert_eq!(
+            out_slot_room(Some((true, 32)), 64),
+            Some(32),
+            "the same kind leaves its free room"
+        );
+        assert_eq!(
+            out_slot_room(Some((true, 64)), 64),
+            None,
+            "a full out slot refuses"
+        );
+        assert_eq!(
+            out_slot_room(Some((false, 1)), 64),
+            None,
+            "another kind refuses the request"
+        );
+    }
+
+    #[test]
+    fn a_request_charges_only_what_it_pulled_and_only_with_the_power_to_pay() {
+        assert_eq!(request_charge(5_000, 10, 32), RequestCharge::Paid(4_990));
+        assert_eq!(
+            request_charge(9, 10, 32),
+            RequestCharge::NoPower,
+            "one short of the price is no request"
+        );
+        assert_eq!(
+            request_charge(5_000, 10, 0),
+            RequestCharge::Nothing,
+            "nothing pulled, nothing charged"
+        );
+        assert_eq!(
+            request_charge(10, 10, 1),
+            RequestCharge::Paid(0),
+            "the last ten buy a request"
+        );
+        assert_eq!(
+            request_line(32, "minecraft:stone", 4_990),
+            "pulled 32 minecraft:stone (4990/50000 FE)"
+        );
+        assert_eq!(
+            request_no_power_line(9, 10, 32, "minecraft:stone"),
+            "not enough power for 32 minecraft:stone: costs 10, have 9/50000 FE"
+        );
+        assert_eq!(
+            request_nothing_line(5_000, "minecraft:dirt"),
+            "nothing to pull for minecraft:dirt (5000/50000 FE)"
+        );
+        assert_eq!(
+            request_out_slot_line(5_000, "minecraft:dirt"),
+            "the out slot holds minecraft:dirt; request refused (5000/50000 FE)"
         );
     }
 }

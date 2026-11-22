@@ -36,11 +36,23 @@
 #      routed; a stack no inventory accepts is still charged one attempt (20 FE
 #      pays one, 19 pays none) and stays in the slot; the walk passes a full barrel
 #      for the chest behind it; the out slot is never written.
+#  14. **the request path (slice 7)**: with a chest two blocks away holding 128
+#      stone, radius 2 and the buffer at 5,000, `/rftoolsstorage request <pos>
+#      minecraft:stone 32` pulls 32 stone into the player's inventory (the
+#      reference's straight-to-inventory default), leaves the chest at 96 and the
+#      buffer at 4,990 (an explicit count costs a tenth of `rfPerRequest`); a
+#      request for `minecraft:dirt` (nothing in the box holds it) refuses with
+#      `nothing to pull` and charges nothing; at buffer 9 the same request refuses
+#      with the price line (`costs 10`); the same request through `ctl command`
+#      also goes straight to the player (the reference's default), leaving the out
+#      slot empty; and a counterfactual seeds the out slot with another kind, so
+#      the same request is refused and the chest is untouched.
 #
 # SELFTEST=1 keeps the scenario and asserts that the tick did NOT push the stone
 # into the chest, so the run MUST fail with a `FAIL:` verdict (the assertion the
-# slice rests on is proved able to fail). COUNTERFACTUAL=1 puts a vanilla barrel
-# where the scanner would be and proves the same commands answer
+# slice rests on is proved able to fail). REQUEST_SELFTEST=1 does the same for the
+# request path (the chest must NOT have dropped to 96). COUNTERFACTUAL=1 puts a
+# vanilla barrel where the scanner would be and proves the same commands answer
 # `not a storage scanner` on it. CONTROL_GAME runs the same rig on the Nightly
 # without the package and fails there (`EXIT:1`): the block and its item do not
 # exist.
@@ -65,6 +77,7 @@ RES=${RES:-${HORIZON_RES:-/home/adlf/Desktop/horizon/.local/horizon-client/26.3}
 SOCK=${SOCK:-/tmp/opencode/rftoolsstorage-e2e.sock}
 COUNTERFACTUAL=${COUNTERFACTUAL:-0}
 SELFTEST=${SELFTEST:-0}
+REQUEST_SELFTEST=${REQUEST_SELFTEST:-0}
 
 SCANNER=rftoolsstorage:storage_scanner
 STORAGE=rftoolsstorage:modular_storage
@@ -138,6 +151,16 @@ radius_cmd() { # x y z n
     local line
     line=$(reply radius "$1" "$2" "$3" "$4")
     [ -n "$line" ] || fail "the radius command at $1,$2,$3 answered nothing: $(ctl messages 6 | jq -c '.chat')"
+    echo "$line"
+}
+request_cmd() { # x y z item [count]
+    local line
+    if [ $# -ge 5 ]; then
+        line=$(reply request "$1" "$2" "$3" "$4" "$5")
+    else
+        line=$(reply request "$1" "$2" "$3" "$4")
+    fi
+    [ -n "$line" ] || fail "the request at $1,$2,$3 answered nothing: $(ctl messages 6 | jq -c '.chat')"
     echo "$line"
 }
 energy_of() { data_block "$1" "$2" "$3" energy; }
@@ -603,6 +626,102 @@ case "$out_slot" in
 esac
 echo "scanner container: $(ctl container "$SX" "$SY" "$SZ" | jq -c .)"
 
+say "THE REQUEST PATH: /rftoolsstorage request <pos> minecraft:stone 32 pulls from the chest"
+# One chest two blocks away is the only inventory in radius 2: the full barrel at
+# S+1 and the dirt chest at S+3 the inject phases left are removed. The chest is
+# alone (two adjacent chests would merge into one double chest).
+ctl setblock "$((SX + 1))" "$SY" "$SZ" minecraft:air >/dev/null
+ctl setblock "$((SX + 3))" "$SY" "$SZ" minecraft:air >/dev/null
+ctl setblock "$CHEST_X" "$SY" "$SZ" minecraft:air >/dev/null
+ctl setblock "$CHEST_X" "$SY" "$SZ" minecraft:chest >/dev/null
+ctl wait 4
+seed_slots "$CHEST_X" "$SY" "$SZ" '{Slot: 0b, id: "minecraft:stone", count: 64}, {Slot: 1b, id: "minecraft:stone", count: 64}'
+# Clear the scanner's own slots (the out slot included) and charge the buffer.
+seed_slots "$SX" "$SY" "$SZ" ''
+line=$(radius_cmd "$SX" "$SY" "$SZ" 2)
+echo "radius: $line"
+ctl command "data merge block $SX $SY $SZ {energy: 5000}" >/dev/null
+ctl command "clear @a" >/dev/null
+ctl wait 6
+stand_at "$SX" "$SZ"
+ctl wait 6
+chest_before=$(inv_total "$CHEST_X" "$SY" "$SZ")
+energy_before=$(energy_of "$SX" "$SY" "$SZ")
+echo "before the request: chest ${chest_before} stone, energy ${energy_before}, player stone $(count_item minecraft:stone)"
+[ "$chest_before" = 128 ] || fail "the chest holds $chest_before stone before the request, expected 128"
+[ "$energy_before" = 5000 ] || fail "the buffer is $energy_before before the request, expected 5000"
+
+line=$(request_cmd "$SX" "$SY" "$SZ" minecraft:stone 32)
+echo "request 32 stone: $line"
+echo "$line" | grep -q "^$SCANNER: pulled 32 minecraft:stone (4990/$MAX_FE FE)$" || fail "the request answered: $line"
+chest_after=$(inv_total "$CHEST_X" "$SY" "$SZ")
+energy_after=$(energy_of "$SX" "$SY" "$SZ")
+held=$(count_item minecraft:stone)
+echo "after the request: chest ${chest_after} stone, energy ${energy_after}, player stone ${held}"
+[ "$chest_after" = 96 ] || fail "the chest holds $chest_after after pulling 32, expected 96"
+[ "$energy_after" = "$((5000 - 10))" ] || fail "the request cost $((5000 - energy_after)) FE, expected 10 (a tenth of rfPerRequest)"
+[ "$held" = 32 ] || fail "the player holds $held stone, expected the 32 pulled (requestStraightToInventory's default)"
+
+if [ "$REQUEST_SELFTEST" = 1 ]; then
+    say "REQUEST_SELFTEST: assert the request did NOT pull the stone (must fail)"
+    fail "the request pulled 32 stone out of the chest (128 -> ${chest_after}) and charged 10 FE (5000 -> ${energy_after}), so this inverted assertion fails as it must"
+fi
+
+say "a request for a kind nothing holds refuses and charges nothing"
+line=$(request_cmd "$SX" "$SY" "$SZ" minecraft:dirt 32)
+echo "request 32 dirt: $line"
+echo "$line" | grep -q "^$SCANNER: nothing to pull for minecraft:dirt (4990/$MAX_FE FE)$" || fail "the dirt request answered: $line"
+chest_after=$(inv_total "$CHEST_X" "$SY" "$SZ")
+energy_after=$(energy_of "$SX" "$SY" "$SZ")
+echo "after the refused dirt request: chest ${chest_after} stone, energy ${energy_after}, player dirt $(count_item minecraft:dirt)"
+[ "$chest_after" = 96 ] || fail "the refused dirt request changed the chest to $chest_after"
+[ "$energy_after" = "$((5000 - 10))" ] || fail "the refused dirt request charged ($energy_after)"
+[ "$(count_item minecraft:dirt)" = 0 ] || fail "the refused dirt request gave the player dirt"
+
+say "with the buffer below the price the same request is refused with the price line"
+ctl command "data merge block $SX $SY $SZ {energy: 9}" >/dev/null
+ctl wait 6
+line=$(request_cmd "$SX" "$SY" "$SZ" minecraft:stone 32)
+echo "request 32 stone at 9 FE: $line"
+echo "$line" | grep -q 'costs 10' || fail "the refusal does not print the price: $line"
+echo "$line" | grep -q "9/$MAX_FE FE" || fail "the refusal does not print the buffer: $line"
+chest_after=$(inv_total "$CHEST_X" "$SY" "$SZ")
+energy_after=$(energy_of "$SX" "$SY" "$SZ")
+echo "after the 9-FE refusal: chest ${chest_after} stone, energy ${energy_after}, player stone $(count_item minecraft:stone)"
+[ "$chest_after" = 96 ] || fail "a request without the power changed the chest to $chest_after"
+[ "$energy_after" = 9 ] || fail "a refused request changed the buffer to $energy_after"
+
+say "the same request through ctl command goes straight to the player too (the reference's default)"
+ctl command "data merge block $SX $SY $SZ {energy: 5000}" >/dev/null
+ctl wait 6
+out_reply=$(ctl command "/rftoolsstorage request $SX $SY $SZ minecraft:stone 16" 2>&1 || true)
+echo "command request 16 stone: $out_reply"
+ctl wait 8
+out_count=$(data_reply "$SX" "$SY" "$SZ" 'Items[1].count')
+chest_after=$(inv_total "$CHEST_X" "$SY" "$SZ")
+energy_after=$(energy_of "$SX" "$SY" "$SZ")
+echo "after the command request: out slot reply '${out_count}', chest ${chest_after} stone, energy ${energy_after}, player stone $(count_item minecraft:stone)"
+case "$out_count" in
+    *"Found no elements"*) ;;
+    *) fail "the out slot kept the delivered stack: $out_count" ;;
+esac
+[ "$chest_after" = 80 ] || fail "the chest holds $chest_after after the 16-stone pull, expected 80"
+[ "$energy_after" = "$((5000 - 10))" ] || fail "the command request cost $((5000 - energy_after)) FE, expected 10"
+[ "$(count_item minecraft:stone)" = 48 ] || fail "the player holds $(count_item minecraft:stone) stone, expected 32 + 16"
+
+say "counterfactual: an out slot holding another kind refuses the request and leaves the chest alone"
+ctl command "data merge block $SX $SY $SZ {energy: 5000}" >/dev/null
+seed_slots "$SX" "$SY" "$SZ" '{Slot: 1b, id: "minecraft:dirt", count: 1}'
+ctl wait 6
+line=$(request_cmd "$SX" "$SY" "$SZ" minecraft:stone 32)
+echo "request 32 stone with a dirt out slot: $line"
+echo "$line" | grep -q 'out slot holds minecraft:dirt' || fail "the out-slot refusal answered: $line"
+chest_after=$(inv_total "$CHEST_X" "$SY" "$SZ")
+energy_after=$(energy_of "$SX" "$SY" "$SZ")
+echo "after the out-slot counterfactual: chest ${chest_after} stone, energy ${energy_after}, player stone $(count_item minecraft:stone)"
+[ "$chest_after" = 80 ] || fail "the out-slot counterfactual pulled from the chest ($chest_after)"
+[ "$energy_after" = 5000 ] || fail "the out-slot counterfactual charged ($energy_after)"
+
 say "the scanner's loot table drops its own item on a survival break"
 BX=$((X + 2))
 BZ=$((Z1 + 5))
@@ -670,4 +789,4 @@ echo "give rftoolsbase:machine_frame: $frame"
 echo "$frame" | grep -q 'unknown item' || fail "this build has rftoolsbase:machine_frame, so the recipe is not blocked and must be crafted: $frame"
 
 ctl close >/dev/null 2>&1 || true
-echo "PASS: the storage scanner places and reads back with its facing; a fresh one has no power (no power (0/50000 FE)) and reads nothing; at its default radius 1 it finds nothing two blocks away; /rftoolsstorage radius 2 widens the box and the scan answers minecraft:stone 64 for a chest two blocks away while the chest three away (minecraft:dirt 32) is outside it; radius 3 lists both, one entry a kind; every scan costs rfPerRequest (5,000 -> 4,900 -> 4,800 -> 4,700, printed in the reply); an emptied buffer refuses with no power and reads nothing, and charging it again makes the scan answer again; scan and radius refuse a chest and the modular storage (not a storage scanner); the radius and the buffer survive a relaunch; THE INJECT TICK pushes 64 stone from the in-slot into the empty chest two blocks away so its Items[0] reads minecraft:stone x64 while the buffer drops by exactly one rfPerInsert (5000 -> 4980), and with the buffer at 0 the next stack stays in the slot and the chest keeps its 64, recharging proving the stall was the power (chest 128); the auto slot routes too (chest 160); items the game puts in the container are routed for one rfPerInsert; a stack nothing accepts is still charged one attempt (20 FE pays one, 19 pays none) and stays in the slot; the walk passes a full barrel for the chest behind it; the out slot is never written; the loot table drops the scanner on a survival break; the modular storage still answers 0/0 empty no module; and a barrel answers not a storage scanner to the same commands"
+echo "PASS: the storage scanner places and reads back with its facing; a fresh one has no power (no power (0/50000 FE)) and reads nothing; at its default radius 1 it finds nothing two blocks away; /rftoolsstorage radius 2 widens the box and the scan answers minecraft:stone 64 for a chest two blocks away while the chest three away (minecraft:dirt 32) is outside it; radius 3 lists both, one entry a kind; every scan costs rfPerRequest (5,000 -> 4,900 -> 4,800 -> 4,700, printed in the reply); an emptied buffer refuses with no power and reads nothing, and charging it again makes the scan answer again; scan and radius refuse a chest and the modular storage (not a storage scanner); the radius and the buffer survive a relaunch; THE INJECT TICK pushes 64 stone from the in-slot into the empty chest two blocks away so its Items[0] reads minecraft:stone x64 while the buffer drops by exactly one rfPerInsert (5000 -> 4980), and with the buffer at 0 the next stack stays in the slot and the chest keeps its 64, recharging proving the stall was the power (chest 128); the auto slot routes too (chest 160); items the game puts in the container are routed for one rfPerInsert; a stack nothing accepts is still charged one attempt (20 FE pays one, 19 pays none) and stays in the slot; the walk passes a full barrel for the chest behind it; the tick never writes the out slot; THE REQUEST PATH pulls 32 stone from a chest of 128 into the player's inventory (the reference's straight-to-inventory default), leaving the chest at 96 and the buffer at 4,990 for an explicit count, refuses a kind nothing holds and charges nothing, refuses below the price with the price line (costs 10, have 9), sends a ctl command's 16-stone request straight to the player too, and refuses a request whose out slot holds another kind without pulling or charging; the loot table drops the scanner on a survival break; the modular storage still answers 0/0 empty no module; and a barrel answers not a storage scanner to the same commands"

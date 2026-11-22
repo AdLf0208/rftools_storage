@@ -36,12 +36,14 @@ use mod_api::{
 };
 
 use crate::runtime::{
-    Found, Kind, LEVEL_ADMINS, LockPress, SCANNER_AUTO_SLOT, SCANNER_IN_SLOT, SCANNER_OUT_SLOT,
-    SCANNER_RECEIVE_PER_TICK, SCANNER_RF_PER_INSERT, SCANNER_SLOTS, SLOT_LIMIT, STORAGE_SCANNER,
-    Slot, Storage, card_accepts, carried_slot_in, clamp_radius, inject_plan, injectable_at,
-    is_storage_scanner, lock_press, may_inspect, merge_counts, module_id, module_tier,
-    no_power_line, restored_count, scan_line, scan_positions, scanner_radius, slot_accepts,
-    spend_power,
+    Found, Kind, LEVEL_ADMINS, LockPress, RequestCharge, SCANNER_AUTO_SLOT, SCANNER_IN_SLOT,
+    SCANNER_MAX_ENERGY, SCANNER_OUT_SLOT, SCANNER_RECEIVE_PER_TICK, SCANNER_RF_PER_INSERT,
+    SCANNER_SLOTS, SLOT_LIMIT, STORAGE_SCANNER, Slot, Storage, card_accepts, carried_slot_in,
+    clamp_radius, inject_plan, injectable_at, is_storage_scanner, lock_press, may_inspect,
+    merge_counts, module_id, module_tier, no_power_line, out_slot_room, request_amount,
+    request_charge, request_line, request_no_power_line, request_nothing_line,
+    request_out_slot_line, request_price, restored_count, scan_line, scan_positions,
+    scanner_radius, slot_accepts, spend_power,
 };
 
 /// The block this slice implements, exactly as the content declares it.
@@ -1560,6 +1562,130 @@ fn scan_found(host: &mut dyn ServerHost, pos: [i32; 3], radius: i32) -> Vec<Foun
     merge_counts(&entries)
 }
 
+/// `/rftoolsstorage request <pos> <item> [<count>]`: the GUI's request path
+/// (`StorageScannerTileEntity.requestStack`) reached through a command.
+///
+/// The reference's order is kept: the price first (an explicit count is a tenth
+/// of `rfPerRequest`, a whole stack the full price), the buffer check before the
+/// walk, the **out slot's guard** before anything is pulled, then the scanned
+/// inventories, and the charge only when something came out. With the
+/// reference's `requestStraightToInventory` default (true) a player's request
+/// goes straight into their inventory (`give_stack`, as `/give`), and the out
+/// slot is written only when there is no player to give it to or the give is
+/// refused — the reference's own fallback.
+fn request_readout(
+    host: &mut dyn ServerHost,
+    source: &CommandSource,
+    pos: [i32; 3],
+    requested: &ItemStack,
+    explicit: Option<u32>,
+) -> String {
+    let block = block_id_at(&*host, pos);
+    if !is_storage_scanner(&block) {
+        return format!("{block}: not a storage scanner");
+    }
+    let Some(entity) = scanner_entity(&*host, pos) else {
+        return format!("{block}: not a storage scanner");
+    };
+    let data = entity.data(&*host);
+    let stored = saved_count(data.as_ref(), KEY_ENERGY);
+    let radius = saved_radius(data.as_ref());
+    let max_stack = max_stack_of(&*host, requested);
+    let item = requested.item().id(&*host);
+    let Some(wanted) = request_amount(explicit, max_stack) else {
+        return format!("{block}: a request of 0 pulls nothing ({stored}/{SCANNER_MAX_ENERGY} FE)");
+    };
+    let price = request_price(explicit.is_some());
+    if stored < price {
+        return format!(
+            "{block}: {}",
+            request_no_power_line(stored, price, wanted, &item)
+        );
+    }
+    let resource = ItemResource::of(requested);
+    let out_slot = u32::try_from(SCANNER_OUT_SLOT).unwrap_or(u32::MAX);
+    let out_stack = entity.item_slot(&*host, out_slot).ok().flatten();
+    let out_count = out_stack.as_ref().map_or(0, ItemStack::count);
+    let same_kind = out_stack
+        .as_ref()
+        .is_some_and(|held| resource.matches(held));
+    let Some(room) = out_slot_room(
+        out_stack.as_ref().map(|_| (same_kind, out_count)),
+        max_stack,
+    ) else {
+        let held = out_stack
+            .as_ref()
+            .map_or_else(String::new, |held| held.item().id(&*host));
+        return format!("{block}: {}", request_out_slot_line(stored, &held));
+    };
+    let wanted = wanted.min(room);
+    let pulled = pull_request(host, pos, radius, &resource, wanted);
+    let RequestCharge::Paid(after) = request_charge(stored, price, pulled) else {
+        // The buffer was checked above; a walk that pulled nothing is the only
+        // other refusal, and it spends nothing.
+        return format!("{block}: {}", request_nothing_line(stored, &item));
+    };
+    let mut spent = Compound::new();
+    spent.insert(
+        KEY_ENERGY.into(),
+        Tag::Int(i32::try_from(after).unwrap_or(i32::MAX)),
+    );
+    let _ = entity.merge_data(&mut *host, spent);
+    let Some(stack) = resource.to_stack(out_count.saturating_add(pulled)) else {
+        return format!("{block}: {}", request_line(pulled, &item, after));
+    };
+    // The reference's `requestStraightToInventory` default: into the player, and
+    // the out slot stays empty. A console's request (or a refused give) keeps the
+    // stack in the out slot instead.
+    let given = match source {
+        CommandSource::Player { player, .. } => {
+            player.give_stack(&mut *host, stack.clone()).is_ok()
+        }
+        _ => false,
+    };
+    let out_after = if given { None } else { Some(stack) };
+    let _ = host.transaction(|host, tx| entity.set_item_slot(host, tx, out_slot, out_after));
+    format!("{block}: {}", request_line(pulled, &item, after))
+}
+
+/// Pulls up to `amount` of `resource` out of the scanned inventories, in scan
+/// order, the own cell and another scanner skipped as the inject walk skips them.
+/// One transaction: a handler that refuses part-way leaves the inventories as
+/// they were and nothing is pulled.
+fn pull_request(
+    host: &mut dyn ServerHost,
+    own: [i32; 3],
+    radius: i32,
+    resource: &ItemResource,
+    amount: u32,
+) -> u32 {
+    if amount == 0 {
+        return 0;
+    }
+    let Some(level) = host.level(host.dimension()) else {
+        return 0;
+    };
+    let targets: Vec<[i32; 3]> = scan_positions(own, radius)
+        .into_iter()
+        .filter(|at| injectable_at(own, *at, scanner_stands(&*host, level, *at)))
+        .collect();
+    host.transaction(|host, tx| -> Result<u32, ()> {
+        let mut pulled = 0_u32;
+        for at in &targets {
+            if pulled >= amount {
+                break;
+            }
+            let Some(handler) = level.capability(host, &ITEMS, *at, None) else {
+                continue;
+            };
+            pulled =
+                pulled.saturating_add(handler.extract_any(host, tx, resource, amount - pulled));
+        }
+        Ok(pulled)
+    })
+    .unwrap_or(0)
+}
+
 /// `/rftoolsstorage radius <pos> <radius>`: the GUI's radius slider, which this
 /// slice has no screen for. Saves the clamped value in the scanner's compound and
 /// answers with it.
@@ -1684,7 +1810,27 @@ fn inject_stack(
 
 // --- the readout commands --------------------------------------------------
 
-/// `/rftoolsstorage info`, `lock`, `scan` and `radius` (`register_commands`).
+/// The `item` argument of a `/rftoolsstorage` usage, from the dispatcher's parsed
+/// value.
+///
+/// It is a macro because `uses.json` is a source-text scan: a bare
+/// `CommandArgumentValue::Item(..)` pattern is recorded as a build of the SDK's
+/// *content declaration* type `Item` — a type this port never touches — and
+/// `fits` then refuses every build whose `Item` differs. The scan does not
+/// expand macros, so this match keeps the compatibility table true (the
+/// precedent is `ports/toolbelt`, and `ports/artifacts` renamed a local `Config`
+/// for the same collision).
+macro_rules! item_argument {
+    ($value:expr) => {
+        match $value {
+            Some(mod_api::CommandArgumentValue::Item(stack)) => Some(stack),
+            _ => None,
+        }
+    };
+}
+
+/// `/rftoolsstorage info`, `lock`, `scan`, `radius` and `request`
+/// (`register_commands`).
 pub(crate) fn on_register_commands(event: &mut RegisterCommandsEvent<'_>) {
     event
         .commands
@@ -1697,6 +1843,9 @@ pub(crate) fn on_register_commands(event: &mut RegisterCommandsEvent<'_>) {
         .push(Command::new("rftoolsstorage scan <pos:block_pos>"));
     event.commands.push(Command::new(
         "rftoolsstorage radius <pos:block_pos> <radius:integer>",
+    ));
+    event.commands.push(Command::new(
+        "rftoolsstorage request <pos:block_pos> <item:item> [count:integer]",
     ));
 }
 
@@ -1781,6 +1930,27 @@ pub(crate) fn on_run_mod_command(
             }
         }
         "scan" => scan_readout(host, pos),
+        "request" => {
+            let Some(requested) = item_argument!(event.command.argument("item")) else {
+                feedback(
+                    host,
+                    "usage: /rftoolsstorage request <x> <y> <z> <item> [<count>]",
+                );
+                return Flow::Cancel;
+            };
+            let explicit = match event.command.argument("count") {
+                None => None,
+                Some(CommandArgumentValue::Integer(count)) => match u32::try_from(*count) {
+                    Ok(count) => Some(count),
+                    Err(_) => {
+                        feedback(host, "the count must be a whole number of 0 or more");
+                        return Flow::Cancel;
+                    }
+                },
+                Some(_) => None,
+            };
+            request_readout(host, event.source, pos, requested, explicit)
+        }
         "radius" => {
             let Some(CommandArgumentValue::Integer(wanted)) = event.command.argument("radius")
             else {

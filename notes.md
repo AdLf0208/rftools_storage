@@ -13,7 +13,7 @@ differences, are in [`FINDINGS.md`](FINDINGS.md).
 publishing (ARCHITECTURE.md §8); the port carries the upstream MIT notice in
 [`LICENSE`](LICENSE) and its provenance in [`LICENSE-NOTICE.md`](LICENSE-NOTICE.md).
 
-**Format: the SDK package (2026-11-18), version 0.2.6.** One flat `.hmod` —
+**Format: the SDK package (2026-11-18), version 0.2.7.** One flat `.hmod` —
 `horizon-mod.toml` + `Cargo.toml` + `src/` + `assets/` + `data/` — built by the
 launcher against SDK nightly **`0a875da91dbb0fdcb7ba8c42c11341aa229af51a`** with
 horizon-mixins **`e59da9094f0c2fdda6c627fe9eff22dec6a906f0`** (see
@@ -22,7 +22,8 @@ horizon-mixins **`e59da9094f0c2fdda6c627fe9eff22dec6a906f0`** (see
 [`## Slice 3`](#slice-3--the-module-s-card-slot-version-023),
 [`## Slice 4`](#slice-4--the-contents-travel-on-the-item-version-024),
 [`## Slice 5`](#slice-5--the-storage-scanner-version-025),
-[`## Slice 6`](#slice-6--the-scanners-item-slots-and-the-inject-tick-version-026)).
+[`## Slice 6`](#slice-6--the-scanners-item-slots-and-the-inject-tick-version-026),
+[`## Slice 7`](#slice-7--the-scanners-request-path-version-027)).
 The retired `.hnmod` container pinned Horizon `1d63e0a5…` / mixins `5a64af93…`;
 `src/runtime.rs` was byte-identical to the retired
 `mixins/rftoolsstorage/runtime.rs` until the 2026-11-18 review fixes gave it the
@@ -34,11 +35,14 @@ its slot rules and the padlock), slice 3 (the menu's **card slot**, where the
 module itself lives, so it can be taken back out), slice 4 (**a broken block's
 contents travel on its own item**, with the lock and the module, and come back on
 placement), slice 5 (the **storage scanner**: its block, its block entity, its
-50,000 FE buffer and the inventory scan behind `/rftoolsstorage scan`) and
-slice 6 (the scanner's **item slots and inject tick**: the GUI's in slot, the
-automation slot and the out slot, and the tick that pushes the first two into
-the scanned inventories for `rfPerInsert` each) are implemented and verified in a
-launcher-built game at the pin (the legs are listed per slice below;
+50,000 FE buffer and the inventory scan behind `/rftoolsstorage scan`), slice 6
+(the scanner's **item slots and inject tick**: the GUI's in slot, the automation
+slot and the out slot, and the tick that pushes the first two into the scanned
+inventories for `rfPerInsert` each) and slice 7 (the scanner's **request path**:
+`/rftoolsstorage request <pos> <item> [<count>]` pulls a kind out of the scanned
+inventories, prices it as the GUI does and gives it to the player, or leaves it in
+the out slot when there is no player to give it to) are implemented and verified
+in a launcher-built game at the pin (the legs are listed per slice below;
 `ports/_shared/evidence/rftoolsstorage-e2e/`). The gap list below is the rest of
 the mod.
 
@@ -173,14 +177,15 @@ None. The two candidates were checked and left alone, on purpose:
 
 - `crafting_manager` (the jar's own lang calls it "WIP! … not functional yet") and
   the **storage scanner's remaining half**: the GUI's list widget (search, sort,
-  compact, cycle, visible size), the **request path** that fills the out slot and
-  the GUI's insert-from-screen path (`injectStackFromScreen`, `requestStack`,
-  `giveToPlayerFromScreen`), the **remote/tablet variant**, the XNet access
-  settings and its `routable` star list (the port treats every scanned inventory as
-  routable — slice 6's deviation 1), and the claimed-land check
+  compact, cycle, visible size), the GUI's **insert-from-screen path**
+  (`injectStackFromScreen`) and its **give-from-screen path**
+  (`giveToPlayerFromScreen`, the list's click that hands a matching stack straight
+  to the player without the out slot), the **remote/tablet variant**, the XNet
+  access settings and its `routable` star list (the port treats every scanned
+  inventory as routable — slice 6's deviation 1), and the claimed-land check
   (`scannerNoRestrictions`; the pin has no `can_entity_destroy` **hook** exists at
   the pin, but it is a cancellable game event, not a query a mod can ask for a fake
-  player — `blocked(no permission query)`).
+  player — `blocked(no permission query)`). The **request path** is slice 7.
 - Storage tiers 2-4 (`storage_module1..3`; their recipes need McJtyLib's
   `mcjtylib:copy_components` recipe type, which the pin does not have), the
   remote module (`storage_module6`, "DO NOT USE" in the jar's lang) and the
@@ -210,8 +215,8 @@ retired helper files and their mapping are in
 | `register` → `Registrar` | declares the block-entity type `rftoolsstorage:storage_block_entity` over the block, attaches its `BlockEntityPart`, declares the menu's `MenuPart`, and declares the block's container (100 slots, every face, inputs and outputs) with its menu; **also** the scanner's type `rftoolsstorage:storage_scanner_block_entity` with its Part and `block_energy` (50,000 FE, 500 a move, no external drain) |
 | `BlockEntityPart::block_entity` | gives `rftoolsstorage:modular_storage` a block entity with empty saved data (the module tier and the lock live in its compound; `Items` are the container's), and `rftoolsstorage:storage_scanner` one whose compound holds `energy` and `radius` |
 | `right_click_block` (cancel) | install / insert / seal / withdraw, and the action-bar readout |
-| `register_commands` | `/rftoolsstorage info <pos>`, `lock <pos>`, `scan <pos>` and `radius <pos> <radius>` (typed `block_pos`/`integer`) |
-| `run_mod_command` | their answers (the scan costs `rfPerRequest`; the radius is the GUI slider's 1..20) |
+| `register_commands` | `/rftoolsstorage info <pos>`, `lock <pos>`, `scan <pos>`, `radius <pos> <radius>` and `request <pos> <item> [<count>]` (`block_pos`, `item`, `integer`) |
+| `run_mod_command` | their answers (the scan costs `rfPerRequest`; the radius is the GUI slider's 1..20; the request prices an explicit count at a tenth of `rfPerRequest`, checks the out slot and the buffer, pulls from the scanned inventories and gives the stack to the player, or leaves it in the out slot when there is no player) |
 | `block_entity_ticks` / `block_entity_tick` (BlockEntityPart) | the scanner ticks: the GUI input, then the automation input, each an `rfPerInsert` attempt into the scanned inventories (slice 6) |
 | `Registrar::block_container` | the scanner's three slots (`SLOT_IN` 0, `SLOT_OUT` 1, `SLOT_IN_AUTO` 2): automation inserts into the auto slot only, every slot extractable, no menu |
 | `screen` / `screen_draw` / `screen_click` (BlockEntityPart, API 19/20) | the menu's 366 x 210 layout, the title, the inventory label and the padlock; a press on the padlock's rectangle answers button 0 |
@@ -243,6 +248,11 @@ Slice 6: the same `StorageScannerTileEntity.java` (`tickServer`, `injectStackInt
 **McJtyLib** `1.21_neo` @ `ef393e608eebc188a6e1decbf110506a55cc0725`
 (`container/GenericItemHandler.java`: the `Builder.insertable`/`extractable` defaults the
 container's policy is read from — a library read, not a port).
+Slice 7: the same `StorageScannerTileEntity.java` (`requestStack`, `requestStackFromInv`,
+`requestItem`, `giveToPlayerFromScreen`, the `isOutputFromGui`/`isRoutable` filters, the
+out-slot guard and `requestStraightToInventory`), `PacketRequestItem.java` (the GUI's click
+sends `amount` 1 with shift and -1 without), `GuiStorageScanner.java` (`requestItem`) and
+`StorageScannerConfiguration.java` (`requestStraightToInventory` default **true**).
 The clones (`ports/_shared/upstream/rftoolsstorage`, `…/mcjtylib`) were deleted after
 these findings were recorded.
 
@@ -1154,6 +1164,165 @@ would fight the machine.
 7. **The block entity is out of the world in its own tick.** `host.block_entity(pos)` cannot read it
    there; the tick writes its slots and its buffer through `event.entity.items`/`nbt`, and the
    neighbours through `level.capability`.
+
+## Slice 7 — the scanner's request path (version 0.2.7)
+
+The gap line slice 6 left, verbatim from its deviation 3:
+
+> **The GUI's insert/request paths are not carried**, only the tick.
+> `injectStackFromScreen`, `requestStack`, `giveToPlayerFromScreen` and the out
+> slot's fill belong to the list slice; the out slot is declared (the container
+> must bind) and never written.
+
+The GUI list itself stays a gap (the pin's screen is a fixed slot layout), but the
+**request path** is the consumer of the out slot slice 6 declared:
+`/rftoolsstorage request <pos> <item> [<count>]` does what
+`StorageScannerTileEntity.requestStack` does, priced the way it prices it and
+delivering where its default delivers. It fits the **machines** tier: a block
+entity's saved buffer, the neighbours' item capability and the container's out
+slot — no renderer and no new vanilla hook.
+
+**Pin:** Horizon `0a875da91dbb0fdcb7ba8c42c11341aa229af51a`, horizon-mixins
+`e59da9094f0c2fdda6c627fe9eff22dec6a906f0`, mod API 0.2, game 26.3. **Version 0.2.7.**
+
+### What it does
+
+- **The price.** `requestStack`: `rf = rfPerRequest` (100), then `if (amount >= 0)
+  rf /= 10` — an explicit count costs **10**, a request with no count (upstream's
+  `amount == -1`, a whole stack) costs **100**.
+- **The amount.** No count asks the item's own stack size (`amount = -1` becomes
+  `getMaxStackSize()`); an explicit count is capped at one stack. A count of 0
+  pulls nothing and charges nothing (upstream's `todo[0] == finalAmount`).
+- **The out slot, first.** Before anything is pulled, a non-empty out slot of
+  another item or components refuses the whole request, and so does a full one;
+  the same kind leaves its free room (upstream's `return`s, in that order).
+- **The walk.** The scanned inventories in scan order, the own cell and another
+  scanner skipped as the inject tick skips them; each inventory's matching slots
+  are extracted (`ItemResource::matches`, item and components) up to the wanted
+  count, in **one transaction**.
+- **The charge.** Only when something came out: the buffer is the saved `energy`
+  and is written through `merge_data`, as the scan's price is.
+- **The delivery.** `requestStraightToInventory` is **true** by default upstream,
+  so a player's request goes straight into their inventory (`give_stack`, as
+  `/give`, with the vanilla sync) and the out slot is left empty; with no player
+  to give to, or a refused give, the pulled stack is written into the out slot
+  (the reference's own fallback).
+- **The command** keeps the port's reach/operator gate, like `scan` and `radius`.
+
+### Red → green (the rules)
+
+The three new rules were written first and stubbed (`request_price` answered 0,
+`request_amount` and `out_slot_room` answered `None`, `request_charge` answered
+`NoPower`, the lines `""`), and the suite was run **before** implementing them
+(`ports/_shared/evidence/rftoolsstorage/slice7-red.log`, `TEST_EXIT:101`):
+
+```
+thread 'runtime::tests::a_request_with_a_count_costs_a_tenth_and_the_default_asks_a_whole_stack' (596079) panicked at src/runtime.rs:1226:9:
+assertion `left == right` failed: an explicit count is cheaper
+  left: 0
+ right: 10
+...
+thread 'runtime::tests::a_request_refuses_an_out_slot_of_another_kind_or_a_full_one' (596078) panicked at src/runtime.rs:1251:9:
+assertion `left == right` failed: an empty out slot has a stack of room
+  left: None
+ right: Some(64)
+...
+thread 'runtime::tests::a_request_charges_only_what_it_pulled_and_only_with_the_power_to_pay' (596077) panicked at src/runtime.rs:1275:9:
+assertion `left == right` failed
+  left: NoPower
+ right: Paid(4990)
+...
+test result: FAILED. 32 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out
+```
+
+Implemented, then **35 passed, 0 failed** (`sdk-test.log`): the runtime's 31 (28 +
+the request's price/amount, the out-slot guard and the charge) and the four glue
+tests.
+
+### In game (`ports/_shared/evidence/rftoolsstorage-e2e/`)
+
+| Leg | Log | Verdict |
+|---|---|---|
+| default, the launcher-built package | `e2e-request.log` | **PASS** + `EXIT:0` |
+| control (the same Nightly without the package) | `e2e-request-control.log` | **FAIL** + `EXIT:1` — `{"error":"unknown item rftoolsstorage:storage_scanner"}` |
+| `SELFTEST=1` (slice 6's inverted assertion) | `e2e-request-selftest.log` | **FAIL** + `EXIT:1` — the tick moved the stone |
+| `REQUEST_SELFTEST=1` (this slice's inverted assertion) | `e2e-request-selftest-request.log` | **FAIL** + `EXIT:1` — *"the request pulled 32 stone out of the chest (128 -> 96) and charged 10 FE (5000 -> 4990), so this inverted assertion fails as it must"* |
+
+What `e2e-request.log` asserts, in order (the earlier phases are slices 5–6's and
+still pass): the scanner stands at radius **2** with one chest two blocks away
+holding **128 stone** (slots 0 and 1, 64 each; the full barrel and the dirt chest
+the inject phases left are removed, and two adjacent chests would merge, so the
+chest is alone) and the buffer at **5,000**; `request <pos> minecraft:stone 32`
+answers `pulled 32 minecraft:stone (4990/50000 FE)`, the **chest reads 96**, the
+**buffer 4,990** (an explicit count is 10) and the **player's inventory holds
+32 stone** — the reference's straight-to-inventory default. A request for
+`minecraft:dirt` (nothing in the box holds it) answers `nothing to pull for
+minecraft:dirt (4990/50000 FE)` and leaves the chest and the buffer unchanged. At
+buffer **9** the same stone request answers `not enough power for 32
+minecraft:stone: costs 10, have 9/50000 FE` — the price line — and pulls nothing.
+The same request through `ctl command` (16 stone) also goes straight to the
+player (his stone 32 → **48**), leaves the chest at **80** and the buffer at
+**4,990**, and the out slot empty, as the reference's default does. The
+**counterfactual** seeds the out slot with `minecraft:dirt`: the same stone
+request answers `the out slot holds minecraft:dirt; request refused (5000/50000
+FE)`, the chest stays at **80** and the buffer at **5,000**.
+
+### Deviations this slice adds
+
+1. **The out slot is a fallback, because the reference's default is.** Upstream's
+   `requestStraightToInventory` defaults to true: a player's request goes into
+   their inventory and the out slot is cleaned. The port follows that default
+   (there is no config), so the out slot is written only when there is no player
+   source or the give is refused. The harness's `ctl command` still carries the
+   acting player, so the fallback write is not reachable in the leg; the guard
+   (another kind or a full out slot) is, and is the counterfactual above.
+2. **An explicit count is capped at one stack.** Upstream's `requestStack` is
+   handed only 1 (shift) or -1 (default) by the GUI; the command surface has no
+   shift, so a larger explicit count is clamped to the item's stack size rather
+   than pulling several stacks into one out slot (which upstream's `grow` could
+   not represent anyway).
+3. **A full inventory throws the overflow** (`give_stack` is `/give`: what does
+   not fit is thrown from the player's eyes), where upstream's
+   `Inventory.add` returns false and keeps the whole stack in the out slot. The
+   pin's give API does not report how much fit.
+4. **No config**: `requestStraightToInventory`, `scannerNoRestrictions` and the
+   rest are not carried; the port uses their defaults.
+
+### Coverage (the families this slice changes)
+
+| Family | State |
+|---|---|
+| `/rftoolsstorage request <pos> <item> [<count>]`, its parsed reply | **tested** — `pulled 32 minecraft:stone (4990/50000 FE)`, `nothing to pull`, `not enough power … costs 10`, `the out slot holds …` (`e2e-request.log`) |
+| the price: an explicit count 10, a whole stack 100 | **tested** — 10 in game; both and the amount rule in `a_request_with_a_count…` |
+| the amount: default = the item's stack size, explicit capped, 0 pulls nothing | **tested** — `a_request_with_a_count…` (unit); the game's 32 is explicit |
+| the out slot guard: another kind / a full slot refuses | **tested** — the dirt-seeded counterfactual leaves the chest untouched (`e2e-request.log`); `a_request_refuses_an_out_slot…` |
+| the out slot fallback write (no player) | **not exercised** — the harness always has an acting player; `blocked(no console source)`, the reference's default makes it a fallback |
+| the scanned-inventory pull (item and components, scan order, own cell skipped) | **tested** — the chest 128 → 96; the pull reuses `injectable_at` |
+| charge only when something came out | **tested** — the dirt request leaves the buffer at 4,990; `a_request_charges…` |
+| the buffer check before the walk | **tested** — buffer 9 refuses with the price line and pulls nothing; `a_request_charges…` |
+| straight to the player (the reference's default) | **tested** — player 32 after the chat request, 48 after the command request |
+| the GUI's insert-from-screen, give-from-screen, the list widget, the remote/tablet variant, XNet settings, the claimed-land check | **not ported** (later slices / `blocked(no permission query)`) |
+
+### Traps this slice paid for
+
+1. **`ctl command "/modcmd"` is not a console source.** The first leg expected the
+   out slot to receive the 16 stone; the player got it instead (32 → 48) and the
+   out slot stayed empty. The harness executes commands for the acting player even
+   through `command`, so the reference's no-player fallback cannot be reached that
+   way. Assert the default (inventory) instead of the fallback.
+2. **`fits` source-scans `uses.json`, and a bare `CommandArgumentValue::Item(..)`
+   pattern is read as building the SDK's `Item` type.** `fits --build 0b14f8a`
+   refused with *"the type `Item` can no longer be built with a literal, and
+   `src/support.rs:1914` builds it"* although the port never touches `Item`. The
+   match lives in an `item_argument!` macro now (the `ports/toolbelt` precedent):
+   the scan does not expand macros, and both builds fit.
+3. **The request phases must keep the scanner's own slots empty.** The tick still
+   runs during the `ctl wait`s; with a stack in the in or auto slot it would route
+   it into the same chest the request is counting. `seed_slots "$SX" "$SY" "$SZ"
+   ''` clears the container before each request phase.
+4. **A `data merge block … {Items: […]}` replaces the whole list**, so seeding the
+   out slot with dirt (the counterfactual) clears the in/auto slots too — harmless
+   here, but it is why the phase reads the out slot after the merge, not before.
 
 ## Verification
 
