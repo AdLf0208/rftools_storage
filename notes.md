@@ -13,7 +13,7 @@ differences, are in [`FINDINGS.md`](FINDINGS.md).
 publishing (ARCHITECTURE.md §8); the port carries the upstream MIT notice in
 [`LICENSE`](LICENSE) and its provenance in [`LICENSE-NOTICE.md`](LICENSE-NOTICE.md).
 
-**Format: the SDK package (2026-11-18), version 0.2.7.** One flat `.hmod` —
+**Format: the SDK package (2026-11-18), version 0.2.8.** One flat `.hmod` —
 `horizon-mod.toml` + `Cargo.toml` + `src/` + `assets/` + `data/` — built by the
 launcher against SDK nightly **`0a875da91dbb0fdcb7ba8c42c11341aa229af51a`** with
 horizon-mixins **`e59da9094f0c2fdda6c627fe9eff22dec6a906f0`** (see
@@ -23,7 +23,8 @@ horizon-mixins **`e59da9094f0c2fdda6c627fe9eff22dec6a906f0`** (see
 [`## Slice 4`](#slice-4--the-contents-travel-on-the-item-version-024),
 [`## Slice 5`](#slice-5--the-storage-scanner-version-025),
 [`## Slice 6`](#slice-6--the-scanners-item-slots-and-the-inject-tick-version-026),
-[`## Slice 7`](#slice-7--the-scanners-request-path-version-027)).
+[`## Slice 7`](#slice-7--the-scanners-request-path-version-027),
+[`## Slice 8`](#slice-8--the-scanners-give-from-screen-path-version-028)).
 The retired `.hnmod` container pinned Horizon `1d63e0a5…` / mixins `5a64af93…`;
 `src/runtime.rs` was byte-identical to the retired
 `mixins/rftoolsstorage/runtime.rs` until the 2026-11-18 review fixes gave it the
@@ -41,7 +42,10 @@ slot and the out slot, and the tick that pushes the first two into the scanned
 inventories for `rfPerInsert` each) and slice 7 (the scanner's **request path**:
 `/rftoolsstorage request <pos> <item> [<count>]` pulls a kind out of the scanned
 inventories, prices it as the GUI does and gives it to the player, or leaves it in
-the out slot when there is no player to give it to) are implemented and verified
+the out slot when there is no player to give it to) and slice 8 (the scanner's
+**give-from-screen path**: `/rftoolsstorage give <pos> <item> [single]` hands one
+item or a whole stack straight to the player for the full `rfPerRequest`, with no
+out slot at all) are implemented and verified
 in a launcher-built game at the pin (the legs are listed per slice below;
 `ports/_shared/evidence/rftoolsstorage-e2e/`). The gap list below is the rest of
 the mod.
@@ -178,14 +182,14 @@ None. The two candidates were checked and left alone, on purpose:
 - `crafting_manager` (the jar's own lang calls it "WIP! … not functional yet") and
   the **storage scanner's remaining half**: the GUI's list widget (search, sort,
   compact, cycle, visible size), the GUI's **insert-from-screen path**
-  (`injectStackFromScreen`) and its **give-from-screen path**
-  (`giveToPlayerFromScreen`, the list's click that hands a matching stack straight
-  to the player without the out slot), the **remote/tablet variant**, the XNet
+  (`injectStackFromScreen`; its give-from-screen path is slice 8, carried as
+  `/rftoolsstorage give`), the **remote/tablet variant**, the XNet
   access settings and its `routable` star list (the port treats every scanned
   inventory as routable — slice 6's deviation 1), and the claimed-land check
   (`scannerNoRestrictions`; the pin has no `can_entity_destroy` **hook** exists at
   the pin, but it is a cancellable game event, not a query a mod can ask for a fake
-  player — `blocked(no permission query)`). The **request path** is slice 7.
+  player — `blocked(no permission query)`). The **request path** is slice 7 and the
+  give-from-screen path is slice 8.
 - Storage tiers 2-4 (`storage_module1..3`; their recipes need McJtyLib's
   `mcjtylib:copy_components` recipe type, which the pin does not have), the
   remote module (`storage_module6`, "DO NOT USE" in the jar's lang) and the
@@ -215,8 +219,8 @@ retired helper files and their mapping are in
 | `register` → `Registrar` | declares the block-entity type `rftoolsstorage:storage_block_entity` over the block, attaches its `BlockEntityPart`, declares the menu's `MenuPart`, and declares the block's container (100 slots, every face, inputs and outputs) with its menu; **also** the scanner's type `rftoolsstorage:storage_scanner_block_entity` with its Part and `block_energy` (50,000 FE, 500 a move, no external drain) |
 | `BlockEntityPart::block_entity` | gives `rftoolsstorage:modular_storage` a block entity with empty saved data (the module tier and the lock live in its compound; `Items` are the container's), and `rftoolsstorage:storage_scanner` one whose compound holds `energy` and `radius` |
 | `right_click_block` (cancel) | install / insert / seal / withdraw, and the action-bar readout |
-| `register_commands` | `/rftoolsstorage info <pos>`, `lock <pos>`, `scan <pos>`, `radius <pos> <radius>` and `request <pos> <item> [<count>]` (`block_pos`, `item`, `integer`) |
-| `run_mod_command` | their answers (the scan costs `rfPerRequest`; the radius is the GUI slider's 1..20; the request prices an explicit count at a tenth of `rfPerRequest`, checks the out slot and the buffer, pulls from the scanned inventories and gives the stack to the player, or leaves it in the out slot when there is no player) |
+| `register_commands` | `/rftoolsstorage info <pos>`, `lock <pos>`, `scan <pos>`, `radius <pos> <radius>`, `request <pos> <item> [<count>]` (`block_pos`, `item`, `integer`) and `give <pos> <item> [single]` (`block_pos`, `item`, `word`) |
+| `run_mod_command` | their answers (the scan costs `rfPerRequest`; the radius is the GUI slider's 1..20; the request prices an explicit count at a tenth of `rfPerRequest`, checks the out slot and the buffer, pulls from the scanned inventories and gives the stack to the player, or leaves it in the out slot when there is no player; the give prices one item or a stack at the whole `rfPerRequest`, has **no** out slot, and pulls straight into the player in one transaction) |
 | `block_entity_ticks` / `block_entity_tick` (BlockEntityPart) | the scanner ticks: the GUI input, then the automation input, each an `rfPerInsert` attempt into the scanned inventories (slice 6) |
 | `Registrar::block_container` | the scanner's three slots (`SLOT_IN` 0, `SLOT_OUT` 1, `SLOT_IN_AUTO` 2): automation inserts into the auto slot only, every slot extractable, no menu |
 | `screen` / `screen_draw` / `screen_click` (BlockEntityPart, API 19/20) | the menu's 366 x 210 layout, the title, the inventory label and the padlock; a press on the padlock's rectangle answers button 0 |
@@ -248,6 +252,12 @@ Slice 6: the same `StorageScannerTileEntity.java` (`tickServer`, `injectStackInt
 **McJtyLib** `1.21_neo` @ `ef393e608eebc188a6e1decbf110506a55cc0725`
 (`container/GenericItemHandler.java`: the `Builder.insertable`/`extractable` defaults the
 container's policy is read from — a library read, not a port).
+Slice 8: `StorageScannerTileEntity.java` again (`giveToPlayerFromScreen`, `giveItemToPlayer`,
+`giveToPlayer`, `isItemEqual`, `isOutputFromScreen`, `findInventories`' own-cell/other-scanner
+filter), `modules/scanner/items/StorageControlScreenModule.java` (the click that calls it, with
+`player.isShiftKeyDown()` as `single`) and `GuiStorageScanner.java`'s `requestItem` (the sibling
+path, for contrast). The clone (`/tmp/opencode/rftoolsstorage-up`, never in the tree) was deleted
+after these findings were recorded.
 Slice 7: the same `StorageScannerTileEntity.java` (`requestStack`, `requestStackFromInv`,
 `requestItem`, `giveToPlayerFromScreen`, the `isOutputFromGui`/`isRoutable` filters, the
 out-slot guard and `requestStraightToInventory`), `PacketRequestItem.java` (the GUI's click
@@ -1324,6 +1334,167 @@ FE)`, the chest stays at **80** and the buffer at **5,000**.
    out slot with dirt (the counterfactual) clears the in/auto slots too — harmless
    here, but it is why the phase reads the out slot after the merge, not before.
 
+## Slice 8 — the scanner's give-from-screen path (version 0.2.8)
+
+The gap line slice 7 left, verbatim from this file's gap list:
+
+> the GUI's **insert-from-screen path** (`injectStackFromScreen`) and its
+> **give-from-screen path** (`giveToPlayerFromScreen`, the list's click that hands
+> a matching stack straight to the player without the out slot)
+
+Slice 7's coverage table named it the last uncarried request-family method. The GUI list
+stays a gap (the pin's screen is a fixed slot layout), but the **give** is a scanner
+behaviour with no screen in it: `/rftoolsstorage give <pos> <item> [single]` does what
+`StorageScannerTileEntity.giveToPlayerFromScreen` does — the click the storage control
+screen module makes on a listed stack — priced the way it prices it, delivered where it
+delivers, and **without the out slot** the request path has. It fits the **machines**
+tier: a block entity's saved buffer, the neighbours' item capability and
+`PlayerRef::give_stack` — no renderer and no new vanilla hook.
+
+**Pin:** Horizon `0a875da91dbb0fdcb7ba8c42c11341aa229af51a`, horizon-mixins
+`e59da9094f0c2fdda6c627fe9eff22dec6a906f0`, mod API 0.2, game 26.3. **Version 0.2.8.**
+
+### What it does
+
+- **The price is the whole one.** `giveToPlayerFromScreen` checks
+  `getStoredPower() < rfPerRequest` first and `consumeEnergy(rfPerRequest)` once after a
+  give that took something: **100 FE for one item exactly as for a stack**. The
+  tenth-price mode belongs to `requestStack` alone (`request_price`).
+- **The amount.** `cnt = {single ? 1 : stack.getMaxStackSize()}`: `single` hands one
+  item, no flag hands the item's own stack size (clamped at [`SLOT_LIMIT`] like every
+  request).
+- **No out slot at all.** No guard, no fallback write: the pulled stack goes straight into
+  the player (`give_stack`, as `/give` — what does not fit is thrown from their eyes).
+  A source with no player is refused **before** anything leaves an inventory, because
+  there is no out slot to keep the stack in.
+- **One transaction.** The walk extracts in scan order and the give happens inside the
+  same transaction, so a give the game refuses aborts the walk instead of spending a
+  chest's stone on nothing.
+- **The walk** is the request path's: the scanned inventories in scan order, the own cell
+  and another storage scanner skipped (upstream's `findInventories` never lists them),
+  item and components matched as `ItemResource`. Upstream's `isItemEqual`
+  (`ItemStack.isSameItem`) matches the item id only — see deviation 1.
+- **The command** keeps the port's reach/operator gate, like `scan`, `radius` and
+  `request`.
+
+### Red → green (the rules)
+
+The two new rules were written first and stubbed (`give_price` answered 0, `give_amount`
+0, the lines `""`), and the suite was run **before** implementing them
+(`ports/_shared/evidence/rftoolsstorage/slice8-red.log`, `TEST_EXIT:101`):
+
+```
+thread 'runtime::tests::a_give_is_the_full_price_whether_it_hands_over_one_item_or_a_stack' (3759699) panicked at src/runtime.rs:1380:9:
+assertion `left == right` failed: a give is rfPerRequest
+  left: 0
+ right: 100
+...
+thread 'runtime::tests::the_give_reply_names_what_was_given_or_refuses_an_empty_walk' (3759716) panicked at src/runtime.rs:1417:9:
+assertion `left == right` failed
+  left: ""
+ right: "gave 64 minecraft:stone (4900/50000 FE)"
+...
+test result: FAILED. 35 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out
+```
+
+Implemented, then **37 passed, 0 failed** (`sdk-test.log`): the runtime's 33 (31 + the
+give's price/amount and its two reply lines) and the five glue tests. The charge reuses
+slice 7's `request_charge`, so "paid only when something came out" is unchanged.
+
+### In game (`ports/_shared/evidence/rftoolsstorage-e2e/`)
+
+| Leg | Log | Verdict |
+|---|---|---|
+| default, the launcher-built 0.2.8 package | `e2e-give.log` | **PASS** + `EXIT:0` |
+| control (the same Nightly without the package) | `e2e-give-control.log` | **FAIL** + `EXIT:1` — `{"error":"unknown item rftoolsstorage:storage_scanner"}` |
+| `GIVE_SELFTEST=1` (this slice's inverted assertion) | `e2e-give-selftest.log` | **FAIL** + `EXIT:1` — *"the give handed 64 stone to the player (chest 64 -> 0, player holds 64) and charged 100 FE (5000 -> 4900), so this inverted assertion fails as it must"* |
+
+`e2e-give.log` re-runs every earlier phase (slices 1–7 still pass), then asserts:
+
+```
+before the give: chest 64 stone, energy 5000, player stone 0, out slot 'minecraft:dirt' (Slot 1b)
+give stone: rftoolsstorage:storage_scanner: gave 64 minecraft:stone (4900/50000 FE)
+after the give: chest 0 stone, energy 4900, player stone 64, out slot 'minecraft:dirt' (Slot 1b)
+== a give with single hands one item and drains one ==
+give single stone: rftoolsstorage:storage_scanner: gave 1 minecraft:stone (4800/50000 FE)
+after the single give: chest 2 stone, energy 4800, player stone 65
+== a give for a kind nothing holds refuses and charges nothing ==
+give dirt: rftoolsstorage:storage_scanner: nothing to give for minecraft:dirt (4800/50000 FE)
+after the refused dirt give: chest 2 stone, energy 4800, player dirt 0
+== counterfactual: buffer 99 refuses the give with the price line and leaves the chest alone ==
+give stone at 99 FE: rftoolsstorage:storage_scanner: not enough power for 64 minecraft:stone: costs 100, have 99/50000 FE
+after the 99-FE refusal: chest 2 stone, energy 99, player stone 65
+== a give on a block that is not a scanner is refused before anything is read ==
+give on the chest: minecraft:chest: not a storage scanner
+```
+
+Two things make the transcript evidence rather than a print: the out slot still holds the
+**request counterfactual's dirt** (slot `1b`) after the give — the same slot that refuses
+a `request` is invisible to the give, which is the slice's whole point — and the chest's
+reading moves 64 → **0** while the player's stone moves 0 → **64** for exactly **100** FE.
+The single give then drains exactly one (chest 3 → 2, buffer 4,900 → 4,800, player 64 →
+65), a kind nothing holds charges nothing, and the 99-FE leg is the fail-capable price
+check (`costs 100`, chest untouched). `GIVE_SELFTEST=1` inverts the first assertion and
+the run ends `FAIL:` + `EXIT:1`.
+
+### Deviations this slice adds
+
+1. **The match is item and components, not the item id alone.** Upstream's
+   `isItemEqual` is `ItemStack.isSameItem`, so its give pulls *any* variant of the item
+   (an enchanted book of any enchantment, a potion of any effect). The port keeps the
+   request path's `ItemResource` match, so a click never hands back a different potion or
+   enchantment than the one asked for; for the plain stacks the list is built from the two
+   agree. A deliberate looseness upstream, not a defect: recorded as a deviation, not
+   "fixed".
+2. **A give with no player is refused.** Upstream's signature takes a `Player`; a command
+   can come from the console. The port refuses that source before pulling, because the
+   path has no out slot to keep the stack in — the alternative would destroy items.
+   (Slice 7's out-slot fallback stays `blocked(no console source)`; the give has no
+   fallback by design.)
+3. **One transaction for walk + give.** Upstream extracts and gives slot by slot, so a
+   give the player's inventory refuses could lose a stack. The port's give is
+   all-or-nothing: a refused give aborts the walk.
+4. **The overflow is thrown** (`give_stack` is `/give`: what does not fit is thrown from
+   the player's eyes), where upstream's `giveToPlayer` does the same
+   (`spawnAtLocation(stack, 1.05f)`) — the one place the two agree exactly.
+
+### Coverage (the families this slice changes)
+
+| Family | State |
+|---|---|
+| `/rftoolsstorage give <pos> <item> [single]`, its parsed reply | **tested** — `gave 64 minecraft:stone (4900/50000 FE)`, `gave 1 … (4800/…)`, `nothing to give for …`, the price line `costs 100` (`e2e-give.log`) |
+| the whole price: one item or a stack costs `rfPerRequest` | **tested** — 100 for the stack and 100 for `single` in game; `a_give_is_the_full_price…` |
+| the amount: `single` → 1, no flag → the item's stack size | **tested** — chest 3 → 2 and player 64 → 65; `a_give_is_the_full_price…` |
+| no out slot: the guard and the fallback are absent | **tested** — the dirt the request path refuses on is still there after the give, and the give still works (`e2e-give.log`) |
+| straight into the player (no out slot write) | **tested** — player 0 → 64, chest 64 → 0, out slot unchanged |
+| charge only when something came out | **tested** — the dirt give leaves the buffer at 4,800; the 99-FE give changes nothing |
+| the buffer check before the walk, with the price | **tested** — `costs 100, have 99`, chest untouched |
+| a non-scanner is refused | **tested** — `minecraft:chest: not a storage scanner` |
+| a console source with no player | **not exercised** — the harness always has an acting player; refused by design (deviation 2) |
+| the GUI list widget, its search/sort/compact/cycle, `injectStackFromScreen`, the storage control module, the remote/tablet variant, XNet settings, the claimed-land check | **not ported** (later slices / `blocked(no permission query)`) |
+
+### Traps this slice paid for
+
+1. **A `/data merge block … {Items: […]}` writes the list, not the slot.** Seeding one
+   entry with `{Slot: 1b, …}` leaves it at **`Items[0]`** carrying `Slot: 1b`; reading
+   `Items[1].id` finds nothing and the first run failed with *"the out slot holds '',
+   expected the request counterfactual's dirt"* although the request guard could see it.
+   Read the list position (and assert `Items[0].Slot` = `1b`), never the slot number as an
+   index.
+2. **The scanner's own slots must be empty while a give phase counts a chest.** The tick
+   runs during every `ctl wait`; a stack in the in/auto slot would be routed into the same
+   chest. `seed_slots "$SX" … ''` clears the container before the single-item phase.
+3. **The give phase must not clear the out slot before the first give** — that dirt is the
+   differential against the request path. It is cleared only after the stack give is
+   asserted.
+4. **`GIVE_SELFTEST` belongs right after the first assertion**, not at the end: the later
+   phases need the state the give produced, and the inverted leg must fail on *this*
+   slice's numbers (chest 64 → 0, 100 FE), not on a later phase's.
+5. **The package version is what forces the launcher to recompile.** After the bump the
+   launcher's `native-build` printed `Compiling rftoolsstorage (1 of 1)` and a new build
+   tag; a leg without the bump can run the cached previous package (the slice 8 trap the
+   brief named).
+
 ## Verification
 
 Skills: superpowers/using-superpowers, brainstorming, writing-plans, test-driven-development, systematic-debugging, verification-before-completion; BeautifulRust/rust-best-practices
@@ -1331,6 +1502,28 @@ Skills: superpowers/using-superpowers, brainstorming, writing-plans, test-driven
 Full evidence in [`VALIDATION.md`](VALIDATION.md); the e2e logs are in
 `ports/_shared/evidence/rftoolsstorage-e2e/` (the game legs) and
 `ports/_shared/evidence/rftoolsstorage/` (the ladder, package and fits).
+
+**0.2.8 — the scanner's give-from-screen path (2026-11-22, pin `0a875da`)**
+
+| Step | Command | Result |
+|---|---|---|
+| Red proof | `cargo test` with `give_price`/`give_amount`/the two lines stubbed | **FAILED. 35 passed; 2 failed**, `TEST_EXIT:101` (`slice8-red.log`); quoted above |
+| Runtime + glue tests | `cargo test` | **37 passed**, 0 failed (`sdk-test.log`, `slice8-test.log`, `TEST_EXIT:0`) |
+| Lints | `cargo clippy --all-targets -- -D warnings` | `CLIPPY_EXIT:0`, 0 warnings (`sdk-clippy.log`, `slice8-clippy.log`) |
+| Formatting | `rustfmt --edition 2024 --check src/{lib,support,runtime}.rs` | `FMT_EXIT:0` (`slice8-fmt.log`) |
+| SDK gate | `cargo horizon-mod check` | `TREE_CHECK_EXIT:0` — *"…uses 531 items of the API (5 Part kinds, 2 capabilitys, 146 fields or variants, 18 hooks, 52 hook arguments, 2 macros, 162 methods, 29 traits, 115 types). Made for 0a875da."* (`slice8-tree-check.log`) |
+| Package | `rm -f Cargo.lock && cargo horizon-mod build`, twice | **83,938 B**, SHA-256 `150e9784930d2ce7e5ee010219587338bee217b188f37d77ec63e4a6da4ddec8`, **`cmp`-identical** (`slice8-build-1.log`, `slice8-build-2.log`) |
+| Package check | `cargo horizon-mod check rftoolsstorage.hmod` | `rftoolsstorage 0.2.8 (native-mod, format native-1/0a875da…/e59da90…, for 26.3)`, **83,938 bytes**, `150e9784…ddec8`, `CHECK_EXIT:0` (`sdk-check.log`, `slice8-check.log`) |
+| Entries | `unzip -l rftoolsstorage.hmod` | **67 files**, no `Cargo.lock`; `src/runtime.rs` byte-identical in tree and package (`2bf370d9a5a9`) (`sdk-sha256.txt`) |
+| Fits the pin | `cargo horizon-mod fits rftoolsstorage.hmod --build 0a875da` | `0a875da  made for`, `FITS_PIN_EXIT:0` (`sdk-fits.log`, `slice8-fits.log`) |
+| Fits another build | `cargo horizon-mod fits rftoolsstorage.hmod --build 0b14f8a` | `0b14f8a  fits`, `FITS_OTHER_EXIT:0` (`sdk-fits.log`, `slice8-fits.log`) |
+| Launcher build | `BUILD_LOCAL=1 launcher-game.sh build rftoolsstorage` | `Compiling rftoolsstorage (1 of 1)`, build tag `native-0a875da-6ba7644ca185`, `LAUNCHER_BUILD_EXIT:0` (`slice8-launcher-build.log`) |
+| In game | `build-slot.sh run --step e2e -- bash ports/rftoolsstorage/tools/e2e.sh` | **PASS** + `EXIT:0` (`e2e-give.log`) |
+| Control | the same rig on the Nightly without the package | **FAIL** + `EXIT:1` (`e2e-give-control.log`) |
+| Selftest | `GIVE_SELFTEST=1` (the give must not have handed the stone over) | **FAIL** + `EXIT:1` (`e2e-give-selftest.log`) |
+| e2e gate | `check-e2e-logs.py rftoolsstorage-e2e --strict` | `logs=19 ok=19`, exit 0 |
+| Package gate | `verify-sdk-package.py rftoolsstorage` | `1/1 package(s) verified`, exit 0 |
+| Skills gate | `check-skills.py --notes ports/rftoolsstorage --strict` | `Skills line present`, PASS |
 
 **0.2.6 — the scanner's item slots and its inject tick (2026-11-22, pin `0a875da`)**
 

@@ -690,6 +690,46 @@ pub fn request_out_slot_line(stored: u32, held: &str) -> String {
     format!("the out slot holds {held}; request refused ({stored}/{SCANNER_MAX_ENERGY} FE)")
 }
 
+// --- the scanner's give-from-screen path (slice 8) ------------------------
+
+/// What a give hands over: the storage control screen module's click gives one item
+/// while the player sneaks and a whole stack otherwise
+/// (`GuiStorageScanner`-style `player.isShiftKeyDown()`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GiveAmount {
+    /// One item (`single`).
+    Single,
+    /// As many as the item stacks to.
+    Stack,
+}
+
+/// What a give costs: `rfPerRequest`, the whole price, whether it hands over one item
+/// or a stack. `giveToPlayerFromScreen` spends exactly one `rfPerRequest` after a give
+/// that took something; the tenth-price mode belongs to `requestStack` alone.
+pub fn give_price() -> u32 {
+    SCANNER_RF_PER_REQUEST
+}
+
+/// How many items a give asks for: `cnt = single ? 1 : stack.getMaxStackSize()`,
+/// clamped the way every request is (one stack, never past [`SLOT_LIMIT`]).
+pub fn give_amount(mode: GiveAmount, max_stack: u32) -> u32 {
+    match mode {
+        GiveAmount::Single => 1,
+        GiveAmount::Stack => max_stack.clamp(1, SLOT_LIMIT),
+    }
+}
+
+/// `gave <n> <item> (<after>/<max> FE)`.
+pub fn gave_line(given: u32, item: &str, after: u32) -> String {
+    format!("gave {given} {item} ({after}/{SCANNER_MAX_ENERGY} FE)")
+}
+
+/// The refusal when the scanned inventories hold none of the given kind: upstream's
+/// give says nothing at all, and a command must answer.
+pub fn give_nothing_line(stored: u32, item: &str) -> String {
+    format!("nothing to give for {item} ({stored}/{SCANNER_MAX_ENERGY} FE)")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1333,6 +1373,57 @@ mod tests {
         assert_eq!(
             request_out_slot_line(5_000, "minecraft:dirt"),
             "the out slot holds minecraft:dirt; request refused (5000/50000 FE)"
+        );
+    }
+
+    #[test]
+    fn a_give_is_the_full_price_whether_it_hands_over_one_item_or_a_stack() {
+        // `giveToPlayerFromScreen`: one `consumeEnergy(rfPerRequest)` after a give that
+        // took something, whatever `single` is; `cnt = {single ? 1 : the stack size}`.
+        assert_eq!(give_price(), 100, "a give is rfPerRequest");
+        assert_eq!(
+            give_price(),
+            request_price(false),
+            "a give costs what a whole-stack request costs"
+        );
+        assert_ne!(
+            give_price(),
+            request_price(true),
+            "a give has no tenth-price mode"
+        );
+        assert_eq!(give_amount(GiveAmount::Single, 64), 1, "single is one item");
+        assert_eq!(give_amount(GiveAmount::Stack, 64), 64, "a whole stack");
+        assert_eq!(
+            give_amount(GiveAmount::Stack, 16),
+            16,
+            "the item's own stack size"
+        );
+        assert_eq!(
+            give_amount(GiveAmount::Stack, 999),
+            64,
+            "never past SLOT_LIMIT"
+        );
+        assert_eq!(
+            request_charge(5_000, give_price(), 64),
+            RequestCharge::Paid(4_900),
+            "a give of 64 off 5,000 leaves 4,900"
+        );
+        assert_eq!(
+            request_charge(99, give_price(), 64),
+            RequestCharge::NoPower,
+            "the price is checked before anything is pulled"
+        );
+    }
+
+    #[test]
+    fn the_give_reply_names_what_was_given_or_refuses_an_empty_walk() {
+        assert_eq!(
+            gave_line(64, "minecraft:stone", 4_900),
+            "gave 64 minecraft:stone (4900/50000 FE)"
+        );
+        assert_eq!(
+            give_nothing_line(4_800, "minecraft:dirt"),
+            "nothing to give for minecraft:dirt (4800/50000 FE)"
         );
     }
 }

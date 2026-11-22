@@ -1,6 +1,6 @@
 id = "rftoolsstorage"
 name = "RFTools Storage"
-version = "0.2.7"
+version = "0.2.8"
 description = """RFTools Storage for Horizon: the modular storage block and the storage scanner. A
 storage module in the storage's card slot sets its capacity (tier 1: 100 slots, one item kind a slot,
 64 a slot), and the block stores nothing until it is locked. A right click opens the storage's own
@@ -13,7 +13,9 @@ or gives a stack back. The storage scanner reads the inventories in a box around
 (/rftoolsstorage radius <pos> <n>), and its tick pushes the stacks in its input slots (the player's
 and the automation slot) into those inventories, a stack a tick at a time. /rftoolsstorage request
 <pos> <item> [<count>] pulls a kind out of those inventories and gives it to the player, a tenth of
-the scan's price for a count and the whole price for a stack. /rftoolsstorage info|lock
+the scan's price for a count and the whole price for a stack, while /rftoolsstorage give
+<pos> <item> [single] hands one item (or a whole stack) straight to the player for the whole
+price without the out slot. /rftoolsstorage info|lock
 remain the storage's readout and the operator's lock; every command needs an operator or a player
 within 8 blocks."""
 authors = ["McJty"]

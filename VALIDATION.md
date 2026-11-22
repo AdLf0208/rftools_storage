@@ -2,12 +2,13 @@
 
 Slice 1 (the `modular_storage` block with a tier-1 storage module).
 
-**Version 0.2.7 is the current SDK package (2026-11-22):** one flat `.hmod`, SDK
+**Version 0.2.8 is the current SDK package (2026-11-22):** one flat `.hmod`, SDK
 nightly `0a875da91dbb0fdcb7ba8c42c11341aa229af51a`, mixins
-`e59da9094f0c2fdda6c627fe9eff22dec6a906f0`. **§0f is this slice's evidence (the
-scanner's request path) and is where the in-game legs are**; §0e is slice 6's (the
-scanner's slots and inject tick), §0d slice 5's (the scanner's block and scan),
-§0c slice 3's (the card slot), §0b slice 2's (the menu) and §0 the 0.2.0 migration;
+`e59da9094f0c2fdda6c627fe9eff22dec6a906f0`. **§0h is this slice's evidence (the
+scanner's give-from-screen path) and is where the in-game legs are**; §0f is
+slice 7's (the request path), §0e slice 6's (the scanner's slots and inject tick),
+§0d slice 5's (the scanner's block and scan), §0c slice 3's (the card slot), §0b
+slice 2's (the menu) and §0 the 0.2.0 migration;
 §1–§6 are the retired 0.1.0 `.hnmod` run (pin `1d63e0a5…` / `5a64af93…`), kept as
 history. The 0.2.x `tools/e2e.sh` runs on a launcher-built game
 (`ports/tools/launcher-game.sh`).
@@ -15,6 +16,67 @@ history. The 0.2.x `tools/e2e.sh` runs on a launcher-built game
 Every command below ran through `ports/tools/build-slot.sh` (a lease per step);
 in 0.1.0 compile steps forwarded to the second machine and game legs ran locally
 because the script uses `--offscreen`.
+
+## 0h. The scanner's give-from-screen path — version 0.2.8 (2026-11-22)
+
+Slice 8: `StorageScannerTileEntity.giveToPlayerFromScreen` reached as
+`/rftoolsstorage give <pos> <item> [single]` — the **whole** `rfPerRequest` for one
+item or a stack, the item's own stack size (or exactly one with `single`), the scan
+walk's pull, and the stack handed straight to the player with **no out slot at all**
+(no guard, no fallback). The slice plan, with the gap line and the upstream reading,
+is `ports/_shared/evidence/rftoolsstorage/SLICE-8-PLAN.md`. Ladder and package logs:
+`ports/_shared/evidence/rftoolsstorage/`; game legs:
+`ports/_shared/evidence/rftoolsstorage-e2e/`.
+
+| Step | Command | Result | Log |
+|---|---|---|---|
+| red proof | `cargo test` with `give_price`, `give_amount` and the two reply lines stubbed | **FAILED. 35 passed; 2 failed**, `TEST_EXIT:101` | `slice8-red.log` |
+| tests | `cargo test` | `running 37 tests` → **37 passed**, 0 failed, `TEST_EXIT:0` | `sdk-test.log`, `slice8-test.log` |
+| lints | `cargo clippy --all-targets -- -D warnings` | `Finished`, **CLIPPY_EXIT:0**, 0 warnings | `sdk-clippy.log`, `slice8-clippy.log` |
+| format | `rustfmt --edition 2024 --check src/{lib,support,runtime}.rs` | `FMT_EXIT:0` | `slice8-fmt.log` |
+| SDK gate | `cargo horizon-mod check` | **TREE_CHECK_EXIT:0** — *"… 531 items of the API (5 Part kinds, 2 capabilitys, 146 fields or variants, 18 hooks, 52 hook arguments, 2 macros, 162 methods, 29 traits, 115 types). Made for 0a875da."* | `slice8-tree-check.log` |
+| package | `rm -f Cargo.lock && cargo horizon-mod build`, twice | **83,938 B**, SHA-256 `150e9784930d2ce7e5ee010219587338bee217b188f37d77ec63e4a6da4ddec8`, **`cmp`-identical** (`CMP:identical`) | `slice8-build-1.log`, `slice8-build-2.log` |
+| package check | `cargo horizon-mod check rftoolsstorage.hmod` | `rftoolsstorage 0.2.8 (native-mod, format native-1/0a875da…/e59da90…, for 26.3)`, **83,938 bytes**, `150e9784…ddec8`, **CHECK_EXIT:0** | `sdk-check.log`, `slice8-check.log` |
+| entries | `unzip -l rftoolsstorage.hmod` | **67 files**, no `Cargo.lock`; `src/runtime.rs` byte-identical in tree and package (`2bf370d9a5a9`) | `sdk-sha256.txt` |
+| fits, the pin | `cargo horizon-mod fits rftoolsstorage.hmod --build 0a875da` | `0a875da  made for`, **FITS_PIN_EXIT:0** | `sdk-fits.log`, `slice8-fits.log` |
+| fits, another build | `cargo horizon-mod fits rftoolsstorage.hmod --build 0b14f8a` | `0b14f8a  fits`, **FITS_OTHER_EXIT:0** | `sdk-fits.log`, `slice8-fits.log` |
+| launcher build | `BUILD_LOCAL=1 ports/tools/launcher-game.sh build rftoolsstorage` | `Compiling rftoolsstorage (1 of 1)`, tag `native-0a875da-6ba7644ca185`, **LAUNCHER_BUILD_EXIT:0** | `slice8-launcher-build.log` |
+| in game | `build-slot.sh run --job W1-rftoolsstorage --step e2e -- bash ports/rftoolsstorage/tools/e2e.sh` | **PASS** + `EXIT:0` | `rftoolsstorage-e2e/e2e-give.log` |
+| control | the same leg on the Nightly **without** the package | **FAIL** + `EXIT:1` (`{"error":"unknown item rftoolsstorage:storage_scanner"}`) | `e2e-give-control.log` |
+| selftest (this slice) | `GIVE_SELFTEST=1` (asserts the give did not hand the stone over) | **FAIL** + `EXIT:1` — *"the give handed 64 stone to the player (chest 64 -> 0, player holds 64) and charged 100 FE (5000 -> 4900) …"* | `e2e-give-selftest.log` |
+| e2e gate | `python3 ports/tools/check-e2e-logs.py rftoolsstorage-e2e --strict` | `logs=19  ok=19`, exit 0 | — |
+| package gate | `python3 ports/tools/verify-sdk-package.py rftoolsstorage` | `1/1 package(s) verified`, exit 0 | — |
+| skills gate | `python3 ports/tools/check-skills.py --notes ports/rftoolsstorage --strict` | PASS | — |
+
+The default leg's give phases (abridged; the log has every `ctl` reply):
+
+```
+== THE GIVE PATH: /rftoolsstorage give <pos> minecraft:stone hands the stack straight to the player ==
+before the give: chest 64 stone, energy 5000, player stone 0, out slot 'minecraft:dirt' (Slot 1b)
+give stone: rftoolsstorage:storage_scanner: gave 64 minecraft:stone (4900/50000 FE)
+after the give: chest 0 stone, energy 4900, player stone 64, out slot 'minecraft:dirt' (Slot 1b)
+== a give with single hands one item and drains one ==
+give single stone: rftoolsstorage:storage_scanner: gave 1 minecraft:stone (4800/50000 FE)
+after the single give: chest 2 stone, energy 4800, player stone 65
+== a give for a kind nothing holds refuses and charges nothing ==
+give dirt: rftoolsstorage:storage_scanner: nothing to give for minecraft:dirt (4800/50000 FE)
+after the refused dirt give: chest 2 stone, energy 4800, player dirt 0
+== counterfactual: buffer 99 refuses the give with the price line and leaves the chest alone ==
+give stone at 99 FE: rftoolsstorage:storage_scanner: not enough power for 64 minecraft:stone: costs 100, have 99/50000 FE
+after the 99-FE refusal: chest 2 stone, energy 99, player stone 65
+== a give on a block that is not a scanner is refused before anything is read ==
+give on the chest: minecraft:chest: not a storage scanner
+```
+
+The out slot is the differential: the same dirt that makes a `request` answer *"the out
+slot holds minecraft:dirt; request refused"* is not even consulted by the give, which is
+the `giveToPlayerFromScreen` path the slice carries. The inverted assertion:
+
+```
+== GIVE_SELFTEST: assert the give did NOT hand the stone over (must fail) ==
+FAIL: the give handed 64 stone to the player (chest 64 -> 0, player holds 64) and charged 100 FE (5000 -> 4900), so this inverted assertion fails as it must
+EXIT:1
+```
 
 ## 0f. The scanner's request path — version 0.2.7 (2026-11-22)
 

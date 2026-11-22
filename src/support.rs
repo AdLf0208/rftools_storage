@@ -30,20 +30,21 @@ use mod_api::{
     ITEMS, Identifier, InteractionResult, ItemKey, ItemPart, ItemResource, ItemStack, LevelHost,
     LevelRef, LevelSide, MenuButtonEvent, MenuContainer, MenuPart, MenuSlotRulesEvent,
     ModContainer, OnBlockPlacedByEvent, OnDestroyedByPlayerEvent, PlayerContainerOpenEvent,
-    RegisterCommandsEvent, Registrar, RegistrationContext, RightClickBlockEvent,
+    PlayerRef, RegisterCommandsEvent, Registrar, RegistrationContext, RightClickBlockEvent,
     RunModCommandEvent, Screen, ScreenClickEvent, ScreenDrawEvent, ScreenEvent, ServerHost, Tag,
     Text, Transaction,
 };
 
 use crate::runtime::{
-    Found, Kind, LEVEL_ADMINS, LockPress, RequestCharge, SCANNER_AUTO_SLOT, SCANNER_IN_SLOT,
-    SCANNER_MAX_ENERGY, SCANNER_OUT_SLOT, SCANNER_RECEIVE_PER_TICK, SCANNER_RF_PER_INSERT,
-    SCANNER_SLOTS, SLOT_LIMIT, STORAGE_SCANNER, Slot, Storage, card_accepts, carried_slot_in,
-    clamp_radius, inject_plan, injectable_at, is_storage_scanner, lock_press, may_inspect,
-    merge_counts, module_id, module_tier, no_power_line, out_slot_room, request_amount,
-    request_charge, request_line, request_no_power_line, request_nothing_line,
-    request_out_slot_line, request_price, restored_count, scan_line, scan_positions,
-    scanner_radius, slot_accepts, spend_power,
+    Found, GiveAmount, Kind, LEVEL_ADMINS, LockPress, RequestCharge, SCANNER_AUTO_SLOT,
+    SCANNER_IN_SLOT, SCANNER_MAX_ENERGY, SCANNER_OUT_SLOT, SCANNER_RECEIVE_PER_TICK,
+    SCANNER_RF_PER_INSERT, SCANNER_SLOTS, SLOT_LIMIT, STORAGE_SCANNER, Slot, Storage, card_accepts,
+    carried_slot_in, clamp_radius, gave_line, give_amount, give_nothing_line, give_price,
+    inject_plan, injectable_at, is_storage_scanner, lock_press, may_inspect, merge_counts,
+    module_id, module_tier, no_power_line, out_slot_room, request_amount, request_charge,
+    request_line, request_no_power_line, request_nothing_line, request_out_slot_line,
+    request_price, restored_count, scan_line, scan_positions, scanner_radius, slot_accepts,
+    spend_power,
 };
 
 /// The block this slice implements, exactly as the content declares it.
@@ -1665,10 +1666,7 @@ fn pull_request(
     let Some(level) = host.level(host.dimension()) else {
         return 0;
     };
-    let targets: Vec<[i32; 3]> = scan_positions(own, radius)
-        .into_iter()
-        .filter(|at| injectable_at(own, *at, scanner_stands(&*host, level, *at)))
-        .collect();
+    let targets = scan_targets(&*host, level, own, radius);
     host.transaction(|host, tx| -> Result<u32, ()> {
         let mut pulled = 0_u32;
         for at in &targets {
@@ -1684,6 +1682,115 @@ fn pull_request(
         Ok(pulled)
     })
     .unwrap_or(0)
+}
+
+/// The positions a pull may take from: the scanner's box in scan order, its own cell
+/// and another storage scanner skipped (`injectable_at`, upstream's
+/// `findInventories`).
+fn scan_targets(host: &dyn Host, level: LevelRef, own: [i32; 3], radius: i32) -> Vec<[i32; 3]> {
+    scan_positions(own, radius)
+        .into_iter()
+        .filter(|at| injectable_at(own, *at, scanner_stands(host, level, *at)))
+        .collect()
+}
+
+/// `/rftoolsstorage give <pos> <item> [single]`: the storage control screen module's
+/// click on a listed stack (`StorageControlScreenModule` →
+/// `StorageScannerTileEntity.giveToPlayerFromScreen`) reached through a command.
+///
+/// The reference's order is kept: the **full** price (`rfPerRequest`, even for a
+/// single item) before anything is touched, the scan walk's pull, and the charge only
+/// when something came out. There is **no out slot** on this path at all — no guard
+/// and no fallback: the pulled stack goes straight into the player's inventory (as
+/// `/give`: what does not fit is thrown from their eyes), so a source with no player
+/// is refused before a single item leaves an inventory.
+fn give_readout(
+    host: &mut dyn ServerHost,
+    source: &CommandSource,
+    pos: [i32; 3],
+    requested: &ItemStack,
+    mode: GiveAmount,
+) -> String {
+    let block = block_id_at(&*host, pos);
+    if !is_storage_scanner(&block) {
+        return format!("{block}: not a storage scanner");
+    }
+    let Some(entity) = scanner_entity(&*host, pos) else {
+        return format!("{block}: not a storage scanner");
+    };
+    let CommandSource::Player { player, .. } = source else {
+        return format!(
+            "{block}: a give hands the stack to the player; there is no console source"
+        );
+    };
+    let data = entity.data(&*host);
+    let stored = saved_count(data.as_ref(), KEY_ENERGY);
+    let radius = saved_radius(data.as_ref());
+    let max_stack = max_stack_of(&*host, requested);
+    let item = requested.item().id(&*host);
+    let wanted = give_amount(mode, max_stack);
+    let price = give_price();
+    if stored < price {
+        return format!(
+            "{block}: {}",
+            request_no_power_line(stored, price, wanted, &item)
+        );
+    }
+    let resource = ItemResource::of(requested);
+    let Some(pulled) = pull_to_player(host, pos, radius, &resource, wanted, *player) else {
+        return format!("{block}: {}", give_nothing_line(stored, &item));
+    };
+    let RequestCharge::Paid(after) = request_charge(stored, price, pulled) else {
+        return format!("{block}: {}", give_nothing_line(stored, &item));
+    };
+    let mut spent = Compound::new();
+    spent.insert(
+        KEY_ENERGY.into(),
+        Tag::Int(i32::try_from(after).unwrap_or(i32::MAX)),
+    );
+    let _ = entity.merge_data(&mut *host, spent);
+    format!("{block}: {}", gave_line(pulled, &item, after))
+}
+
+/// Pulls up to `amount` of `resource` out of the scanned inventories straight into
+/// `player`, in **one** transaction: a give the player refuses aborts the whole walk,
+/// so no inventory loses a stack that never reached them. `None` when the level is
+/// gone, or when the walk pulled nothing.
+fn pull_to_player(
+    host: &mut dyn ServerHost,
+    own: [i32; 3],
+    radius: i32,
+    resource: &ItemResource,
+    amount: u32,
+    player: PlayerRef,
+) -> Option<u32> {
+    if amount == 0 {
+        return None;
+    }
+    let level = host.level(host.dimension())?;
+    let targets = scan_targets(&*host, level, own, radius);
+    host.transaction(|host, tx| -> Result<u32, ()> {
+        let mut pulled = 0_u32;
+        for at in &targets {
+            if pulled >= amount {
+                break;
+            }
+            let Some(handler) = level.capability(host, &ITEMS, *at, None) else {
+                continue;
+            };
+            pulled =
+                pulled.saturating_add(handler.extract_any(host, tx, resource, amount - pulled));
+        }
+        if pulled == 0 {
+            return Ok(0);
+        }
+        // A give only pulls what it can hand over: a stack the game cannot build
+        // refunds the walk rather than dropping what the inventories gave up.
+        let stack = resource.to_stack(pulled).ok_or(())?;
+        player.give_stack(host, stack).map_err(|_| ())?;
+        Ok(pulled)
+    })
+    .ok()
 }
 
 /// `/rftoolsstorage radius <pos> <radius>`: the GUI's radius slider, which this
@@ -1776,10 +1883,7 @@ fn inject_stack(
 ) -> Option<ItemStack> {
     let resource = ItemResource::of(&stack);
     let total = stack.count();
-    let targets: Vec<[i32; 3]> = scan_positions(own, radius)
-        .into_iter()
-        .filter(|at| injectable_at(own, *at, scanner_stands(&*host, level, *at)))
-        .collect();
+    let targets = scan_targets(&*host, level, own, radius);
     let outcome = host.transaction(|host, tx| -> Result<Option<ItemStack>, ()> {
         let mut moved = 0_u32;
         for at in &targets {
@@ -1847,6 +1951,9 @@ pub(crate) fn on_register_commands(event: &mut RegisterCommandsEvent<'_>) {
     event.commands.push(Command::new(
         "rftoolsstorage request <pos:block_pos> <item:item> [count:integer]",
     ));
+    event.commands.push(Command::new(
+        "rftoolsstorage give <pos:block_pos> <item:item> [single:word]",
+    ));
 }
 
 /// The `/rftoolsstorage` commands' bodies (`run_mod_command`).
@@ -1863,7 +1970,7 @@ pub(crate) fn on_run_mod_command(
     let Some(CommandArgumentValue::BlockPos(pos)) = event.command.argument("pos") else {
         feedback(
             host,
-            "usage: /rftoolsstorage info|lock|scan|radius <x> <y> <z>",
+            "usage: /rftoolsstorage info|lock|scan|radius|request|give <x> <y> <z> …",
         );
         return Flow::Cancel;
     };
@@ -1950,6 +2057,27 @@ pub(crate) fn on_run_mod_command(
                 Some(_) => None,
             };
             request_readout(host, event.source, pos, requested, explicit)
+        }
+        "give" => {
+            let Some(requested) = item_argument!(event.command.argument("item")) else {
+                feedback(
+                    host,
+                    "usage: /rftoolsstorage give <x> <y> <z> <item> [single]",
+                );
+                return Flow::Cancel;
+            };
+            let mode = match event.command.argument("single") {
+                None => GiveAmount::Stack,
+                Some(CommandArgumentValue::String(flag)) if flag == "single" => GiveAmount::Single,
+                Some(_) => {
+                    feedback(
+                        host,
+                        "usage: /rftoolsstorage give <x> <y> <z> <item> [single]",
+                    );
+                    return Flow::Cancel;
+                }
+            };
+            give_readout(host, event.source, pos, requested, mode)
         }
         "radius" => {
             let Some(CommandArgumentValue::Integer(wanted)) = event.command.argument("radius")
