@@ -730,6 +730,75 @@ pub fn give_nothing_line(stored: u32, item: &str) -> String {
     format!("nothing to give for {item} ({stored}/{SCANNER_MAX_ENERGY} FE)")
 }
 
+// --- the scanner's insert-from-screen path (slice 9) ----------------------
+
+/// What a screen insert costs: one `rfPerInsert`, and **only when the stack the
+/// player handed over went in whole**. `injectStackFromScreen` charges after
+/// `stack.isEmpty()`; a partial insert is free, its remainder staying with the
+/// player.
+pub fn insert_price() -> u32 {
+    SCANNER_RF_PER_INSERT
+}
+
+/// How many items the screen insert asks for: the stack the player hands over, or
+/// the command's explicit count capped at that stack. A count of 0 inserts
+/// nothing, as a request of 0 pulls nothing.
+pub fn insert_amount(explicit: Option<u32>, held: u32) -> Option<u32> {
+    match explicit {
+        Some(0) => None,
+        Some(count) => Some(count.min(held)),
+        None => Some(held),
+    }
+}
+
+/// What an insert did with the buffer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InsertCharge {
+    /// The buffer is below `rfPerInsert`: nothing leaves the player and nothing is
+    /// spent.
+    NoPower,
+    /// The stack did not empty: free.
+    Free(u32),
+    /// The whole stack emptied: one `rfPerInsert`, the buffer after it.
+    Paid(u32),
+}
+
+/// The insert's charge rule: the buffer must cover `rfPerInsert` before the walk,
+/// and only a walk that emptied the stack spends it.
+pub fn insert_charge(stored: u32, price: u32, emptied: bool) -> InsertCharge {
+    if stored < price {
+        return InsertCharge::NoPower;
+    }
+    if emptied {
+        return InsertCharge::Paid(stored - price);
+    }
+    InsertCharge::Free(stored)
+}
+
+/// `inserted <n> <item> (<after>/<max> FE)`.
+pub fn insert_line(inserted: u32, item: &str, after: u32) -> String {
+    format!("inserted {inserted} {item} ({after}/{SCANNER_MAX_ENERGY} FE)")
+}
+
+/// The answer for a partial insert: what went in, of what was handed over, and
+/// that the remainder is still the player's (and free).
+pub fn insert_partial_line(inserted: u32, wanted: u32, item: &str, stored: u32) -> String {
+    format!(
+        "inserted {inserted} of {wanted} {item}; the rest stays with you, no charge ({stored}/{SCANNER_MAX_ENERGY} FE)"
+    )
+}
+
+/// The refusal when the player holds none of the item the command names.
+pub fn insert_nothing_line(stored: u32, item: &str) -> String {
+    format!("nothing to insert for {item} ({stored}/{SCANNER_MAX_ENERGY} FE)")
+}
+
+/// The refusal when the scanner's box holds no routable inventory: upstream's
+/// `checkForRoutableInventories` ("There are no routable inventories!").
+pub fn no_routable_line(stored: u32) -> String {
+    format!("there are no routable inventories ({stored}/{SCANNER_MAX_ENERGY} FE)")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1424,6 +1493,74 @@ mod tests {
         assert_eq!(
             give_nothing_line(4_800, "minecraft:dirt"),
             "nothing to give for minecraft:dirt (4800/50000 FE)"
+        );
+    }
+
+    #[test]
+    fn a_screen_insert_costs_one_rf_per_insert_and_only_when_the_stack_emptied() {
+        // `injectStackFromScreen`: `if (getStoredPower() < rfPerInsert) return stack;`
+        // then `stack = injectStackInternal(...); if (stack.isEmpty())
+        // consumeEnergy(rfPerInsert);` — a partial insert spends nothing.
+        assert_eq!(insert_price(), 20, "an insert is rfPerInsert");
+        assert_eq!(
+            insert_charge(5_000, insert_price(), true),
+            InsertCharge::Paid(4_980),
+            "the whole stack emptied -> one rfPerInsert"
+        );
+        assert_eq!(
+            insert_charge(5_000, insert_price(), false),
+            InsertCharge::Free(5_000),
+            "a partial insert is free"
+        );
+        assert_eq!(
+            insert_charge(19, insert_price(), true),
+            InsertCharge::NoPower,
+            "19 FE cannot pay one insert, and the check is before the walk"
+        );
+        assert_eq!(
+            insert_charge(20, insert_price(), true),
+            InsertCharge::Paid(0),
+            "20 FE pays exactly one insert"
+        );
+        assert_eq!(
+            insert_amount(None, 64),
+            Some(64),
+            "no count inserts the stack the player hands over"
+        );
+        assert_eq!(
+            insert_amount(Some(10), 64),
+            Some(10),
+            "an explicit count inserts that many"
+        );
+        assert_eq!(
+            insert_amount(Some(200), 64),
+            Some(64),
+            "never more than the stack the player holds"
+        );
+        assert_eq!(
+            insert_amount(Some(0), 64),
+            None,
+            "a count of 0 inserts nothing"
+        );
+    }
+
+    #[test]
+    fn the_insert_reply_names_what_went_in_and_what_did_not() {
+        assert_eq!(
+            insert_line(64, "minecraft:stone", 4_980),
+            "inserted 64 minecraft:stone (4980/50000 FE)"
+        );
+        assert_eq!(
+            insert_partial_line(0, 64, "minecraft:stone", 5_000),
+            "inserted 0 of 64 minecraft:stone; the rest stays with you, no charge (5000/50000 FE)"
+        );
+        assert_eq!(
+            insert_nothing_line(5_000, "minecraft:stone"),
+            "nothing to insert for minecraft:stone (5000/50000 FE)"
+        );
+        assert_eq!(
+            no_routable_line(5_000),
+            "there are no routable inventories (5000/50000 FE)"
         );
     }
 }

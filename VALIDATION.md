@@ -2,13 +2,14 @@
 
 Slice 1 (the `modular_storage` block with a tier-1 storage module).
 
-**Version 0.2.8 is the current SDK package (2026-11-22):** one flat `.hmod`, SDK
+**Version 0.2.9 is the current SDK package (2026-11-22):** one flat `.hmod`, SDK
 nightly `0a875da91dbb0fdcb7ba8c42c11341aa229af51a`, mixins
-`e59da9094f0c2fdda6c627fe9eff22dec6a906f0`. **§0h is this slice's evidence (the
-scanner's give-from-screen path) and is where the in-game legs are**; §0f is
-slice 7's (the request path), §0e slice 6's (the scanner's slots and inject tick),
-§0d slice 5's (the scanner's block and scan), §0c slice 3's (the card slot), §0b
-slice 2's (the menu) and §0 the 0.2.0 migration;
+`e59da9094f0c2fdda6c627fe9eff22dec6a906f0`. **§0i is this slice's evidence (the
+scanner's insert-from-screen path) and is where the in-game legs are**; §0h is
+slice 8's (the give-from-screen path), §0f slice 7's (the request path), §0e
+slice 6's (the scanner's slots and inject tick), §0d slice 5's (the scanner's block
+and scan), §0c slice 3's (the card slot), §0b slice 2's (the menu) and §0 the 0.2.0
+migration;
 §1–§6 are the retired 0.1.0 `.hnmod` run (pin `1d63e0a5…` / `5a64af93…`), kept as
 history. The 0.2.x `tools/e2e.sh` runs on a launcher-built game
 (`ports/tools/launcher-game.sh`).
@@ -16,6 +17,70 @@ history. The 0.2.x `tools/e2e.sh` runs on a launcher-built game
 Every command below ran through `ports/tools/build-slot.sh` (a lease per step);
 in 0.1.0 compile steps forwarded to the second machine and game legs ran locally
 because the script uses `--offscreen`.
+
+## 0i. The scanner's insert-from-screen path — version 0.2.9 (2026-11-22)
+
+Slice 9: `StorageScannerTileEntity.injectStackFromScreen` reached as
+`/rftoolsstorage insert <pos> <item> [count]` — the player's stack pushed into the
+scanned inventories in scan order, `rfPerInsert` (20 FE) charged **only when the
+stack emptied**, `checkForRoutableInventories` refusing a box with no inventory,
+the win checked before the walk and **no out slot at all** (the path is the player's
+inventory). The slice plan, with the gap line and the upstream reading, is
+`ports/_shared/evidence/rftoolsstorage/SLICE-9-PLAN.md`. Ladder and package logs:
+`ports/_shared/evidence/rftoolsstorage/`; game legs:
+`ports/_shared/evidence/rftoolsstorage-e2e/`.
+
+| Step | Command | Result | Log |
+|---|---|---|---|
+| red proof | `cargo test` with `insert_price`, `insert_amount`, `insert_charge` and the four reply lines stubbed | **FAILED. 37 passed; 2 failed**, `TEST_EXIT:101` | `slice9-red.log` |
+| tests | `cargo test` | `running 39 tests` → **39 passed**, 0 failed, `TEST_EXIT:0` (35 runtime + 4 glue) | `sdk-test.log`, `slice9-test.log` |
+| lints | `cargo clippy --all-targets -- -D warnings` | `Finished`, **CLIPPY_EXIT:0**, 0 warnings | `sdk-clippy.log`, `slice9-clippy.log` |
+| format | `rustfmt --edition 2024 --check src/{lib,support,runtime}.rs` | `FMT_EXIT:0` | `slice9-fmt.log` |
+| SDK gate | `cargo horizon-mod check` | **TREE_CHECK_EXIT:0** — *"… 533 items of the API (5 Part kinds, 2 capabilitys, 147 fields or variants, 18 hooks, 52 hook arguments, 2 macros, 163 methods, 29 traits, 115 types). Made for 0a875da."* | `slice9-tree-check.log` |
+| package | `rm -f Cargo.lock && cargo horizon-mod build`, twice | **86,850 B**, SHA-256 `f6db89ae783957109af86c926f3a8db592401b77f39cce7eed5a2763189e46ef`, **`cmp`-identical** | `slice9-build-1.log`, `slice9-build-2.log` |
+| package, reproduced | a third build of the delivered tree `cmp`ed against the delivered file (2026-11-23) | same **86,850 B** / `f6db89ae…46ef`, `CMP:identical` | `slice9-rebuild-cmp.log` |
+| package check | `cargo horizon-mod check rftoolsstorage.hmod` | `rftoolsstorage 0.2.9 (native-mod, format native-1/0a875da…/e59da90…, for 26.3)`, **86,850 bytes**, `f6db89ae…46ef`, **FILE_CHECK_EXIT:0** | `sdk-check.log`, `slice9-check.log` |
+| entries | `unzip -l rftoolsstorage.hmod` | **67 files**, no `Cargo.lock`; `src/runtime.rs` byte-identical in tree and package (`72720fac…d9cb`) | `sdk-sha256.txt` |
+| fits, the pin | `cargo horizon-mod fits rftoolsstorage.hmod --build 0a875da` | `0a875da  made for`, **FITS_EXIT:0** (sha printed in the log) | `sdk-fits.log`, `slice9-fits.log` |
+| fits, another build | `cargo horizon-mod fits rftoolsstorage.hmod --build 0b14f8a` | `0b14f8a  fits`, **FITS_EXIT:0** | `sdk-fits.log`, `slice9-fits.log` |
+| launcher build | `BUILD_LOCAL=1 ports/tools/launcher-game.sh build rftoolsstorage` | `Compiling rftoolsstorage (1 of 1)`, tag `native-0a875da-aa79a9d1a5ef`, **LAUNCHER_BUILD_EXIT:0** | `slice9-launcher-build.log` |
+| in game | `build-slot.sh run --job W1-rftoolsstorage --step e2e -- bash ports/rftoolsstorage/tools/e2e.sh` (`CONTROL_GAME=`) | **PASS** + `EXIT:0` | `rftoolsstorage-e2e/e2e-insert.log` |
+| control | the same leg on the Nightly **without** the package | **FAIL** + `EXIT:1` (`{"error":"unknown item rftoolsstorage:storage_scanner"}`) | `e2e-insert-control.log` |
+| selftest (this slice) | `INSERT_SELFTEST=1` (asserts the insert did not move the stone) | **FAIL** + `EXIT:1` — *"the insert moved 64 stone from the player into the chest (player 64 -> 0, chest 0 -> 64) and charged one rfPerInsert (5000 -> 4980) …"* | `e2e-insert-selftest.log` |
+| e2e gate | `python3 ports/tools/check-e2e-logs.py rftoolsstorage-e2e --strict` | `logs=22  ok=22`, exit 0 | — |
+| package gate | `python3 ports/tools/verify-sdk-package.py rftoolsstorage` | `1/1 package(s) verified`, exit 0 | — |
+| skills gate | `python3 ports/tools/check-skills.py --notes ports/rftoolsstorage --strict` | PASS | — |
+
+The default leg's insert phases (abridged; the log has every `ctl` reply):
+
+```
+== THE INSERT PATH: /rftoolsstorage insert <pos> minecraft:stone pushes the player's stack out, for one rfPerInsert when it emptied ==
+before the insert: chest 0 stone, energy 5000, player stone 64
+insert stone: rftoolsstorage:storage_scanner: inserted 64 minecraft:stone (4980/50000 FE)
+after the insert: chest Items[0] = 64 x minecraft:stone, energy 4980, player stone 0
+== an explicit count inserts that many: 10 of the player's 64, one rfPerInsert when they all went in ==
+insert 10 stone: rftoolsstorage:storage_scanner: inserted 10 minecraft:stone (4960/50000 FE)
+after the 10-stone insert: chest 74 stone, energy 4960, player stone 54
+== counterfactual: a barrel with room for 32 takes 32 of the 64 and charges nothing (the stack did not empty) ==
+insert stone into a barrel with room for 32: rftoolsstorage:storage_scanner: inserted 32 of 64 minecraft:stone; the rest stays with you, no charge (5000/50000 FE)
+after the partial insert: barrel slot 26 = 64 stone, energy 5000, player stone 32
+== counterfactual: a full barrel as the only inventory moves nothing, charges nothing and leaves the player's 64 stone ==
+insert stone into a full barrel: rftoolsstorage:storage_scanner: inserted 0 of 64 minecraft:stone; the rest stays with you, no charge (5000/50000 FE)
+after the full-barrel insert: barrel 64..64 stone, energy 5000, player stone 64
+== a box with nothing routable refuses with 'there are no routable inventories' and charges nothing ==
+insert stone into a scanner with no inventory in its box: rftoolsstorage:storage_scanner: there are no routable inventories (5000/50000 FE)
+after the empty-box refusal: energy 5000, player stone 64
+== an insert on a block that is not a scanner is refused before anything is read ==
+insert on the chest: minecraft:chest: not a storage scanner
+```
+
+The fail-capable assertion is the inverted leg:
+
+```
+== INSERT_SELFTEST: assert the insert did NOT move the stone into the chest (must fail) ==
+FAIL: the insert moved 64 stone from the player into the chest (player 64 -> 0, chest 0 -> 64) and charged one rfPerInsert (5000 -> 4980), so this inverted assertion fails as it must
+EXIT:1
+```
 
 ## 0h. The scanner's give-from-screen path — version 0.2.8 (2026-11-22)
 

@@ -36,15 +36,16 @@ use mod_api::{
 };
 
 use crate::runtime::{
-    Found, GiveAmount, Kind, LEVEL_ADMINS, LockPress, RequestCharge, SCANNER_AUTO_SLOT,
-    SCANNER_IN_SLOT, SCANNER_MAX_ENERGY, SCANNER_OUT_SLOT, SCANNER_RECEIVE_PER_TICK,
-    SCANNER_RF_PER_INSERT, SCANNER_SLOTS, SLOT_LIMIT, STORAGE_SCANNER, Slot, Storage, card_accepts,
-    carried_slot_in, clamp_radius, gave_line, give_amount, give_nothing_line, give_price,
-    inject_plan, injectable_at, is_storage_scanner, lock_press, may_inspect, merge_counts,
-    module_id, module_tier, no_power_line, out_slot_room, request_amount, request_charge,
-    request_line, request_no_power_line, request_nothing_line, request_out_slot_line,
-    request_price, restored_count, scan_line, scan_positions, scanner_radius, slot_accepts,
-    spend_power,
+    Found, GiveAmount, InsertCharge, Kind, LEVEL_ADMINS, LockPress, RequestCharge,
+    SCANNER_AUTO_SLOT, SCANNER_IN_SLOT, SCANNER_MAX_ENERGY, SCANNER_OUT_SLOT,
+    SCANNER_RECEIVE_PER_TICK, SCANNER_RF_PER_INSERT, SCANNER_SLOTS, SLOT_LIMIT, STORAGE_SCANNER,
+    Slot, Storage, card_accepts, carried_slot_in, clamp_radius, gave_line, give_amount,
+    give_nothing_line, give_price, inject_plan, injectable_at, insert_amount, insert_charge,
+    insert_line, insert_nothing_line, insert_partial_line, insert_price, is_storage_scanner,
+    lock_press, may_inspect, merge_counts, module_id, module_tier, no_power_line, no_routable_line,
+    out_slot_room, request_amount, request_charge, request_line, request_no_power_line,
+    request_nothing_line, request_out_slot_line, request_price, restored_count, scan_line,
+    scan_positions, scanner_radius, slot_accepts, spend_power,
 };
 
 /// The block this slice implements, exactly as the content declares it.
@@ -1793,6 +1794,203 @@ fn pull_to_player(
     .ok()
 }
 
+/// What a screen insert moved: how many items, and whether that emptied the stack
+/// the player handed over (the only moment it is charged).
+struct Inserted {
+    moved: u32,
+    emptied: bool,
+}
+
+/// A screen insert resolved by the readout: the scan's box, the item the player
+/// hands over and how many of it to move.
+struct Insertion<'a> {
+    own: [i32; 3],
+    radius: i32,
+    resource: &'a ItemResource,
+    amount: u32,
+}
+
+/// `/rftoolsstorage insert <pos> <item> [count]`: the storage control screen
+/// module's insert button (`StorageScannerTileEntity.injectStackFromScreen`)
+/// reached through a command. The player hands a stack over, the walk pushes it
+/// into the scanned inventories, and the remainder stays in that inventory slot.
+///
+/// The reference's order is kept: `rfPerInsert` in the buffer first, then
+/// `checkForRoutableInventories`, then the walk — and the price is charged **only
+/// when the handed stack emptied** (`if (stack.isEmpty()) consumeEnergy(…);`), so a
+/// partial insert is free. There is no out slot: this path is the player's
+/// inventory, not the scanner's container.
+fn insert_readout(
+    host: &mut dyn ServerHost,
+    source: &CommandSource,
+    pos: [i32; 3],
+    requested: &ItemStack,
+    explicit: Option<u32>,
+) -> String {
+    let block = block_id_at(&*host, pos);
+    if !is_storage_scanner(&block) {
+        return format!("{block}: not a storage scanner");
+    }
+    let Some(entity) = scanner_entity(&*host, pos) else {
+        return format!("{block}: not a storage scanner");
+    };
+    let CommandSource::Player { player, .. } = source else {
+        return format!(
+            "{block}: an insert hands the player's stack over; there is no console source"
+        );
+    };
+    let data = entity.data(&*host);
+    let stored = saved_count(data.as_ref(), KEY_ENERGY);
+    let radius = saved_radius(data.as_ref());
+    let resource = ItemResource::of(requested);
+    let item = requested.item().id(&*host);
+    let Some((slot, stack)) = player_stack(&*host, *player, &resource) else {
+        return format!("{block}: {}", insert_nothing_line(stored, &item));
+    };
+    let Some(wanted) = insert_amount(explicit, stack.count()) else {
+        return format!("{block}: a count of 0 inserts nothing ({stored}/{SCANNER_MAX_ENERGY} FE)");
+    };
+    let price = insert_price();
+    if stored < price {
+        return format!(
+            "{block}: {}",
+            request_no_power_line(stored, price, wanted, &item)
+        );
+    }
+    if !has_routable(host, pos, radius) {
+        return format!("{block}: {}", no_routable_line(stored));
+    }
+    let Some(inserted) = insert_to_inventories(
+        host,
+        *player,
+        slot,
+        &stack,
+        &Insertion {
+            own: pos,
+            radius,
+            resource: &resource,
+            amount: wanted,
+        },
+    ) else {
+        return format!("{block}: {}", insert_nothing_line(stored, &item));
+    };
+    match insert_charge(stored, price, inserted.emptied) {
+        InsertCharge::NoPower => format!(
+            "{block}: {}",
+            request_no_power_line(stored, price, wanted, &item)
+        ),
+        InsertCharge::Free(after) => format!(
+            "{block}: {}",
+            insert_partial_line(inserted.moved, wanted, &item, after)
+        ),
+        InsertCharge::Paid(after) => {
+            let mut spent = Compound::new();
+            spent.insert(
+                KEY_ENERGY.into(),
+                Tag::Int(i32::try_from(after).unwrap_or(i32::MAX)),
+            );
+            let _ = entity.merge_data(&mut *host, spent);
+            format!("{block}: {}", insert_line(inserted.moved, &item, after))
+        }
+    }
+}
+
+/// The player's stack of `resource` an insert takes: the selected hotbar slot when
+/// it holds one (the GUI's click is on the stack in hand), else the lowest matching
+/// slot. Item and components match, as the request and give paths do.
+fn player_stack(
+    host: &dyn Host,
+    player: PlayerRef,
+    resource: &ItemResource,
+) -> Option<(u32, ItemStack)> {
+    let stacks = player.inventory_slots(host)?;
+    let holds = |stack: &ItemStack| stack.count() > 0 && resource.matches(stack);
+    if let Some(slot) = player
+        .selected_slot(host)
+        .and_then(|at| u32::try_from(at).ok())
+        && let Some((_, stack)) = stacks
+            .iter()
+            .find(|(at, stack)| *at == slot && holds(stack))
+    {
+        return Some((slot, stack.clone()));
+    }
+    stacks.into_iter().find(|(_, stack)| holds(stack))
+}
+
+/// Upstream's `checkForRoutableInventories`: at least one scanned cell has an
+/// inventory. The port reads "routable" as every scanned inventory (slice 6's
+/// deviation 1 — there is no star list), and `scan_targets` already skips its own
+/// cell and another storage scanner.
+fn has_routable(host: &mut dyn ServerHost, own: [i32; 3], radius: i32) -> bool {
+    let Some(level) = host.level(host.dimension()) else {
+        return false;
+    };
+    let targets = scan_targets(&*host, level, own, radius);
+    targets
+        .iter()
+        .any(|at| level.capability(host, &ITEMS, *at, None).is_some())
+}
+
+/// Hands `amount` of `resource` from the player's slot `slot` to the scanned
+/// inventories in scan order, in **one** transaction: the walk's writes and the
+/// remainder written back into the player's slot commit together, so a refused
+/// write leaves every inventory and the player's stack as they were. `None` when
+/// the level is gone or the amount is nothing.
+fn insert_to_inventories(
+    host: &mut dyn ServerHost,
+    player: PlayerRef,
+    slot: u32,
+    stack: &ItemStack,
+    insertion: &Insertion<'_>,
+) -> Option<Inserted> {
+    let Insertion {
+        own,
+        radius,
+        resource,
+        amount,
+    } = *insertion;
+    if amount == 0 {
+        return None;
+    }
+    let level = host.level(host.dimension())?;
+    let targets = scan_targets(&*host, level, own, radius);
+    host.transaction(|host, tx| -> Result<Inserted, ()> {
+        let mut moved = 0_u32;
+        for at in &targets {
+            if moved >= amount {
+                break;
+            }
+            let Some(handler) = level.capability(host, &ITEMS, *at, None) else {
+                continue;
+            };
+            moved = moved.saturating_add(handler.insert_any(host, tx, resource, amount - moved));
+        }
+        if moved == 0 {
+            // Nothing accepted it: the player keeps the whole stack.
+            return Ok(Inserted {
+                moved: 0,
+                emptied: false,
+            });
+        }
+        let left = stack.count().saturating_sub(moved);
+        let remainder = if left == 0 {
+            None
+        } else {
+            let mut rest = stack.clone();
+            rest.set_count(left).map_err(|_| ())?;
+            Some(rest)
+        };
+        player
+            .set_inventory_slot(host, slot, remainder)
+            .map_err(|_| ())?;
+        Ok(Inserted {
+            moved,
+            emptied: moved == amount,
+        })
+    })
+    .ok()
+}
+
 /// `/rftoolsstorage radius <pos> <radius>`: the GUI's radius slider, which this
 /// slice has no screen for. Saves the clamped value in the scanner's compound and
 /// answers with it.
@@ -1933,8 +2131,8 @@ macro_rules! item_argument {
     };
 }
 
-/// `/rftoolsstorage info`, `lock`, `scan`, `radius` and `request`
-/// (`register_commands`).
+/// `/rftoolsstorage info`, `lock`, `scan`, `radius`, `request`, `give` and
+/// `insert` (`register_commands`).
 pub(crate) fn on_register_commands(event: &mut RegisterCommandsEvent<'_>) {
     event
         .commands
@@ -1954,6 +2152,9 @@ pub(crate) fn on_register_commands(event: &mut RegisterCommandsEvent<'_>) {
     event.commands.push(Command::new(
         "rftoolsstorage give <pos:block_pos> <item:item> [single:word]",
     ));
+    event.commands.push(Command::new(
+        "rftoolsstorage insert <pos:block_pos> <item:item> [count:integer]",
+    ));
 }
 
 /// The `/rftoolsstorage` commands' bodies (`run_mod_command`).
@@ -1970,7 +2171,7 @@ pub(crate) fn on_run_mod_command(
     let Some(CommandArgumentValue::BlockPos(pos)) = event.command.argument("pos") else {
         feedback(
             host,
-            "usage: /rftoolsstorage info|lock|scan|radius|request|give <x> <y> <z> …",
+            "usage: /rftoolsstorage info|lock|scan|radius|request|give|insert <x> <y> <z> …",
         );
         return Flow::Cancel;
     };
@@ -2078,6 +2279,27 @@ pub(crate) fn on_run_mod_command(
                 }
             };
             give_readout(host, event.source, pos, requested, mode)
+        }
+        "insert" => {
+            let Some(requested) = item_argument!(event.command.argument("item")) else {
+                feedback(
+                    host,
+                    "usage: /rftoolsstorage insert <x> <y> <z> <item> [<count>]",
+                );
+                return Flow::Cancel;
+            };
+            let explicit = match event.command.argument("count") {
+                None => None,
+                Some(CommandArgumentValue::Integer(count)) => match u32::try_from(*count) {
+                    Ok(count) => Some(count),
+                    Err(_) => {
+                        feedback(host, "the count must be a whole number of 0 or more");
+                        return Flow::Cancel;
+                    }
+                },
+                Some(_) => None,
+            };
+            insert_readout(host, event.source, pos, requested, explicit)
         }
         "radius" => {
             let Some(CommandArgumentValue::Integer(wanted)) = event.command.argument("radius")

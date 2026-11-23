@@ -56,12 +56,25 @@
 #      4,900 -> 4,800); a give for a kind nothing holds refuses with `nothing to
 #      give` and charges nothing; and at buffer 99 the same give refuses with the
 #      price line (`costs 100`) and leaves the chest alone.
+#  16. **the insert path (slice 9)**: with an empty chest two blocks away, radius
+#      2, the buffer at 5,000 and 64 stone in the player's inventory,
+#      `/rftoolsstorage insert <pos> minecraft:stone` pushes the stack into the
+#      chest's `Items[0]` (id and count 64), empties the player's stack and charges
+#      exactly one `rfPerInsert` (5,000 -> 4,980); the explicit count form inserts
+#      10 of 64 (chest 74, player 54, one more `rfPerInsert`); a barrel with room
+#      for only 32 takes 32 of the 64 and charges **nothing** (the remainder stays
+#      with the player) — the reference charges only when the stack emptied; a full
+#      barrel as the only inventory moves nothing, leaves the player's 64 stone and
+#      the buffer at 5,000; a box with nothing routable answers `there are no
+#      routable inventories` and charges nothing; and a chest addressed as a
+#      scanner is refused.
 #
 # SELFTEST=1 keeps the scenario and asserts that the tick did NOT push the stone
 # into the chest, so the run MUST fail with a `FAIL:` verdict (the assertion the
 # slice rests on is proved able to fail). REQUEST_SELFTEST=1 does the same for the
-# request path (the chest must NOT have dropped to 96) and GIVE_SELFTEST=1 for the
-# give path (the give must NOT have handed the stone over).
+# request path (the chest must NOT have dropped to 96), GIVE_SELFTEST=1 for the
+# give path (the give must NOT have handed the stone over) and INSERT_SELFTEST=1
+# for the insert path (the chest must NOT have received the 64 stone).
 # COUNTERFACTUAL=1 puts a vanilla barrel where the scanner would be and proves the
 # same commands answer `not a storage scanner` on it. CONTROL_GAME runs the same
 # rig on the Nightly without the package and fails there (`EXIT:1`): the block and
@@ -89,6 +102,7 @@ COUNTERFACTUAL=${COUNTERFACTUAL:-0}
 SELFTEST=${SELFTEST:-0}
 REQUEST_SELFTEST=${REQUEST_SELFTEST:-0}
 GIVE_SELFTEST=${GIVE_SELFTEST:-0}
+INSERT_SELFTEST=${INSERT_SELFTEST:-0}
 
 SCANNER=rftoolsstorage:storage_scanner
 STORAGE=rftoolsstorage:modular_storage
@@ -184,6 +198,16 @@ give_cmd() { # x y z item [single]
     [ -n "$line" ] || fail "the give at $1,$2,$3 answered nothing: $(ctl messages 6 | jq -c '.chat')"
     echo "$line"
 }
+insert_cmd() { # x y z item [count]
+    local line
+    if [ $# -ge 5 ]; then
+        line=$(reply insert "$1" "$2" "$3" "$4" "$5")
+    else
+        line=$(reply insert "$1" "$2" "$3" "$4")
+    fi
+    [ -n "$line" ] || fail "the insert at $1,$2,$3 answered nothing: $(ctl messages 6 | jq -c '.chat')"
+    echo "$line"
+}
 energy_of() { data_block "$1" "$2" "$3" energy; }
 
 # --- the inject tick (slice 6) --------------------------------------------
@@ -226,6 +250,16 @@ full_slots() { # item
     for i in $(seq 0 26); do
         body="${body}${body:+, }{Slot: ${i}b, id: \"$1\", count: 64}"
     done
+    echo "$body"
+}
+# A barrel with 26 slots full of `item` and the 27th holding `last` of it: room for
+# exactly `64 - last` more, which makes a partial insert (and its free price).
+nearly_full_slots() { # item last
+    local i body=""
+    for i in $(seq 0 25); do
+        body="${body}${body:+, }{Slot: ${i}b, id: \"$1\", count: 64}"
+    done
+    body="${body}, {Slot: 26b, id: \"$1\", count: $2}"
     echo "$body"
 }
 # `/data merge block … {Items: […]}` replaces the container's item list: every slot
@@ -834,6 +868,129 @@ line=$(give_cmd "$CHEST_X" "$SY" "$SZ" minecraft:stone)
 echo "give on the chest: $line"
 echo "$line" | grep -q '^minecraft:chest: not a storage scanner$' || fail "the chest took a give: $line"
 
+say "THE INSERT PATH: /rftoolsstorage insert <pos> minecraft:stone pushes the player's stack out, for one rfPerInsert when it emptied"
+# The screen's insert button (`injectStackFromScreen`): the player hands a stack
+# over, the walk pushes it into the scanned inventories, and the remainder stays in
+# the player's slot. The one inventory in radius 2 is the empty chest two blocks
+# away (the barrel at S+1 and the dirt chest at S+3 were removed by the request
+# phase), so its Items[0] can only be what the insert pushed there.
+ctl setblock "$CHEST_X" "$SY" "$SZ" minecraft:air >/dev/null
+ctl setblock "$CHEST_X" "$SY" "$SZ" minecraft:chest >/dev/null
+ctl wait 4
+seed_slots "$SX" "$SY" "$SZ" ''
+line=$(radius_cmd "$SX" "$SY" "$SZ" 2)
+echo "radius: $line"
+ctl command "data merge block $SX $SY $SZ {energy: 5000}" >/dev/null
+ctl command "clear @a" >/dev/null
+ctl wait 6
+stand_at "$SX" "$SZ"
+ctl wait 6
+ctl give minecraft:stone 64 >/dev/null || fail "cannot give the player 64 stone"
+ctl wait 8
+held=$(count_item minecraft:stone)
+echo "before the insert: chest $(inv_total "$CHEST_X" "$SY" "$SZ") stone, energy $(energy_of "$SX" "$SY" "$SZ"), player stone ${held}"
+[ "$held" = 64 ] || fail "the player holds $held stone before the insert, expected 64"
+
+line=$(insert_cmd "$SX" "$SY" "$SZ" minecraft:stone)
+echo "insert stone: $line"
+echo "$line" | grep -q "^$SCANNER: inserted 64 minecraft:stone (4980/$MAX_FE FE)$" || fail "the insert answered: $line"
+chest_id=$(slot_id "$CHEST_X" "$SY" "$SZ" 0)
+chest_count=$(slot_count "$CHEST_X" "$SY" "$SZ" 0)
+energy_after=$(energy_of "$SX" "$SY" "$SZ")
+held=$(count_item minecraft:stone)
+echo "after the insert: chest Items[0] = ${chest_count} x ${chest_id}, energy ${energy_after}, player stone ${held}"
+[ "$chest_id" = "minecraft:stone" ] || fail "the chest's Items[0] is '$chest_id', expected minecraft:stone"
+[ "$chest_count" = 64 ] || fail "the chest's Items[0] holds $chest_count, expected 64"
+[ "$energy_after" = "$((5000 - 20))" ] || fail "the insert cost $((5000 - energy_after)) FE, expected exactly one rfPerInsert (4980)"
+[ "$held" = 0 ] || fail "the player holds $held stone after handing 64 over, expected 0"
+
+if [ "$INSERT_SELFTEST" = 1 ]; then
+    say "INSERT_SELFTEST: assert the insert did NOT move the stone into the chest (must fail)"
+    fail "the insert moved 64 stone from the player into the chest (player 64 -> ${held}, chest 0 -> ${chest_count}) and charged one rfPerInsert (5000 -> ${energy_after}), so this inverted assertion fails as it must"
+fi
+
+say "an explicit count inserts that many: 10 of the player's 64, one rfPerInsert when they all went in"
+ctl command "clear @a" >/dev/null
+ctl wait 4
+ctl give minecraft:stone 64 >/dev/null || fail "cannot give the player 64 stone"
+ctl wait 8
+line=$(insert_cmd "$SX" "$SY" "$SZ" minecraft:stone 10)
+echo "insert 10 stone: $line"
+echo "$line" | grep -q "^$SCANNER: inserted 10 minecraft:stone (4960/$MAX_FE FE)$" || fail "the count insert answered: $line"
+chest_after=$(inv_total "$CHEST_X" "$SY" "$SZ")
+energy_after=$(energy_of "$SX" "$SY" "$SZ")
+held=$(count_item minecraft:stone)
+echo "after the 10-stone insert: chest ${chest_after} stone, energy ${energy_after}, player stone ${held}"
+[ "$chest_after" = 74 ] || fail "the chest holds $chest_after after 64 + 10, expected 74"
+[ "$energy_after" = "$((5000 - 2 * 20))" ] || fail "the count insert left $energy_after, expected 5000 - 2 x 20"
+[ "$held" = 54 ] || fail "the player holds $held stone after inserting 10 of 64, expected 54"
+
+say "counterfactual: a barrel with room for 32 takes 32 of the 64 and charges nothing (the stack did not empty)"
+ctl setblock "$CHEST_X" "$SY" "$SZ" minecraft:air >/dev/null
+ctl setblock "$CHEST_X" "$SY" "$SZ" minecraft:barrel >/dev/null
+ctl wait 4
+seed_slots "$CHEST_X" "$SY" "$SZ" "$(nearly_full_slots minecraft:stone 32)"
+ctl wait 4
+ctl command "data merge block $SX $SY $SZ {energy: 5000}" >/dev/null
+ctl command "clear @a" >/dev/null
+ctl wait 6
+ctl give minecraft:stone 64 >/dev/null || fail "cannot give the player 64 stone"
+ctl wait 8
+line=$(insert_cmd "$SX" "$SY" "$SZ" minecraft:stone)
+echo "insert stone into a barrel with room for 32: $line"
+echo "$line" | grep -q "^$SCANNER: inserted 32 of 64 minecraft:stone; the rest stays with you, no charge (5000/$MAX_FE FE)$" || fail "the partial insert answered: $line"
+barrel_last=$(slot_count "$CHEST_X" "$SY" "$SZ" 26)
+energy_after=$(energy_of "$SX" "$SY" "$SZ")
+held=$(count_item minecraft:stone)
+echo "after the partial insert: barrel slot 26 = ${barrel_last} stone, energy ${energy_after}, player stone ${held}"
+[ "$barrel_last" = 64 ] || fail "the barrel's last slot holds $barrel_last, expected 32 + 32"
+[ "$energy_after" = 5000 ] || fail "a partial insert charged ($energy_after): the reference charges only an emptied stack"
+[ "$held" = 32 ] || fail "the player holds $held stone, expected the 32 that did not fit"
+
+say "counterfactual: a full barrel as the only inventory moves nothing, charges nothing and leaves the player's 64 stone"
+ctl setblock "$CHEST_X" "$SY" "$SZ" minecraft:air >/dev/null
+ctl setblock "$CHEST_X" "$SY" "$SZ" minecraft:barrel >/dev/null
+ctl wait 4
+seed_slots "$CHEST_X" "$SY" "$SZ" "$(full_slots minecraft:stone)"
+ctl wait 4
+ctl command "data merge block $SX $SY $SZ {energy: 5000}" >/dev/null
+ctl command "clear @a" >/dev/null
+ctl wait 6
+ctl give minecraft:stone 64 >/dev/null || fail "cannot give the player 64 stone"
+ctl wait 8
+line=$(insert_cmd "$SX" "$SY" "$SZ" minecraft:stone)
+echo "insert stone into a full barrel: $line"
+echo "$line" | grep -q "^$SCANNER: inserted 0 of 64 minecraft:stone; the rest stays with you, no charge (5000/$MAX_FE FE)$" || fail "the full-barrel insert answered: $line"
+barrel_first=$(slot_count "$CHEST_X" "$SY" "$SZ" 0)
+barrel_last=$(slot_count "$CHEST_X" "$SY" "$SZ" 26)
+energy_after=$(energy_of "$SX" "$SY" "$SZ")
+held=$(count_item minecraft:stone)
+echo "after the full-barrel insert: barrel ${barrel_first}..${barrel_last} stone, energy ${energy_after}, player stone ${held}"
+[ "$barrel_first" = 64 ] && [ "$barrel_last" = 64 ] || fail "the full barrel changed ($barrel_first..$barrel_last)"
+[ "$energy_after" = 5000 ] || fail "an insert that moved nothing charged ($energy_after)"
+[ "$held" = 64 ] || fail "the player holds $held stone, expected the 64 the barrel refused"
+
+say "a box with nothing routable refuses with 'there are no routable inventories' and charges nothing"
+ctl setblock "$CHEST_X" "$SY" "$SZ" minecraft:air >/dev/null
+ctl wait 4
+line=$(insert_cmd "$SX" "$SY" "$SZ" minecraft:stone)
+echo "insert stone into a scanner with no inventory in its box: $line"
+echo "$line" | grep -q "^$SCANNER: there are no routable inventories (5000/$MAX_FE FE)$" || fail "the empty-box insert answered: $line"
+energy_after=$(energy_of "$SX" "$SY" "$SZ")
+held=$(count_item minecraft:stone)
+echo "after the empty-box refusal: energy ${energy_after}, player stone ${held}"
+[ "$energy_after" = 5000 ] || fail "the empty-box refusal charged ($energy_after)"
+[ "$held" = 64 ] || fail "the empty-box refusal changed the player's stone to $held"
+
+say "an insert on a block that is not a scanner is refused before anything is read"
+ctl setblock "$CHEST_X" "$SY" "$SZ" minecraft:chest >/dev/null
+ctl wait 4
+line=$(insert_cmd "$CHEST_X" "$SY" "$SZ" minecraft:stone)
+echo "insert on the chest: $line"
+echo "$line" | grep -q '^minecraft:chest: not a storage scanner$' || fail "the chest took an insert: $line"
+ctl setblock "$CHEST_X" "$SY" "$SZ" minecraft:air >/dev/null
+ctl wait 2
+
 say "the scanner's loot table drops its own item on a survival break"
 BX=$((X + 2))
 BZ=$((Z1 + 5))
@@ -901,4 +1058,4 @@ echo "give rftoolsbase:machine_frame: $frame"
 echo "$frame" | grep -q 'unknown item' || fail "this build has rftoolsbase:machine_frame, so the recipe is not blocked and must be crafted: $frame"
 
 ctl close >/dev/null 2>&1 || true
-echo "PASS: the storage scanner places and reads back with its facing; a fresh one has no power (no power (0/50000 FE)) and reads nothing; at its default radius 1 it finds nothing two blocks away; /rftoolsstorage radius 2 widens the box and the scan answers minecraft:stone 64 for a chest two blocks away while the chest three away (minecraft:dirt 32) is outside it; radius 3 lists both, one entry a kind; every scan costs rfPerRequest (5,000 -> 4,900 -> 4,800 -> 4,700, printed in the reply); an emptied buffer refuses with no power and reads nothing, and charging it again makes the scan answer again; scan and radius refuse a chest and the modular storage (not a storage scanner); the radius and the buffer survive a relaunch; THE INJECT TICK pushes 64 stone from the in-slot into the empty chest two blocks away so its Items[0] reads minecraft:stone x64 while the buffer drops by exactly one rfPerInsert (5000 -> 4980), and with the buffer at 0 the next stack stays in the slot and the chest keeps its 64, recharging proving the stall was the power (chest 128); the auto slot routes too (chest 160); items the game puts in the container are routed for one rfPerInsert; a stack nothing accepts is still charged one attempt (20 FE pays one, 19 pays none) and stays in the slot; the walk passes a full barrel for the chest behind it; the tick never writes the out slot; THE REQUEST PATH pulls 32 stone from a chest of 128 into the player's inventory (the reference's straight-to-inventory default), leaving the chest at 96 and the buffer at 4,990 for an explicit count, refuses a kind nothing holds and charges nothing, refuses below the price with the price line (costs 10, have 9), sends a ctl command's 16-stone request straight to the player too, and refuses a request whose out slot holds another kind without pulling or charging; THE GIVE PATH hands the whole stack (64) straight to the player from a chest of 64, empties the chest and charges the FULL rfPerRequest (5000 -> 4900) with the out slot still holding the request counterfactual's dirt (it has no out slot), hands exactly one item with [single] (chest 3 -> 2, buffer 4900 -> 4800), refuses a kind nothing holds and charges nothing, and refuses below the full price with the price line (costs 100, have 99) without touching the chest, and a give on a chest is refused as not a storage scanner; the loot table drops the scanner on a survival break; the modular storage still answers 0/0 empty no module; and a barrel answers not a storage scanner to the same commands"
+echo "PASS: the storage scanner places and reads back with its facing; a fresh one has no power (no power (0/50000 FE)) and reads nothing; at its default radius 1 it finds nothing two blocks away; /rftoolsstorage radius 2 widens the box and the scan answers minecraft:stone 64 for a chest two blocks away while the chest three away (minecraft:dirt 32) is outside it; radius 3 lists both, one entry a kind; every scan costs rfPerRequest (5,000 -> 4,900 -> 4,800 -> 4,700, printed in the reply); an emptied buffer refuses with no power and reads nothing, and charging it again makes the scan answer again; scan and radius refuse a chest and the modular storage (not a storage scanner); the radius and the buffer survive a relaunch; THE INJECT TICK pushes 64 stone from the in-slot into the empty chest two blocks away so its Items[0] reads minecraft:stone x64 while the buffer drops by exactly one rfPerInsert (5000 -> 4980), and with the buffer at 0 the next stack stays in the slot and the chest keeps its 64, recharging proving the stall was the power (chest 128); the auto slot routes too (chest 160); items the game puts in the container are routed for one rfPerInsert; a stack nothing accepts is still charged one attempt (20 FE pays one, 19 pays none) and stays in the slot; the walk passes a full barrel for the chest behind it; the tick never writes the out slot; THE REQUEST PATH pulls 32 stone from a chest of 128 into the player's inventory (the reference's straight-to-inventory default), leaving the chest at 96 and the buffer at 4,990 for an explicit count, refuses a kind nothing holds and charges nothing, refuses below the price with the price line (costs 10, have 9), sends a ctl command's 16-stone request straight to the player too, and refuses a request whose out slot holds another kind without pulling or charging; THE INSERT PATH pushes the player's 64 stone into the chest two blocks away so its Items[0] reads minecraft:stone x64 and empties the player's stack for exactly one rfPerInsert (5000 -> 4980), inserts an explicit 10 of 64 for one more rfPerInsert, takes only the 32 a nearly-full barrel has room for and charges NOTHING for the partial insert, moves nothing and charges nothing against a full barrel (the player keeps 64), refuses a box with no routable inventory (there are no routable inventories, no charge) and refuses a chest (not a storage scanner); THE GIVE PATH hands the whole stack (64) straight to the player from a chest of 64, empties the chest and charges the FULL rfPerRequest (5000 -> 4900) with the out slot still holding the request counterfactual's dirt (it has no out slot), hands exactly one item with [single] (chest 3 -> 2, buffer 4900 -> 4800), refuses a kind nothing holds and charges nothing, and refuses below the full price with the price line (costs 100, have 99) without touching the chest, and a give on a chest is refused as not a storage scanner; the loot table drops the scanner on a survival break; the modular storage still answers 0/0 empty no module; and a barrel answers not a storage scanner to the same commands"

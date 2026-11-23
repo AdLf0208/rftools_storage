@@ -32,7 +32,10 @@ auto slot) into the inventories that box finds, a stack a tick for 20 FE
 inventories into the player for `rfPerRequest` (a tenth of it for an explicit
 count), and `/rftoolsstorage give <x> <y> <z> <item> [single]` hands one item or
 a whole stack straight to the player for the **whole** price — the jar's
-give-from-screen path, which never uses the out slot.
+give-from-screen path, which never uses the out slot. `/rftoolsstorage insert
+<x> <y> <z> <item> [n]` is the screen's insert button: it pushes a stack out of
+the player's inventory into those inventories and charges one `rfPerInsert`, but
+**only when the stack went in whole** — a partial insert is free.
 
 ## Commands
 
@@ -44,15 +47,15 @@ give-from-screen path, which never uses the out slot.
 | `/rftoolsstorage radius <x> <y> <z> <n>` | sets the scanner's radius (1..20) |
 | `/rftoolsstorage request <x> <y> <z> <item> [n]` | pulls a kind out of the scanned inventories into the player (a tenth price for an explicit count) |
 | `/rftoolsstorage give <x> <y> <z> <item> [single]` | hands a whole stack (or one item with `single`) straight to the player for the full price; no out slot |
+| `/rftoolsstorage insert <x> <y> <z> <item> [n]` | pushes the player's stack (or `n` of it) into the scanned inventories; one `rfPerInsert`, charged only when the stack emptied |
 
 They need an operator or a player within 8 blocks of the block.
 
 ## What is not ported
 
 The crafting manager (a WIP in the jar itself), the storage scanner's GUI **list**
-(search, sort, compact, cycle, visible size), the screen's insert button
-(`injectStackFromScreen`) and the out slot's fill for the no-player fallback, the
-`routable` star list, the storage control screen module (the give path's own
+(search, sort, compact, cycle, visible size) and the out slot's fill for the
+no-player fallback, the `routable` star list, the storage control screen module (the give path's own
 caller; its behaviour is carried as `/rftoolsstorage give`),
 the scanner's remote/tablet variant, the claimed-land check
 (the pin has no claim API), storage tiers 2-4, the remote module and block, the
@@ -73,7 +76,7 @@ the old `.hnmod` pin (`1d63e0a5…` / `5a64af93…`) is retired with the format.
 
 ```sh
 cd ports/rftoolsstorage
-cargo test                                    # the pure rules: 32 runtime tests + 5 glue tests (37)
+cargo test                                    # the pure rules: 35 runtime tests + 4 glue tests (39)
 cargo clippy --all-targets -- -D warnings
 rustfmt --edition 2024 --check src/lib.rs src/support.rs src/runtime.rs
 cargo horizon-mod check                       # the SDK gate: format, manifest, code, API usage
@@ -90,14 +93,15 @@ The in-game legs need a **launcher-built** game carrying the package
 (`horizon-launcher native-build ports/rftoolsstorage --instance <i> --trust-native-code`),
 then `GAME=<that horizon-client> tools/e2e.sh`. The scenario has its
 counterfactual (`COUNTERFACTUAL=1`, a vanilla barrel) and its selftest
-(`SELFTEST=1`, `REQUEST_SELFTEST=1` and `GIVE_SELFTEST=1`, must fail).
+(`SELFTEST=1`, `REQUEST_SELFTEST=1`, `GIVE_SELFTEST=1` and `INSERT_SELFTEST=1`,
+must fail).
 
 Evidence and the exact commands: [`VALIDATION.md`](VALIDATION.md).
 
 ## Layout
 
 ```
-horizon-mod.toml        the only manifest: id, version 0.2.8, api "0.2", side "both",
+horizon-mod.toml        the only manifest: id, version 0.2.9, api "0.2", side "both",
                         capabilities, [native] game/horizon/mixins
 Cargo.toml              one crate; horizon-mod-api from .horizon/sdk
 src/lib.rs              the one #[mod_api::horizon_mod] impl Hooks (register, right_click_block,
@@ -106,7 +110,7 @@ src/runtime.rs          the pure rules (the storage's, the menu's, the carried p
                         the scanner's, with their tests)
 src/support.rs          the game glue: the block-entity Parts, the container, the menu, the
                         click, the carried payload and the commands (readout, scan, radius,
-                        request, give)
+                        request, give, insert)
 assets/rftoolsstorage/  blockstates, models, textures and lang, carried from the jar
 data/rftoolsstorage/    the block and item declarations, the creative tab, loot tables, recipes, tags
 data/minecraft/         the pickaxe/iron-tool tags the blocks join
