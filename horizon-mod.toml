@@ -1,6 +1,6 @@
 id = "rftoolsstorage"
 name = "RFTools Storage"
-version = "0.2.12"
+version = "0.2.13"
 description = """RFTools Storage for Horizon: the modular storage block and the storage scanner. A
 storage module in the storage's card slot sets its capacity (tier 1: 100 slots, one item kind a slot,
 64 a slot), and the block stores nothing until it is locked. A right click opens the storage's own
@@ -24,7 +24,11 @@ the scan list's order (Amount+, Amount-, Mod or Name; Tag needs an item's tags, 
 not list), saved with the block so it survives a relaunch. /rftoolsstorage routable <pos> <target>
 <on|off> is the list's per-inventory star: only a starred inventory is routed into (the tick, a
 request, a give or an insert), while the scan still lists every inventory in the box, and a fresh
-scanner starts with nothing starred. /rftoolsstorage info|lock
+scanner starts with nothing starred. /rftoolsstorage export <pos> <current|first> is the list's
+export choice: `current` pushes the in-slot stack only into the inventory the list's selected row
+names (/rftoolsstorage select <pos> <target>), refusing rather than falling through to the starred
+walk, while `first` (the default) is that walk; both are saved with the block. /rftoolsstorage
+info|lock
 remain the storage's readout and the operator's lock; every command needs an operator or a player
 within 8 blocks."""
 authors = ["McJty"]

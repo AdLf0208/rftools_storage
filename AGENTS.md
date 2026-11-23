@@ -8,18 +8,21 @@ against the pinned game build, `assets/` and `data/` are the carried content.
 with the container — do not recreate them (the retired tree is preserved in
 `../_shared/evidence/rftoolsstorage/retired-hnmod-0.1.0/`).
 
-- `src/runtime.rs` — the pure engine (42 rules' tests: the tier table, the slot
+- `src/runtime.rs` — the pure engine (48 rules' tests: the tier table, the slot
   rules, the grid's `slot_accepts`, the padlock's `lock_press`, the reach rule, the
   carried payload's clamp, the scanner's box/radius/price/readout, the inject plan
   and walk, the request's price/amount/out-slot/charge, the give's full price and
   one-item/stack amount, the insert's `rfPerInsert` paid only when the stack
-  emptied, the scan's search, and the list's sort — its five modes, the stable
-  amount tie, the namespace grouping and `Tag`'s block); keep them green. It stopped being byte-identical to the retired
+  emptied, the scan's search, the list's sort — its five modes, the stable
+  amount tie, the namespace grouping and `Tag`'s block — and the export choice —
+  `ExportMode`'s `exportc` flag, `ExportRoute`'s current-container-only route and
+  the two replies); keep them green. It stopped being byte-identical to the retired
   `mixins/rftoolsstorage/runtime.rs` with the 2026-11-18 review fixes.
 - `src/support.rs` — the game glue (the block-entity Parts, the containers, the
   menu and its screen and padlock, the click, the carried payload, the scanner's
-  FE buffer, its container, its inject tick, the request path, the give path, the
-  insert path and the readout commands). No
+  FE buffer, its container, its inject tick and its export route, the request
+  path, the give path, the insert path and the readout commands, `export` and
+  `select` with the rest). No
   business rules here: they belong in `runtime.rs` with a test.
 - `src/lib.rs` — the one `#[mod_api::horizon_mod] impl Hooks`.
 

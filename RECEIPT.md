@@ -1,11 +1,11 @@
-# Package receipt — rftoolsstorage 0.2.12
+# Package receipt — rftoolsstorage 0.2.13
 
 | field | value |
 |---|---|
-| version | `0.2.12` |
+| version | `0.2.13` |
 | file | `rftoolsstorage.hmod` |
-| bytes | 95,274 |
-| sha256 | `d194c73b31d2d3e2b3bf60e9ed3b727a2feac90e26ff33cf2234fbd3df47991b` |
+| bytes | 98,817 |
+| sha256 | `f89f5974f411cf012a7c5a28242185e630bd6c9ffa726939863ceb1197baeb83` |
 | source | this tag — the tree here is the source that produced the archive |
 | game | 26.3 |
 | horizon | `0a875da91dbb0fdcb7ba8c42c11341aa229af51a` |

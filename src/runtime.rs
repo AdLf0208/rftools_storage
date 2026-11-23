@@ -798,6 +798,95 @@ pub fn routable_line(at: [i32; 3], on: bool) -> String {
     format!("routable {x} {y} {z} {}", if on { "on" } else { "off" })
 }
 
+// --- the scanner's export choice (slice 13) -------------------------------
+
+/// The GUI's export choice: `GuiStorageScanner.exportToStarred`, the
+/// `ImageChoiceLabel` whose two choices read "Export to current container" and
+/// "Export to first routable container" and whose value is
+/// `StorageScannerData.exportC` — the saved `exportc` flag, `false` by default.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExportMode {
+    /// `exportC` true: a tick's GUI-slot stack goes to the inventory the player
+    /// **selected** in the list (`getInventoryForBlock`'s `lastSelectedInventory`).
+    Current,
+    /// `exportC` false (`StorageScannerData.DEFAULT`): the stack goes to the
+    /// first routable container — the starred walk every slice since 6 uses.
+    First,
+}
+
+impl ExportMode {
+    /// The command's word: `current` for `exportC` true, `first` for the walk.
+    #[must_use]
+    pub fn word(self) -> &'static str {
+        match self {
+            Self::Current => "current",
+            Self::First => "first",
+        }
+    }
+
+    /// The command's word back to the choice; anything else is refused.
+    #[must_use]
+    pub fn from_word(text: &str) -> Option<Self> {
+        [Self::Current, Self::First]
+            .into_iter()
+            .find(|mode| mode.word() == text)
+    }
+
+    /// Upstream's saved flag (`StorageScannerData.exportC`, the `exportc` key).
+    #[must_use]
+    pub fn saved(self) -> bool {
+        matches!(self, Self::Current)
+    }
+
+    /// The saved flag back to the choice: a block with no flag is the default.
+    #[must_use]
+    pub fn from_saved(flag: Option<bool>) -> Self {
+        match flag {
+            Some(true) => Self::Current,
+            _ => Self::First,
+        }
+    }
+}
+
+/// Where one tick's GUI-slot attempt pushes its stack: upstream's
+/// `injectStackInternal(stack, toSelected, …)`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExportRoute {
+    /// The starred walk (`exportC` false, or no inventory selected).
+    Walk,
+    /// Only this inventory. Upstream **returns** from the selected attempt with
+    /// whatever stayed, so a selected container that refuses leaves the stack in
+    /// the slot: it never falls through to the walk.
+    Only([i32; 3]),
+}
+
+/// The route one tick's GUI-slot stack takes: `Only(selected)` under the
+/// current-container choice, `Walk` otherwise. Upstream's selected attempt does
+/// not consult the star or the radius — the selection came from the list, which
+/// shows every inventory in the box — so only the mode and the selection decide
+/// here.
+#[must_use]
+pub fn export_route(mode: ExportMode, selected: Option<[i32; 3]>) -> ExportRoute {
+    match (mode, selected) {
+        (ExportMode::Current, Some(at)) => ExportRoute::Only(at),
+        _ => ExportRoute::Walk,
+    }
+}
+
+/// The reply to `/rftoolsstorage export <pos> <current|first>`.
+#[must_use]
+pub fn export_line(mode: ExportMode) -> String {
+    format!("export {}", mode.word())
+}
+
+/// The reply to `/rftoolsstorage select <pos> <target>`: the cell the GUI's
+/// list selected, which the current-container choice exports into.
+#[must_use]
+pub fn selection_line(at: [i32; 3]) -> String {
+    let [x, y, z] = at;
+    format!("select {x} {y} {z}")
+}
+
 // --- the scanner's request path (slice 7) ---------------------------------
 
 /// The price of a request (`StorageScannerTileEntity.requestStack`): an explicit
@@ -2025,6 +2114,67 @@ mod tests {
     fn the_star_reply_names_the_cell_and_its_state() {
         assert_eq!(routable_line([8, 102, 3], true), "routable 8 102 3 on");
         assert_eq!(routable_line([8, 102, 3], false), "routable 8 102 3 off");
+    }
+
+    #[test]
+    fn the_export_choice_is_upstreams_exportc_flag_and_defaults_to_the_walk() {
+        assert_eq!(ExportMode::from_word("current"), Some(ExportMode::Current));
+        assert_eq!(ExportMode::from_word("first"), Some(ExportMode::First));
+        assert_eq!(
+            ExportMode::from_word("Current"),
+            None,
+            "the command's words are exact"
+        );
+        assert_eq!(ExportMode::from_word(""), None, "no word is no choice");
+        assert_eq!(ExportMode::Current.word(), "current");
+        assert_eq!(ExportMode::First.word(), "first");
+        assert!(
+            ExportMode::Current.saved(),
+            "exportC true is the current-container choice"
+        );
+        assert!(
+            !ExportMode::First.saved(),
+            "StorageScannerData.DEFAULT is exportC false, the first routable container"
+        );
+        assert_eq!(ExportMode::from_saved(Some(true)), ExportMode::Current);
+        assert_eq!(ExportMode::from_saved(Some(false)), ExportMode::First);
+        assert_eq!(
+            ExportMode::from_saved(None),
+            ExportMode::First,
+            "a block that was never given the flag is the default"
+        );
+    }
+
+    #[test]
+    fn the_current_choice_sends_the_stack_only_to_the_selected_inventory() {
+        let selected = [12, 102, 3];
+        assert_eq!(
+            export_route(ExportMode::Current, Some(selected)),
+            ExportRoute::Only(selected),
+            "the current-container choice exports into the selected inventory"
+        );
+        assert_eq!(
+            export_route(ExportMode::Current, None),
+            ExportRoute::Walk,
+            "with nothing selected the current-container choice has nothing to export into"
+        );
+        assert_eq!(
+            export_route(ExportMode::First, Some(selected)),
+            ExportRoute::Walk,
+            "the first-routable choice ignores the selection"
+        );
+        assert_eq!(
+            export_route(ExportMode::First, None),
+            ExportRoute::Walk,
+            "the default is the starred walk"
+        );
+    }
+
+    #[test]
+    fn the_export_and_selection_replies_name_the_choice_and_the_cell() {
+        assert_eq!(export_line(ExportMode::Current), "export current");
+        assert_eq!(export_line(ExportMode::First), "export first");
+        assert_eq!(selection_line([12, 102, 3]), "select 12 102 3");
     }
 
     #[test]

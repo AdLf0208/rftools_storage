@@ -92,6 +92,16 @@
 #      64 stone (the star filters routing, not the list); re-starring A (and
 #      un-starring B) makes A the recipient (A 96); and the saved `routable` list
 #      keeps A across a relaunch, after which A takes another stack (160).
+#  20. **the export choice (slice 13)**: the GUI's "Export to current container",
+#      as a saved choice plus the list's selected inventory. At radius 2, with two
+#      starred empty chests two blocks away (A at S+2 on x, B at S+2 on z, so B is
+#      first in the x-major walk), `export <pos> current` + `select <pos> B` sends
+#      the in-slot's 64 stone to **B only** (A 0, one rfPerInsert); `select <pos> A`
+#      sends the next stack to A while B keeps its 64; the choice and the selection
+#      are saved with the block (`exportc` 1b, `selected` = A) and survive a
+#      relaunch; a **selected full barrel** refuses without falling through to the
+#      walk (the in-slot keeps its 64, A and B unchanged); and `export <pos> first`
+#      restores the starred walk, which routes the same stack to B (128).
 #
 # SELFTEST=1 keeps the scenario and asserts that the tick did NOT push the stone
 # into the chest, so the run MUST fail with a `FAIL:` verdict (the assertion the
@@ -101,8 +111,9 @@
 # for the insert path (the chest must NOT have received the 64 stone),
 # SCAN_SELFTEST=1 for the scan filter (the `dirt` query must NOT list the stone)
 # SORT_SELFTEST=1 for the sort (the `Amount-` reply must NOT start with stone),
-# and ROUTABLE_SELFTEST=1 for the star list (the un-starred chest must NOT have
-# received the stack).
+# ROUTABLE_SELFTEST=1 for the star list (the un-starred chest must NOT have
+# received the stack), and EXPORT_SELFTEST=1 for the export choice (the selected
+# chest must NOT have received the stack).
 # COUNTERFACTUAL=1 puts a vanilla barrel where the scanner would be and proves the
 # same commands answer `not a storage scanner` on it. CONTROL_GAME runs the same
 # rig on the Nightly without the package and fails there (`EXIT:1`): the block and
@@ -134,6 +145,7 @@ INSERT_SELFTEST=${INSERT_SELFTEST:-0}
 SCAN_SELFTEST=${SCAN_SELFTEST:-0}
 SORT_SELFTEST=${SORT_SELFTEST:-0}
 ROUTABLE_SELFTEST=${ROUTABLE_SELFTEST:-0}
+EXPORT_SELFTEST=${EXPORT_SELFTEST:-0}
 
 SCANNER=rftoolsstorage:storage_scanner
 STORAGE=rftoolsstorage:modular_storage
@@ -226,6 +238,18 @@ routable_cmd() { # x y z target-x target-y target-z on|off
     local line
     line=$(reply routable "$1" "$2" "$3" "$4" "$5" "$6" "$7")
     [ -n "$line" ] || fail "the routable command at $1,$2,$3 answered nothing: $(ctl messages 6 | jq -c '.chat')"
+    echo "$line"
+}
+export_cmd() { # x y z current|first
+    local line
+    line=$(reply export "$1" "$2" "$3" "$4")
+    [ -n "$line" ] || fail "the export command at $1,$2,$3 answered nothing: $(ctl messages 6 | jq -c '.chat')"
+    echo "$line"
+}
+select_cmd() { # x y z target-x target-y target-z
+    local line
+    line=$(reply select "$1" "$2" "$3" "$4" "$5" "$6")
+    [ -n "$line" ] || fail "the select command at $1,$2,$3 answered nothing: $(ctl messages 6 | jq -c '.chat')"
     echo "$line"
 }
 request_cmd() { # x y z item [count]
@@ -1329,6 +1353,154 @@ echo "$line" | grep -q '^minecraft:chest: not a storage scanner$' || fail "the c
 ctl setblock "$CHEST_X" "$SY" "$SZ" minecraft:air >/dev/null
 ctl wait 2
 
+say "THE EXPORT CHOICE: 'Export to current container' sends the in-slot stack only to the selected inventory"
+# The GUI's exportToStarred choice (`StorageScannerData.exportC`): with `current`
+# the tick schedules its GUI-slot stack into the one inventory the list's selected
+# row names (`getInventoryForBlock`'s lastSelectedInventory) and into nothing else —
+# upstream returns from that attempt with the remainder, so a full selected
+# container leaves the stack in the slot instead of falling through to the walk.
+# The rig is the star phase's: scanner at S, radius 2, two empty chests two away on
+# different axes (A at S+2 on x, B at S+2 on z; B comes first in the x-major walk).
+EXPORT_A=$((SX + 2))
+EXPORT_B=$((SZ + 2))
+for at in "$((SX + 1)):$SY:$SZ" "$((SX + 3)):$SY:$SZ" "$EXPORT_A:$SY:$SZ" "$SX:$SY:$EXPORT_B"; do
+    IFS=: read -r ex ey ez <<<"$at"
+    ctl setblock "$ex" "$ey" "$ez" minecraft:air >/dev/null
+done
+ctl setblock "$EXPORT_A" "$SY" "$SZ" minecraft:chest >/dev/null
+ctl setblock "$SX" "$SY" "$EXPORT_B" minecraft:chest >/dev/null
+ctl wait 4
+line=$(radius_cmd "$SX" "$SY" "$SZ" 2)
+echo "radius: $line"
+seed_slots "$SX" "$SY" "$SZ" ''
+line=$(routable_cmd "$SX" "$SY" "$SZ" "$EXPORT_A" "$SY" "$SZ" on)
+echo "star A: $line"
+line=$(routable_cmd "$SX" "$SY" "$SZ" "$SX" "$SY" "$EXPORT_B" on)
+echo "star B: $line"
+saved=$(data_reply "$SX" "$SY" "$SZ" exportc)
+echo "saved exportc (default): $saved"
+case "$saved" in
+    *"Found no elements"*) ;;
+    *) fail "a fresh scanner has an exportc flag: $saved" ;;
+esac
+line=$(export_cmd "$SX" "$SY" "$SZ" current)
+echo "export current: $line"
+echo "$line" | grep -q "^$SCANNER: export current$" || fail "the export command answered: $line"
+saved=$(data_value "$SX" "$SY" "$SZ" exportc)
+echo "saved exportc: $saved"
+[ "$saved" = 1b ] || fail "the saved exportc is '$saved', expected 1b (exportC true)"
+line=$(select_cmd "$SX" "$SY" "$SZ" "$SX" "$SY" "$EXPORT_B")
+echo "select B: $line"
+echo "$line" | grep -q "^$SCANNER: select $SX $SY $EXPORT_B$" || fail "the select command answered: $line"
+saved=$(data_reply "$SX" "$SY" "$SZ" selected)
+echo "saved selected (B): $saved"
+case "$saved" in
+    *"[I; $SX, $SY, $EXPORT_B]"*) ;;
+    *) fail "the saved selection does not name B: $saved" ;;
+esac
+# The 64 stone goes to B and nowhere else: A (starred too) stays empty.
+ctl command "data merge block $SX $SY $SZ {energy: 5000}" >/dev/null
+seed_slots "$SX" "$SY" "$SZ" '{Slot: 0b, id: "minecraft:stone", count: 64}'
+ctl wait 10
+in_slot=$(slot_count "$SX" "$SY" "$SZ" 0)
+a_total=$(inv_total "$EXPORT_A" "$SY" "$SZ")
+b_total=$(inv_total "$SX" "$SY" "$EXPORT_B")
+energy=$(energy_of "$SX" "$SY" "$SZ")
+echo "export current, B selected: in-slot '${in_slot}', A ${a_total}, B ${b_total}, energy ${energy}"
+[ "$in_slot" = "" ] || fail "the current-container export left $in_slot stone in the in-slot"
+[ "$a_total" = 0 ] || fail "the current-container export also put $a_total stone in the unselected A"
+[ "$b_total" = 64 ] || fail "the selected chest B holds $b_total, expected 64"
+[ "$energy" = "$((5000 - 20))" ] || fail "the current-container export left $energy, expected one rfPerInsert off 5000"
+
+if [ "$EXPORT_SELFTEST" = 1 ]; then
+    say "EXPORT_SELFTEST: assert the current-container export did NOT send the stone to the selected B (must fail)"
+    fail "the current-container export sent the 64 stone to the selected B (${b_total}) and left A empty (${a_total}) for one rfPerInsert (energy ${energy}), so this inverted assertion fails as it must"
+fi
+
+say "the selection follows the list's row: selecting A sends the next stack to A, B keeps its 64"
+line=$(select_cmd "$SX" "$SY" "$SZ" "$EXPORT_A" "$SY" "$SZ")
+echo "select A: $line"
+echo "$line" | grep -q "^$SCANNER: select $EXPORT_A $SY $SZ$" || fail "the select command answered: $line"
+ctl command "data merge block $SX $SY $SZ {energy: 5000}" >/dev/null
+seed_slots "$SX" "$SY" "$SZ" '{Slot: 0b, id: "minecraft:stone", count: 64}'
+ctl wait 10
+in_slot=$(slot_count "$SX" "$SY" "$SZ" 0)
+a_total=$(inv_total "$EXPORT_A" "$SY" "$SZ")
+b_total=$(inv_total "$SX" "$SY" "$EXPORT_B")
+echo "export current, A selected: in-slot '${in_slot}', A ${a_total}, B ${b_total}"
+[ "$in_slot" = "" ] || fail "the A-selected export left $in_slot stone in the in-slot"
+[ "$a_total" = 64 ] || fail "the selected chest A holds $a_total, expected 64"
+[ "$b_total" = 64 ] || fail "the unselected chest B changed to $b_total"
+
+say "the export choice and the selection are saved with the block and survive a relaunch"
+ctl quit >/dev/null 2>&1 || true
+sleep 5
+rm -f "$SOCK"
+launch "$GAME"
+ctl wait 20 >/dev/null
+saved=$(data_value "$SX" "$SY" "$SZ" exportc)
+echo "saved exportc after the relaunch: $saved"
+[ "$saved" = 1b ] || fail "the relaunch lost the export choice (saved '$saved')"
+saved=$(data_reply "$SX" "$SY" "$SZ" selected)
+echo "saved selected after the relaunch: $saved"
+case "$saved" in
+    *"[I; $EXPORT_A, $SY, $SZ]"*) ;;
+    *) fail "the relaunch lost the selection on A: $saved" ;;
+esac
+
+say "a selected full barrel refuses without falling through to the walk: the in-slot keeps its 64"
+# The barrel is in the box and not starred; the walk would pass it for the starred
+# A or B (both have room), so a stack that stays proves the selected attempt
+# returned instead of walking on. The tick charges rfPerInsert every tick while a
+# refused stack stays, so the assertion is on the stack, not on the buffer.
+EXPORT_BARREL_Z=$((SZ + 1))
+ctl setblock "$SX" "$SY" "$EXPORT_BARREL_Z" minecraft:air >/dev/null
+ctl setblock "$SX" "$SY" "$EXPORT_BARREL_Z" minecraft:barrel >/dev/null
+ctl wait 4
+seed_slots "$SX" "$SY" "$EXPORT_BARREL_Z" "$(full_slots minecraft:stone)"
+ctl wait 4
+line=$(select_cmd "$SX" "$SY" "$SZ" "$SX" "$SY" "$EXPORT_BARREL_Z")
+echo "select the full barrel: $line"
+echo "$line" | grep -q "^$SCANNER: select $SX $SY $EXPORT_BARREL_Z$" || fail "the select command answered: $line"
+ctl command "data merge block $SX $SY $SZ {energy: 5000}" >/dev/null
+seed_slots "$SX" "$SY" "$SZ" '{Slot: 0b, id: "minecraft:stone", count: 64}'
+ctl wait 10
+in_slot=$(slot_count "$SX" "$SY" "$SZ" 0)
+barrel_last=$(slot_count "$SX" "$SY" "$EXPORT_BARREL_Z" 26)
+a_total=$(inv_total "$EXPORT_A" "$SY" "$SZ")
+b_total=$(inv_total "$SX" "$SY" "$EXPORT_B")
+echo "selected full barrel: in-slot ${in_slot}, barrel slot 26 ${barrel_last}, A ${a_total}, B ${b_total}"
+[ "$in_slot" = 64 ] || fail "a refusing selected barrel left the in-slot at '$in_slot', expected its 64 (no fall-through)"
+[ "$barrel_last" = 64 ] || fail "the full barrel changed (slot 26 ${barrel_last})"
+[ "$a_total" = 64 ] || fail "the selected full barrel fell through to A (${a_total})"
+[ "$b_total" = 64 ] || fail "the selected full barrel fell through to B (${b_total})"
+
+say "export first restores the starred walk, and the stack the barrel refused goes in"
+line=$(export_cmd "$SX" "$SY" "$SZ" first)
+echo "export first: $line"
+echo "$line" | grep -q "^$SCANNER: export first$" || fail "the export command answered: $line"
+saved=$(data_value "$SX" "$SY" "$SZ" exportc)
+echo "saved exportc: $saved"
+[ "$saved" = 0b ] || fail "the saved exportc is '$saved', expected 0b (the first routable container)"
+ctl command "data merge block $SX $SY $SZ {energy: 5000}" >/dev/null
+ctl wait 10
+in_slot=$(slot_count "$SX" "$SY" "$SZ" 0)
+a_total=$(inv_total "$EXPORT_A" "$SY" "$SZ")
+b_total=$(inv_total "$SX" "$SY" "$EXPORT_B")
+energy=$(energy_of "$SX" "$SY" "$SZ")
+echo "export first: in-slot '${in_slot}', A ${a_total}, B ${b_total}, energy ${energy}"
+[ "$in_slot" = "" ] || fail "the walk left $in_slot stone in the in-slot"
+[ "$a_total" = 64 ] || fail "the walk changed A to $a_total"
+[ "$b_total" = 128 ] || fail "the walk's first routable chest B holds $b_total, expected 64 + 64"
+# The buffer is not asserted here: the tick charges rfPerInsert every tick while a
+# refused stack stays (the barrel phase), so the exact figure depends on how many
+# ticks the chat round trip cost. The first export phase pinned the charge (4,980).
+# The barrel and the two chests leave the rig for the loot leg.
+ctl setblock "$SX" "$SY" "$EXPORT_BARREL_Z" minecraft:air >/dev/null
+ctl setblock "$EXPORT_A" "$SY" "$SZ" minecraft:air >/dev/null
+ctl setblock "$SX" "$SY" "$EXPORT_B" minecraft:air >/dev/null
+ctl wait 4
+
 say "the scanner's loot table drops its own item on a survival break"
 BX=$((X + 2))
 BZ=$((Z1 + 5))
@@ -1396,4 +1568,4 @@ echo "give rftoolsbase:machine_frame: $frame"
 echo "$frame" | grep -q 'unknown item' || fail "this build has rftoolsbase:machine_frame, so the recipe is not blocked and must be crafted: $frame"
 
 ctl close >/dev/null 2>&1 || true
-echo "PASS: the storage scanner places and reads back with its facing; a fresh one has no power (no power (0/50000 FE)) and reads nothing; at its default radius 1 it finds nothing two blocks away; /rftoolsstorage radius 2 widens the box and the scan answers minecraft:stone 64 for a chest two blocks away while the chest three away (minecraft:dirt 32) is outside it; radius 3 lists both, one entry a kind; every scan costs rfPerRequest (5,000 -> 4,900 -> 4,800 -> 4,700, printed in the reply); THE SCAN FILTER (the GUI's search box) keeps '@minecraft' listing both kinds, narrows 'dirt' to minecraft:dirt 32 and 'stone' to minecraft:stone 64, answers 'empty' for '@nomatch' with the price still paid (4,600), and leaves the unfiltered scan listing both (4,500) as the differential; THE SORT CHOICE orders the list (Amount- = dirt 64, stone 32, Amount+ = stone 32, dirt 64, Name = dirt 64, stone 32, Mod puts rftoolsstorage:storage_module0 after both minecraft kinds), and the saved AMOUNT_DESCENDING mode orders the list after a relaunch too (stone 64, dirt 32); an emptied buffer refuses with no power and reads nothing, and charging it again makes the scan answer again; scan and radius refuse a chest and the modular storage (not a storage scanner); the radius and the buffer survive a relaunch; THE INJECT TICK pushes 64 stone from the in-slot into the empty chest two blocks away so its Items[0] reads minecraft:stone x64 while the buffer drops by exactly one rfPerInsert (5000 -> 4980), and with the buffer at 0 the next stack stays in the slot and the chest keeps its 64, recharging proving the stall was the power (chest 128); the auto slot routes too (chest 160); items the game puts in the container are routed for one rfPerInsert; a stack nothing accepts is still charged one attempt (20 FE pays one, 19 pays none) and stays in the slot; the walk passes a full barrel for the chest behind it; the tick never writes the out slot; THE REQUEST PATH pulls 32 stone from a chest of 128 into the player's inventory (the reference's straight-to-inventory default), leaving the chest at 96 and the buffer at 4,990 for an explicit count, refuses a kind nothing holds and charges nothing, refuses below the price with the price line (costs 10, have 9), sends a ctl command's 16-stone request straight to the player too, and refuses a request whose out slot holds another kind without pulling or charging; THE INSERT PATH pushes the player's 64 stone into the chest two blocks away so its Items[0] reads minecraft:stone x64 and empties the player's stack for exactly one rfPerInsert (5000 -> 4980), inserts an explicit 10 of 64 for one more rfPerInsert, takes only the 32 a nearly-full barrel has room for and charges NOTHING for the partial insert, moves nothing and charges nothing against a full barrel (the player keeps 64), refuses a box with no routable inventory (there are no routable inventories, no charge) and refuses a chest (not a storage scanner); THE GIVE PATH hands the whole stack (64) straight to the player from a chest of 64, empties the chest and charges the FULL rfPerRequest (5000 -> 4900) with the out slot still holding the request counterfactual's dirt (it has no out slot), hands exactly one item with [single] (chest 3 -> 2, buffer 4900 -> 4800), refuses a kind nothing holds and charges nothing, and refuses below the full price with the price line (costs 100, have 99) without touching the chest, and a give on a chest is refused as not a storage scanner; the loot table drops the scanner on a survival break; the modular storage still answers 0/0 empty no module; a barrel answers not a storage scanner to the same commands; and THE ROUTABLE STAR LIST starts empty (a fresh scanner's tick routes its 64 stone nowhere and still pays one rfPerInsert), routes only the starred chest (B takes 64 while the un-starred A stays empty), still lists the un-starred A's 32 dirt in the scan (the star filters routing, not the list), restores the walk when A is re-starred (A 96), and survives a relaunch (the saved list names A, which then takes another stack, 160)"
+echo "PASS: the storage scanner places and reads back with its facing; a fresh one has no power (no power (0/50000 FE)) and reads nothing; at its default radius 1 it finds nothing two blocks away; /rftoolsstorage radius 2 widens the box and the scan answers minecraft:stone 64 for a chest two blocks away while the chest three away (minecraft:dirt 32) is outside it; radius 3 lists both, one entry a kind; every scan costs rfPerRequest (5,000 -> 4,900 -> 4,800 -> 4,700, printed in the reply); THE SCAN FILTER (the GUI's search box) keeps '@minecraft' listing both kinds, narrows 'dirt' to minecraft:dirt 32 and 'stone' to minecraft:stone 64, answers 'empty' for '@nomatch' with the price still paid (4,600), and leaves the unfiltered scan listing both (4,500) as the differential; THE SORT CHOICE orders the list (Amount- = dirt 64, stone 32, Amount+ = stone 32, dirt 64, Name = dirt 64, stone 32, Mod puts rftoolsstorage:storage_module0 after both minecraft kinds), and the saved AMOUNT_DESCENDING mode orders the list after a relaunch too (stone 64, dirt 32); an emptied buffer refuses with no power and reads nothing, and charging it again makes the scan answer again; scan and radius refuse a chest and the modular storage (not a storage scanner); the radius and the buffer survive a relaunch; THE INJECT TICK pushes 64 stone from the in-slot into the empty chest two blocks away so its Items[0] reads minecraft:stone x64 while the buffer drops by exactly one rfPerInsert (5000 -> 4980), and with the buffer at 0 the next stack stays in the slot and the chest keeps its 64, recharging proving the stall was the power (chest 128); the auto slot routes too (chest 160); items the game puts in the container are routed for one rfPerInsert; a stack nothing accepts is still charged one attempt (20 FE pays one, 19 pays none) and stays in the slot; the walk passes a full barrel for the chest behind it; the tick never writes the out slot; THE REQUEST PATH pulls 32 stone from a chest of 128 into the player's inventory (the reference's straight-to-inventory default), leaving the chest at 96 and the buffer at 4,990 for an explicit count, refuses a kind nothing holds and charges nothing, refuses below the price with the price line (costs 10, have 9), sends a ctl command's 16-stone request straight to the player too, and refuses a request whose out slot holds another kind without pulling or charging; THE INSERT PATH pushes the player's 64 stone into the chest two blocks away so its Items[0] reads minecraft:stone x64 and empties the player's stack for exactly one rfPerInsert (5000 -> 4980), inserts an explicit 10 of 64 for one more rfPerInsert, takes only the 32 a nearly-full barrel has room for and charges NOTHING for the partial insert, moves nothing and charges nothing against a full barrel (the player keeps 64), refuses a box with no routable inventory (there are no routable inventories, no charge) and refuses a chest (not a storage scanner); THE GIVE PATH hands the whole stack (64) straight to the player from a chest of 64, empties the chest and charges the FULL rfPerRequest (5000 -> 4900) with the out slot still holding the request counterfactual's dirt (it has no out slot), hands exactly one item with [single] (chest 3 -> 2, buffer 4900 -> 4800), refuses a kind nothing holds and charges nothing, and refuses below the full price with the price line (costs 100, have 99) without touching the chest, and a give on a chest is refused as not a storage scanner; the loot table drops the scanner on a survival break; the modular storage still answers 0/0 empty no module; a barrel answers not a storage scanner to the same commands; and THE ROUTABLE STAR LIST starts empty (a fresh scanner's tick routes its 64 stone nowhere and still pays one rfPerInsert), routes only the starred chest (B takes 64 while the un-starred A stays empty), still lists the un-starred A's 32 dirt in the scan (the star filters routing, not the list), restores the walk when A is re-starred (A 96), and survives a relaunch (the saved list names A, which then takes another stack, 160); THE EXPORT CHOICE (the GUI's 'Export to current container') sends the in-slot's 64 stone only to the selected inventory (B 64, A 0) for one rfPerInsert, follows the list's row (selecting A makes A 64 while B keeps its 64), saves the choice and the selection with the block so both survive a relaunch, does not fall through to the walk from a selected full barrel (the in-slot keeps its 64 and A and B stay at 64), and 'export first' restores the starred walk, which routes the same stack to B (128)"

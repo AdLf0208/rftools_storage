@@ -36,17 +36,18 @@ use mod_api::{
 };
 
 use crate::runtime::{
-    Found, GiveAmount, InsertCharge, Kind, LEVEL_ADMINS, LockPress, RequestCharge,
-    SCANNER_AUTO_SLOT, SCANNER_IN_SLOT, SCANNER_MAX_ENERGY, SCANNER_OUT_SLOT,
-    SCANNER_RECEIVE_PER_TICK, SCANNER_RF_PER_INSERT, SCANNER_SLOTS, SLOT_LIMIT, STORAGE_SCANNER,
-    Slot, SortingMode, Storage, card_accepts, carried_slot_in, clamp_radius, gave_line,
-    give_amount, give_nothing_line, give_price, inject_plan, insert_amount, insert_charge,
-    insert_line, insert_nothing_line, insert_partial_line, insert_price, is_routable,
-    is_storage_scanner, lock_press, matches_search, may_inspect, merge_counts, module_id,
-    module_tier, no_power_line, no_routable_line, out_slot_room, request_amount, request_charge,
-    request_line, request_no_power_line, request_nothing_line, request_out_slot_line,
-    request_price, restored_count, routable_line, routing_target, scan_line, scan_positions,
-    scanner_radius, search_name, search_namespace, slot_accepts, sort_found, spend_power, star,
+    ExportMode, ExportRoute, Found, GiveAmount, InjectSlot, InsertCharge, Kind, LEVEL_ADMINS,
+    LockPress, RequestCharge, SCANNER_AUTO_SLOT, SCANNER_IN_SLOT, SCANNER_MAX_ENERGY,
+    SCANNER_OUT_SLOT, SCANNER_RECEIVE_PER_TICK, SCANNER_RF_PER_INSERT, SCANNER_SLOTS, SLOT_LIMIT,
+    STORAGE_SCANNER, Slot, SortingMode, Storage, card_accepts, carried_slot_in, clamp_radius,
+    export_line, export_route, gave_line, give_amount, give_nothing_line, give_price, inject_plan,
+    injectable_at, insert_amount, insert_charge, insert_line, insert_nothing_line,
+    insert_partial_line, insert_price, is_routable, is_storage_scanner, lock_press, matches_search,
+    may_inspect, merge_counts, module_id, module_tier, no_power_line, no_routable_line,
+    out_slot_room, request_amount, request_charge, request_line, request_no_power_line,
+    request_nothing_line, request_out_slot_line, request_price, restored_count, routable_line,
+    routing_target, scan_line, scan_positions, scanner_radius, search_name, search_namespace,
+    selection_line, slot_accepts, sort_found, spend_power, star,
 };
 
 /// The block this slice implements, exactly as the content declares it.
@@ -67,6 +68,16 @@ const KEY_SORT: &str = "sortMode";
 /// (`BlockPosTools.write`). Nothing writes it until the player stars a cell, so
 /// a fresh scanner has no routable inventory at all.
 const KEY_ROUTABLE: &str = "routable";
+/// The saved compound key of the GUI's export choice: upstream's
+/// `StorageScannerData.exportC` codec field name (`exportc`), a byte. `false`
+/// (the first routable container) is `StorageScannerData.DEFAULT`.
+const KEY_EXPORT: &str = "exportc";
+/// The saved compound key of the inventory the GUI's list selected
+/// (`getInventoryForBlock`'s `lastSelectedInventory`), one
+/// `{c: [I; x, y, z]}` compound — the same cell shape as one `routable` entry.
+/// Upstream keeps that field transient; this port saves it with the block so a
+/// relaunch does not silently change where items go (notes.md, deviation 11).
+const KEY_SELECTED: &str = "selected";
 /// The saved compound key of a machine's FE buffer: the name the game's own
 /// energy handler reads and writes (`ModEnergyBuffer`).
 const KEY_ENERGY: &str = "energy";
@@ -1561,6 +1572,35 @@ fn routable_tag(set: &[[i32; 3]]) -> Tag {
     Tag::List(entries)
 }
 
+/// The scanner's saved export choice (`StorageScannerData.exportC` under the
+/// `exportc` key). A block that was never given the flag — or one a foreign save
+/// gave a non-number — reads as the default, `First` (`StorageScannerData.DEFAULT`).
+fn saved_export(data: Option<&Compound>) -> ExportMode {
+    ExportMode::from_saved(number(field(data, KEY_EXPORT)).map(|flag| flag != 0))
+}
+
+/// The inventory the GUI's list selected, from the `selected` key: one
+/// `{c: [I; x, y, z]}` compound, the cell shape `BlockPosTools.write` uses. A
+/// block that never had a row selected (and a malformed entry) has none.
+fn saved_selection(data: Option<&Compound>) -> Option<[i32; 3]> {
+    let Some(Tag::Compound(entry)) = field(data, KEY_SELECTED) else {
+        return None;
+    };
+    let Some(Tag::IntArray(xyz)) = field(Some(entry), "c") else {
+        return None;
+    };
+    let [x, y, z, ..] = xyz.as_slice() else {
+        return None;
+    };
+    Some([*x, *y, *z])
+}
+
+/// The saved shape of the selection: the same `{c: [I; x, y, z]}` compound a
+/// `routable` entry is, so the block carries the cell through a relaunch.
+fn selection_tag(at: [i32; 3]) -> Tag {
+    Tag::compound([("c", Tag::IntArray(at.to_vec()))])
+}
+
 /// `/rftoolsstorage scan <pos> [query]`: what the inventories in the scanner's box
 /// hold, filtered by the GUI list's search box when the command names one.
 ///
@@ -2172,6 +2212,64 @@ fn routable_readout(
     format!("{block}: {}", routable_line(target, on))
 }
 
+/// `/rftoolsstorage export <pos> <current|first>`: the GUI's export choice
+/// (`GuiStorageScanner.exportToStarred`, `StorageScannerData.exportC`) reached
+/// through a command, since the port has no list widget. `current` is upstream's
+/// `exportC = true` — the tick's GUI-slot stack goes to the inventory the list's
+/// selected row names ([`select_readout`]) and nowhere else; `first` is the
+/// default, the starred walk. Saved under upstream's `exportc` key.
+fn export_readout(host: &mut dyn ServerHost, pos: [i32; 3], wanted: &str) -> String {
+    let block = block_id_at(&*host, pos);
+    if !is_storage_scanner(&block) {
+        return format!("{block}: not a storage scanner");
+    }
+    let Some(mode) = ExportMode::from_word(wanted) else {
+        return format!("{block}: unknown export mode '{wanted}' (current, first)");
+    };
+    let Some(entity) = scanner_entity(&*host, pos) else {
+        return format!("{block}: not a storage scanner");
+    };
+    let mut data = Compound::new();
+    data.insert(KEY_EXPORT.into(), Tag::Byte(i8::from(mode.saved())));
+    let _ = entity.merge_data(host, data);
+    format!("{block}: {}", export_line(mode))
+}
+
+/// `/rftoolsstorage select <pos> <target>`: the GUI list's selected row
+/// (`StorageScannerTileEntity.getInventoryForBlock`'s `lastSelectedInventory`),
+/// which the `current` export choice pushes the tick's stack into. The target
+/// must be a cell the GUI's list could show — in the scan box, with an item
+/// capability, never the scanner's own cell or another scanner. Upstream keeps
+/// the selection in a transient field; this port saves it with the block, so a
+/// relaunch does not silently change where items go (notes.md, deviation 11).
+fn select_readout(host: &mut dyn ServerHost, pos: [i32; 3], target: [i32; 3]) -> String {
+    let block = block_id_at(&*host, pos);
+    if !is_storage_scanner(&block) {
+        return format!("{block}: not a storage scanner");
+    }
+    let Some(entity) = scanner_entity(&*host, pos) else {
+        return format!("{block}: not a storage scanner");
+    };
+    let data = entity.data(&*host);
+    let radius = saved_radius(data.as_ref());
+    let [tx, ty, tz] = target;
+    if target == pos || !scan_positions(pos, radius).contains(&target) {
+        return format!("{block}: {tx} {ty} {tz} is not an inventory in the scan box");
+    }
+    let Some(level) = host.level(host.dimension()) else {
+        return format!("{block}: {tx} {ty} {tz} is not an inventory in the scan box");
+    };
+    if level.capability(&mut *host, &ITEMS, target, None).is_none()
+        || level.block(&*host, target) == Some(scanner_key())
+    {
+        return format!("{block}: {tx} {ty} {tz} is not an inventory in the scan box");
+    }
+    let mut written = Compound::new();
+    written.insert(KEY_SELECTED.into(), selection_tag(target));
+    let _ = entity.merge_data(host, written);
+    format!("{block}: {}", selection_line(target))
+}
+
 /// The level that is ticking: a block entity's tick runs with its own level in
 /// place, which is not necessarily the dimension a command would act in.
 fn ticking_level(host: &dyn ServerHost) -> Option<LevelRef> {
@@ -2205,6 +2303,8 @@ fn tick_scanner(
     let stored = saved_count(data, KEY_ENERGY);
     let radius = saved_radius(data);
     let routable = saved_routable(data);
+    let export = saved_export(data);
+    let selected = saved_selection(data);
     let in_filled = items.get(SCANNER_IN_SLOT).is_some_and(Option::is_some);
     let auto_filled = items.get(SCANNER_AUTO_SLOT).is_some_and(Option::is_some);
     let plan = inject_plan(stored, in_filled, auto_filled);
@@ -2225,7 +2325,14 @@ fn tick_scanner(
         if stack.count() == 0 {
             continue;
         }
-        *cell = inject_stack(host, level, pos, radius, &routable, stack);
+        // Upstream passes the export choice for the GUI slot only
+        // (`injectStackInternal(stack, getData(…).exportC(), …)`); the
+        // automation slot always walks.
+        let route = match step {
+            InjectSlot::In => export_route(export, selected),
+            InjectSlot::Auto => ExportRoute::Walk,
+        };
+        *cell = inject_stack(host, level, pos, radius, &routable, route, stack);
         left = left.saturating_sub(SCANNER_RF_PER_INSERT);
     }
     if let Tag::Compound(nbt) = saved
@@ -2242,17 +2349,32 @@ fn tick_scanner(
 /// skipped, each inventory takes what it will and the next one gets the rest — with
 /// every neighbour's write in one transaction, so a refused write leaves each
 /// inventory as it was and the stack whole.
+///
+/// `route` is the export choice's answer ([`ExportRoute`]): `Walk` is the starred
+/// walk, `Only(at)` upstream's selected-container attempt, which tries that one
+/// inventory and nothing else — a full or absent selected container leaves the
+/// stack in the slot instead of falling through to the walk.
 fn inject_stack(
     host: &mut dyn ServerHost,
     level: LevelRef,
     own: [i32; 3],
     radius: i32,
     routable: &[[i32; 3]],
+    route: ExportRoute,
     stack: ItemStack,
 ) -> Option<ItemStack> {
     let resource = ItemResource::of(&stack);
     let total = stack.count();
-    let targets = scan_targets(&*host, level, own, radius, routable);
+    let targets = match route {
+        ExportRoute::Walk => scan_targets(&*host, level, own, radius, routable),
+        ExportRoute::Only(at) => {
+            if injectable_at(own, at, scanner_stands(&*host, level, at)) {
+                vec![at]
+            } else {
+                Vec::new()
+            }
+        }
+    };
     let outcome = host.transaction(|host, tx| -> Result<Option<ItemStack>, ()> {
         let mut moved = 0_u32;
         for at in &targets {
@@ -2324,6 +2446,12 @@ pub(crate) fn on_register_commands(event: &mut RegisterCommandsEvent<'_>) {
         "rftoolsstorage routable <pos:block_pos> <target:block_pos> <state:word>",
     ));
     event.commands.push(Command::new(
+        "rftoolsstorage export <pos:block_pos> <mode:word>",
+    ));
+    event.commands.push(Command::new(
+        "rftoolsstorage select <pos:block_pos> <target:block_pos>",
+    ));
+    event.commands.push(Command::new(
         "rftoolsstorage request <pos:block_pos> <item:item> [count:integer]",
     ));
     event.commands.push(Command::new(
@@ -2348,7 +2476,7 @@ pub(crate) fn on_run_mod_command(
     let Some(CommandArgumentValue::BlockPos(pos)) = event.command.argument("pos") else {
         feedback(
             host,
-            "usage: /rftoolsstorage info|lock|scan|radius|sort|routable|request|give|insert <x> <y> <z> …",
+            "usage: /rftoolsstorage info|lock|scan|radius|sort|routable|export|select|request|give|insert <x> <y> <z> …",
         );
         return Flow::Cancel;
     };
@@ -2527,6 +2655,27 @@ pub(crate) fn on_run_mod_command(
             };
             routable_readout(host, pos, *target, on)
         }
+        "export" => {
+            let Some(CommandArgumentValue::String(mode)) = event.command.argument("mode") else {
+                feedback(
+                    host,
+                    "usage: /rftoolsstorage export <x> <y> <z> <current|first>",
+                );
+                return Flow::Cancel;
+            };
+            export_readout(host, pos, mode)
+        }
+        "select" => {
+            let Some(CommandArgumentValue::BlockPos(target)) = event.command.argument("target")
+            else {
+                feedback(
+                    host,
+                    "usage: /rftoolsstorage select <x> <y> <z> <target x> <target y> <target z>",
+                );
+                return Flow::Cancel;
+            };
+            select_readout(host, pos, *target)
+        }
         _ => return Flow::Continue,
     };
     feedback(host, &line);
@@ -2681,6 +2830,55 @@ mod tests {
             saved_routable(Some(&broken)),
             vec![[1, 2, 3]],
             "an empty array, a missing `c` and a repeated cell are dropped"
+        );
+    }
+
+    #[test]
+    fn the_export_choice_and_the_selection_round_trip_through_the_saved_compound() {
+        // `StorageScannerData.exportC` is the `exportc` flag; the selection is this
+        // port's own `selected` cell (upstream keeps it in a transient field, see
+        // notes.md), written in the same `{c: [I; x, y, z]}` shape a star entry is.
+        let mut saved = Compound::new();
+        saved.insert(KEY_EXPORT.into(), Tag::Byte(1));
+        saved.insert(KEY_SELECTED.into(), selection_tag([12, 102, 3]));
+        assert_eq!(saved_export(Some(&saved)), ExportMode::Current);
+        assert_eq!(saved_selection(Some(&saved)), Some([12, 102, 3]));
+        assert_eq!(
+            selection_tag([12, 102, 3]),
+            Tag::compound([("c", Tag::IntArray(vec![12, 102, 3]))]),
+            "the selection is the same int-array compound a star entry is"
+        );
+
+        let mut first = Compound::new();
+        first.insert(KEY_EXPORT.into(), Tag::Byte(0));
+        assert_eq!(saved_export(Some(&first)), ExportMode::First);
+        assert_eq!(
+            saved_export(None),
+            ExportMode::First,
+            "a scanner that was never given the flag is the default"
+        );
+        assert_eq!(
+            saved_export(Some(&Compound::new())),
+            ExportMode::First,
+            "a compound without the key is the default"
+        );
+        assert_eq!(saved_selection(None), None);
+        assert_eq!(saved_selection(Some(&Compound::new())), None);
+
+        let broken = Compound::from_iter([(
+            KEY_SELECTED.into(),
+            Tag::compound([("c", Tag::IntArray(vec![1, 2]))]),
+        )]);
+        assert_eq!(
+            saved_selection(Some(&broken)),
+            None,
+            "an unreadable cell is dropped, as BlockPosTools.read drops it"
+        );
+        let not_a_cell = Compound::from_iter([(KEY_SELECTED.into(), Tag::IntArray(vec![1, 2, 3]))]);
+        assert_eq!(
+            saved_selection(Some(&not_a_cell)),
+            None,
+            "the selection is a compound, not a bare array"
         );
     }
 

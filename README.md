@@ -47,7 +47,14 @@ list), saved with the block. `/rftoolsstorage routable <x> <y> <z> <tx> <ty> <tz
 into — the tick, a request, a give or an insert — while `scan` still lists every
 inventory in the box. A fresh scanner starts with **nothing** starred (as the jar's
 empty `HashSet` does), so star the inventories you want it to use; the set is saved
-with the block and survives a relaunch.
+with the block and survives a relaunch. `/rftoolsstorage export <x> <y> <z>
+<current|first>` is the list's **export choice** (`StorageScannerData.exportC`):
+`current` pushes the tick's in-slot stack only into the inventory the list's selected
+row names — `/rftoolsstorage select <x> <y> <z> <tx> <ty> <tz>` — and a container
+that refuses leaves the stack in the slot instead of falling through to the walk,
+while `first` (the default) is the starred walk. Both the choice and the selection
+are saved with the block; the selection is this port's own key (the jar keeps it in a
+transient field), so a relaunch does not silently change where items go.
 
 ## Commands
 
@@ -59,6 +66,8 @@ with the block and survives a relaunch.
 | `/rftoolsstorage radius <x> <y> <z> <n>` | sets the scanner's radius (1..20) |
 | `/rftoolsstorage sort <x> <y> <z> <mode>` | the scan list's order: `Amount+`, `Amount-`, `Mod`, `Name` (`Tag` is unavailable here), saved with the block |
 | `/rftoolsstorage routable <x> <y> <z> <tx> <ty> <tz> <on\|off>` | stars (or un-stars) an inventory in the box: only starred inventories are routed into |
+| `/rftoolsstorage export <x> <y> <z> <current\|first>` | the list's export choice: `current` exports only into the selected inventory (refusing, not falling through), `first` is the starred walk; saved with the block |
+| `/rftoolsstorage select <x> <y> <z> <tx> <ty> <tz>` | the list's selected row, which `export … current` exports into; saved with the block |
 | `/rftoolsstorage request <x> <y> <z> <item> [n]` | pulls a kind out of the scanned inventories into the player (a tenth price for an explicit count) |
 | `/rftoolsstorage give <x> <y> <z> <item> [single]` | hands a whole stack (or one item with `single`) straight to the player for the full price; no out slot |
 | `/rftoolsstorage insert <x> <y> <z> <item> [n]` | pushes the player's stack (or `n` of it) into the scanned inventories; one `rfPerInsert`, charged only when the stack emptied |
@@ -68,8 +77,9 @@ They need an operator or a player within 8 blocks of the block.
 ## What is not ported
 
 The crafting manager (a WIP in the jar itself), the storage scanner's GUI **list
-widget** (its search is carried as `scan`'s query, its sort as `sort`, and its
-per-inventory star as `routable`; compact, cycle and visible size are not) and the
+widget** (its search is carried as `scan`'s query, its sort as `sort`, its
+per-inventory star as `routable`, and its export choice as `export`/`select`; compact,
+cycle and visible size are not) and the
 out slot's fill for the
 no-player fallback, the XNet access settings (per-path input/output permissions), the storage control screen module (the give path's own
 caller; its behaviour is carried as `/rftoolsstorage give`),
@@ -92,7 +102,7 @@ the old `.hnmod` pin (`1d63e0a5…` / `5a64af93…`) is retired with the format.
 
 ```sh
 cd ports/rftoolsstorage
-cargo test                                    # the pure rules: 39 runtime tests + 4 glue tests (43)
+cargo test                                    # the pure rules: 48 runtime tests + 6 glue tests (54)
 cargo clippy --all-targets -- -D warnings
 rustfmt --edition 2024 --check src/lib.rs src/support.rs src/runtime.rs
 cargo horizon-mod check                       # the SDK gate: format, manifest, code, API usage
@@ -109,15 +119,16 @@ The in-game legs need a **launcher-built** game carrying the package
 (`horizon-launcher native-build ports/rftoolsstorage --instance <i> --trust-native-code`),
 then `GAME=<that horizon-client> tools/e2e.sh`. The scenario has its
 counterfactual (`COUNTERFACTUAL=1`, a vanilla barrel) and its selftest
-(`SELFTEST=1`, `REQUEST_SELFTEST=1`, `GIVE_SELFTEST=1`, `INSERT_SELFTEST=1` and
-`SCAN_SELFTEST=1`, must fail).
+(`SELFTEST=1`, `REQUEST_SELFTEST=1`, `GIVE_SELFTEST=1`, `INSERT_SELFTEST=1`,
+`SCAN_SELFTEST=1`, `SORT_SELFTEST=1`, `ROUTABLE_SELFTEST=1` and
+`EXPORT_SELFTEST=1`, must fail).
 
 Evidence and the exact commands: [`VALIDATION.md`](VALIDATION.md).
 
 ## Layout
 
 ```
-horizon-mod.toml        the only manifest: id, version 0.2.10, api "0.2", side "both",
+horizon-mod.toml        the only manifest: id, version 0.2.13, api "0.2", side "both",
                         capabilities, [native] game/horizon/mixins
 Cargo.toml              one crate; horizon-mod-api from .horizon/sdk
 src/lib.rs              the one #[mod_api::horizon_mod] impl Hooks (register, right_click_block,
@@ -126,7 +137,7 @@ src/runtime.rs          the pure rules (the storage's, the menu's, the carried p
                         the scanner's, with their tests)
 src/support.rs          the game glue: the block-entity Parts, the container, the menu, the
                         click, the carried payload and the commands (readout, scan, radius,
-                        request, give, insert)
+                        sort, routable, export, select, request, give, insert)
 assets/rftoolsstorage/  blockstates, models, textures and lang, carried from the jar
 data/rftoolsstorage/    the block and item declarations, the creative tab, loot tables, recipes, tags
 data/minecraft/         the pickaxe/iron-tool tags the blocks join

@@ -2,10 +2,12 @@
 
 Slice 1 (the `modular_storage` block with a tier-1 storage module).
 
-**Version 0.2.12 is the current SDK package (2026-11-23):** one flat `.hmod`, SDK
+**Version 0.2.13 is the current SDK package (2026-11-23):** one flat `.hmod`, SDK
 nightly `0a875da91dbb0fdcb7ba8c42c11341aa229af51a`, mixins
 `e59da9094f0c2fdda6c627fe9eff22dec6a906f0`. **§0l is this slice's evidence (the
-scanner's routable star list) and is where the in-game legs are**; §0k is slice
+scanner's routable star list) and is where slice 12's in-game legs are**; **§0m is
+slice 13's evidence (the scanner's export choice) and is where this slice's in-game
+legs are**; §0k is slice
 11's (the scan list's sort choice), §0j is slice 10's
 (the scan's search filter), §0i is
 slice 9's (the scanner's insert-from-screen path), §0h slice 8's (the
@@ -20,6 +22,75 @@ history. The 0.2.x `tools/e2e.sh` runs on a launcher-built game
 Every command below ran through `ports/tools/build-slot.sh` (a lease per step);
 in 0.1.0 compile steps forwarded to the second machine and game legs ran locally
 because the script uses `--offscreen`.
+
+## 0m. The scanner's export choice — version 0.2.13 (2026-11-23)
+
+Slice 13: the GUI's "Export to current container" choice (`StorageScannerData.exportC`,
+the saved `exportc` flag) reached as `/rftoolsstorage export <pos> <current|first>`, plus
+the list's selected row (`getInventoryForBlock`'s `lastSelectedInventory`) reached as
+`/rftoolsstorage select <pos> <target>`. Under `current` the tick's **GUI-slot** stack goes
+only into the selected inventory and, as upstream's `injectStackInternal` returns there,
+never falls through to the starred walk; `first` (the default) is that walk. The selection
+is saved with the block — upstream's field is transient, so a relaunch would silently
+change where items go (notes.md, deviation 11) — under the port's `selected` key, in the
+`{c: [I; x, y, z]}` shape a star entry has; the mode uses upstream's own `exportc` key.
+The selected row does not change the readout: `scan` still lists the whole box (the list
+widget remains a gap). The slice plan, with the gap line and the upstream reading, is
+`ports/_shared/evidence/rftoolsstorage/SLICE-13-PLAN.md`. Ladder and package logs:
+`ports/_shared/evidence/rftoolsstorage/`; game legs:
+`ports/_shared/evidence/rftoolsstorage-e2e/`.
+
+| Step | Command | Result | Log |
+|---|---|---|---|
+| red proof | `cargo test` with `word`/`from_word`/`export_line`/`selection_line` stubbed, `saved` false, `from_saved` always `First`, `export_route` always `Walk` | **FAILED. 50 passed; 3 failed**, `TEST_EXIT:101` | `slice13-red.log` |
+| tests | `cargo test` | `running 54 tests` → **54 passed**, 0 failed, `TEST_EXIT:0` (48 runtime + 6 glue) | `sdk-test.log`, `slice13-test.log` |
+| lints | `cargo clippy --all-targets -- -D warnings` | `Finished`, **CLIPPY_EXIT:0**, 0 warnings | `slice13-clippy.log` |
+| format | `rustfmt --edition 2024 --check src/{lib,support,runtime}.rs` | `FMT_EXIT:0` after the import wrapping and one join were formatted | `slice13-fmt.log` |
+| SDK gate | `cargo horizon-mod check` | **TREE_CHECK_EXIT:0** — *"… 540 items of the API (5 Part kinds, 2 capabilitys, 149 fields or variants, 18 hooks, 52 hook arguments, 2 macros, 168 methods, 29 traits, 115 types). Made for 0a875da."* | `slice13-tree-check.log` |
+| package | `rm -f Cargo.lock && cargo horizon-mod build`, twice | **98,817 B**, SHA-256 `f89f5974f411cf012a7c5a28242185e630bd6c9ffa726939863ceb1197baeb83`, **`cmp`-identical** (the packed README was corrected after the first leg; `slice13-readme-delta.log` proves that rebuild changed only `README.md`, and the three legs were re-run on the delivered file) | `slice13-build-1.log`, `slice13-build-2.log` |
+| package check | `cargo horizon-mod check rftoolsstorage.hmod` | `rftoolsstorage 0.2.13 (native-mod, format native-1/0a875da…/e59da90…, for 26.3)`, **98,817 bytes**, `f89f5974…eb83`, **FILE_CHECK_EXIT:0** | `slice13-check.log` |
+| entries | `unzip -l rftoolsstorage.hmod` | **67 files**, no `Cargo.lock`; `src/runtime.rs` byte-identical in tree and package (`9af88f59eccb`) | — |
+| fits, the pin | `cargo horizon-mod fits rftoolsstorage.hmod --build 0a875da` | `0a875da  made for`, **FITS_PIN_EXIT:0** | `slice13-fits.log` |
+| fits, another build | `cargo horizon-mod fits rftoolsstorage.hmod --build 0b14f8a` | `0b14f8a  fits`, **FITS_OTHER_EXIT:0** | `slice13-fits.log` |
+| launcher build | `BUILD_LOCAL=1 ports/tools/launcher-game.sh build rftoolsstorage` | `Compiling rftoolsstorage (1 of 1)`, tag `native-0a875da-f2d820a6f1ad`, **LAUNCHER_BUILD_EXIT:0** | `slice13-launcher-build.log` |
+| in game | `build-slot.sh run --job e2e-rftoolsstorage --step e2e -- bash ports/rftoolsstorage/tools/e2e.sh` (`CONTROL_GAME=`) | **PASS** + `EXIT:0` | `rftoolsstorage-e2e/e2e-export.log` |
+| control | the same leg on the Nightly **without** the package | **FAIL** + `EXIT:1` (`{"error":"unknown item rftoolsstorage:storage_scanner"}`) | `e2e-export-control.log` |
+| selftest (this slice) | `EXPORT_SELFTEST=1` (asserts the selected chest DID take the stack) | **FAIL** + `EXIT:1` — *"the current-container export sent the 64 stone to the selected B (64) and left A empty (0) for one rfPerInsert (energy 4980) …"* | `e2e-export-selftest.log` |
+| e2e gate | `python3 ports/tools/check-e2e-logs.py rftoolsstorage-e2e --strict` | `logs=36  ok=36  missing-exit=0  bad-exit=0`, exit 0 | — |
+| package gate | `python3 ports/tools/verify-sdk-package.py rftoolsstorage` | `1/1 package(s) verified`, exit 0 | — |
+| skills gate | `python3 ports/tools/check-skills.py --notes ports/rftoolsstorage --strict` | PASS | — |
+
+The default leg's export phase (abridged; the log has every `ctl` reply):
+
+```
+saved exportc (default): Found no elements matching exportc
+export current: rftoolsstorage:storage_scanner: export current
+saved exportc: 1b
+select B: rftoolsstorage:storage_scanner: select 16 102 12
+saved selected (B): 16, 102, 10 has the following block data: {c: [I; 16, 102, 12]}
+export current, B selected: in-slot '', A 0, B 64, energy 4980
+select A: rftoolsstorage:storage_scanner: select 18 102 10
+export current, A selected: in-slot '', A 64, B 64
+saved exportc after the relaunch: 1b
+saved selected after the relaunch: 16, 102, 10 has the following block data: {c: [I; 18, 102, 10]}
+select the full barrel: rftoolsstorage:storage_scanner: select 16 102 11
+selected full barrel: in-slot 64, barrel slot 26 64, A 64, B 64
+export first: rftoolsstorage:storage_scanner: export first
+saved exportc: 0b
+export first: in-slot '', A 64, B 128, energy 5000
+```
+
+The brief's rig: scanner at S, radius 2, two empty chests two blocks away — A at S+2 on x,
+B at S+2 on z (B first in the x-major walk), both starred. The flag is absent on a fresh
+scanner and `1b` after `export current`; the first tick puts the 64 stone in the selected
+B only (A 0) for exactly one `rfPerInsert` (5,000 → 4,980); `select A` sends the next
+stack to A while B keeps its 64; the mode and the selection survive quit + re-entry
+(`exportc` 1b, `selected` = A) and still route; a **selected full barrel** leaves the 64
+in the slot with A and B unchanged (no fall-through — a walk would have taken it); and
+`export first` saves `0b` and routes that same stack to the walk's first starred cell
+(B 128). `EXPORT_SELFTEST=1` inverts the first assertion and the run ends `FAIL:` +
+`EXIT:1`; the first reaching run is kept as `e2e-export-first-run.log` because its extra
+buffer assertion found the tick-charge trap.
 
 ## 0l. The scanner's routable star list — version 0.2.12 (2026-11-23)
 

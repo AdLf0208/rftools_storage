@@ -13,7 +13,7 @@ differences, are in [`FINDINGS.md`](FINDINGS.md).
 publishing (ARCHITECTURE.md §8); the port carries the upstream MIT notice in
 [`LICENSE`](LICENSE) and its provenance in [`LICENSE-NOTICE.md`](LICENSE-NOTICE.md).
 
-**Format: the SDK package (2026-11-18), version 0.2.12.** One flat `.hmod` —
+**Format: the SDK package (2026-11-18), version 0.2.13.** One flat `.hmod` —
 `horizon-mod.toml` + `Cargo.toml` + `src/` + `assets/` + `data/` — built by the
 launcher against SDK nightly **`0a875da91dbb0fdcb7ba8c42c11341aa229af51a`** with
 horizon-mixins **`e59da9094f0c2fdda6c627fe9eff22dec6a906f0`** (see
@@ -28,7 +28,8 @@ horizon-mixins **`e59da9094f0c2fdda6c627fe9eff22dec6a906f0`** (see
 [`## Slice 9`](#slice-9--the-scanners-insert-from-screen-path-version-029),
 [`## Slice 10`](#slice-10--the-scans-search-filter-version-0210),
 [`## Slice 11`](#slice-11--the-scanner-lists-sort-choice-version-0211),
-[`## Slice 12`](#slice-12--the-scanners-routable-star-list-version-0212)).
+[`## Slice 12`](#slice-12--the-scanners-routable-star-list-version-0212),
+[`## Slice 13`](#slice-13--the-scanners-export-choice-version-0213)).
 The retired `.hnmod` container pinned Horizon `1d63e0a5…` / mixins `5a64af93…`;
 `src/runtime.rs` was byte-identical to the retired
 `mixins/rftoolsstorage/runtime.rs` until the 2026-11-18 review fixes gave it the
@@ -61,10 +62,17 @@ or `@modid` a namespace prefix) and slice 11 (the scan list's **sort choice**:
 list**: `/rftoolsstorage routable <pos> <target> <on|off>` saves the GUI's
 per-inventory star, and only a starred inventory is routed into while the scan
 still lists every inventory in the box; a fresh scanner starts with nothing
-starred, exactly as upstream's empty `HashSet` does) are implemented and verified
-in a launcher-built game at the pin (the legs are listed per slice below;
-`ports/_shared/evidence/rftoolsstorage-e2e/`). The gap list below is the rest of
-the mod.
+starred, exactly as upstream's empty `HashSet` does) and slice 13 (the scanner's
+**export choice**: `/rftoolsstorage export <pos> <current|first>` sets the GUI's
+"Export to current container" choice — `StorageScannerData.exportC` — so the
+tick's GUI-slot stack goes only into the inventory the list's selected row names
+(`/rftoolsstorage select <pos> <target>`), and refuses rather than falling
+through to the starred walk; the mode is saved under upstream's `exportc` key,
+and the selection — upstream's transient `lastSelectedInventory` — is saved too,
+so a relaunch does not silently change where items go) are implemented and
+verified in a launcher-built game at the pin (the legs are listed per slice
+below; `ports/_shared/evidence/rftoolsstorage-e2e/`). The gap list below is the
+rest of the mod.
 
 ## Class + tier and the approach
 
@@ -182,6 +190,17 @@ the mod.
     next menu open re-syncs it. The server never takes it: `/rftoolsstorage info`
     and the reopened grid are the truth, and the e2e asserts both. Grid slots do
     not do this (their refusals are predicted).
+11. **The scanner's selected inventory is saved with the block** (slice 13).
+    Upstream's `lastSelectedInventory` is a transient field: nothing saves it, so a
+    relaunch makes a `current`-export scanner fall back to its (empty) selection and
+    a player's items would silently go nowhere — or, under the walk, somewhere else.
+    This port writes the cell into the scanner's compound under `selected` (one
+    `{c: [I; x, y, z]}` compound, the shape a `routable` entry has), so the mode and
+    the selection both survive a relaunch. `export first` is the way back to the walk
+    (upstream's "All routable" list row, which sets the `(-1, -1, -1)` sentinel), so no
+    "clear the selection" form is needed. The selection's *contents view* is not
+    carried: `scan` still lists the whole box (slice 5's deviation 1), while upstream's
+    list would show only the selected row's inventory.
 
 ## Upstream defects fixed
 
@@ -201,7 +220,11 @@ None. The two candidates were checked and left alone, on purpose:
   optional query, its **sort** is slice 11, carried as `sort`'s saved mode and
   `scan`'s order, and its **routable star list** is slice 12, carried as
   `/rftoolsstorage routable <pos> <target> <on|off>` — the set is saved and filters
-  every routing walk, while the scan still lists every inventory), the
+  every routing walk, while the scan still lists every inventory; its **export
+  choice** is slice 13, carried as `export`'s saved mode and `select`'s saved cell,
+  and its per-row contents view — `getInventoryForBlock` listing only the selected
+  row — is not carried, because `scan` lists the whole box, slice 5's substitute for
+  the list), the
   **remote/tablet variant**, the XNet access settings (slice 12 carries the star
   list but not `InventoryAccessSettings`' per-inventory input/output permissions,
   which need the XNet side), and the claimed-land check
@@ -240,9 +263,9 @@ retired helper files and their mapping are in
 | `register` → `Registrar` | declares the block-entity type `rftoolsstorage:storage_block_entity` over the block, attaches its `BlockEntityPart`, declares the menu's `MenuPart`, and declares the block's container (100 slots, every face, inputs and outputs) with its menu; **also** the scanner's type `rftoolsstorage:storage_scanner_block_entity` with its Part and `block_energy` (50,000 FE, 500 a move, no external drain) |
 | `BlockEntityPart::block_entity` | gives `rftoolsstorage:modular_storage` a block entity with empty saved data (the module tier and the lock live in its compound; `Items` are the container's), and `rftoolsstorage:storage_scanner` one whose compound holds `energy`, `radius`, the list's `sortMode` and the `routable` star list (slice 12: one `{c: [I; x, y, z]}` compound a starred cell, upstream's shape; the key is absent until the first star) |
 | `right_click_block` (cancel) | install / insert / seal / withdraw, and the action-bar readout |
-| `register_commands` | `/rftoolsstorage info <pos>`, `lock <pos>`, `scan <pos> [query]`, `radius <pos> <radius>`, `sort <pos> <mode>`, `routable <pos> <target> <on\|off>` (`block_pos`, `block_pos`, `word`), `request <pos> <item> [<count>]` (`block_pos`, `item`, `integer`), `give <pos> <item> [single]` (`block_pos`, `item`, `word`) and `insert <pos> <item> [<count>]` (`block_pos`, `item`, `integer`) |
+| `register_commands` | `/rftoolsstorage info <pos>`, `lock <pos>`, `scan <pos> [query]`, `radius <pos> <radius>`, `sort <pos> <mode>`, `routable <pos> <target> <on\|off>` (`block_pos`, `block_pos`, `word`), `export <pos> <current\|first>` (`block_pos`, `word`), `select <pos> <target>` (`block_pos`, `block_pos`), `request <pos> <item> [<count>]` (`block_pos`, `item`, `integer`), `give <pos> <item> [single]` (`block_pos`, `item`, `word`) and `insert <pos> <item> [<count>]` (`block_pos`, `item`, `integer`) |
 | `run_mod_command` | their answers (the scan costs `rfPerRequest`; its optional `query` is the GUI list's search box — every word a case-insensitive name contains or `@modid` a namespace prefix, `getMatcher`; the radius is the GUI slider's 1..20; the request prices an explicit count at a tenth of `rfPerRequest`, checks the out slot and the buffer, pulls from the scanned inventories and gives the stack to the player, or leaves it in the out slot when there is no player; the give prices one item or a stack at the whole `rfPerRequest`, has **no** out slot, and pulls straight into the player in one transaction; the insert pushes the player's stack out, pricing the walk at one `rfPerInsert` and charging it **only when the stack emptied**; `routable` is the GUI's per-inventory star, saved under upstream's `routable` key — it starts empty, and only a starred cell is routed into) |
-| `block_entity_ticks` / `block_entity_tick` (BlockEntityPart) | the scanner ticks: the GUI input, then the automation input, each an `rfPerInsert` attempt into the **starred** scanned inventories (slice 6; the star filter is slice 12) |
+| `block_entity_ticks` / `block_entity_tick` (BlockEntityPart) | the scanner ticks: the GUI input, then the automation input, each an `rfPerInsert` attempt into the **starred** scanned inventories (slice 6; the star filter is slice 12; the GUI slot's **export choice** is slice 13 — `current` sends it only into the selected inventory and does not fall through, `first` is the walk) |
 | `Registrar::block_container` | the scanner's three slots (`SLOT_IN` 0, `SLOT_OUT` 1, `SLOT_IN_AUTO` 2): automation inserts into the auto slot only, every slot extractable, no menu |
 | `screen` / `screen_draw` / `screen_click` (BlockEntityPart, API 19/20) | the menu's 366 x 210 layout, the title, the inventory label and the padlock; a press on the padlock's rectangle answers button 0 |
 | `menu_button` (BlockEntityPart, API 20) | the padlock: flip the lock of a storage that has a module, answer on the action bar, push the state into the menu's data slot |
@@ -309,6 +332,15 @@ the "All routable inventories" label), and **McJtyLib** `1.21_neo` @
 `ef393e608eebc188a6e1decbf110506a55cc0725` `varia/BlockPosTools.java` (the `c` int-array
 entry shape). Read from the raw URLs into `/tmp/opencode` and deleted after the findings
 were recorded.
+Slice 13: `StorageScannerTileEntity.java` again (`exportC`'s field and accessors,
+`injectStackInternal`'s `toSelected` branch and its `return`, `tickServer`,
+`getInventoryForBlock`, `lastSelectedInventory`, `getInputMatcher`/`isInputFromGui`),
+`data/StorageScannerData.java` (the `exportc` codec key and `DEFAULT`),
+`client/GuiStorageScanner.java` (`exportToStarred`'s two choices and their tooltips,
+`getSelectedContainerPos`'s `(-1, -1, -1)` "All routable" row, `getInventoryOnServer`)
+and `modules/scanner/tools/InventoryAccessSettings.java` (the XNet tests, read to confirm
+they are true without XNet). Read from the raw URLs into `/tmp/opencode` and deleted
+after the findings were recorded.
 
 ## Migration to the SDK format — version 0.2.0
 
@@ -2220,6 +2252,198 @@ the walk did.
    (and the e2e's own star leg is between the relaunch and the inject phases). A leg that forgets
    one fails with the chest untouched and the stack still in the slot — not a port bug.
 
+## Slice 13 — the scanner's export choice (version 0.2.13)
+
+The gap line slice 12 left, verbatim from this file's gap list and slice 12's own
+next-slice note:
+
+> the storage scanner's remaining half: the GUI list widget's **compact, cycle and
+> visible-size controls** (its **search** is slice 10, its **sort** is slice 11, its
+> **routable star list** is slice 12)
+
+The slice is the list's **export choice** and the **row selection** it uses:
+`/rftoolsstorage export <pos> <current|first>` sets `StorageScannerData.exportC`
+(the GUI's `exportToStarred` "Export to current container" choice) and
+`/rftoolsstorage select <pos> <target>` names the row the list would select
+(`getInventoryForBlock`'s `lastSelectedInventory`). Under `current` the tick's GUI-slot
+stack goes **only** into that inventory and refuses rather than falling through to the
+starred walk. It fits the **machines** tier: one saved flag and one saved cell in the
+scanner's compound, the routing walk it already has, no renderer, no screen, no new
+vanilla hook. Upstream read at `fc1b18a7f070d0030671e1db1d3aab90699fd160`
+(`StorageScannerTileEntity.java`, `data/StorageScannerData.java`,
+`client/GuiStorageScanner.java`; the raw files were read into `/tmp/opencode` and deleted
+after the findings were recorded).
+
+**Pin:** Horizon `0a875da91dbb0fdcb7ba8c42c11341aa229af51a`, horizon-mixins
+`e59da9094c0fc2fdda6c627fe9eff22dec6a906f0`, mod API 0.2, game 26.3. **Version 0.2.13.**
+
+### The artefact's rules (read, not invented)
+
+- **The choice is `exportC`.** `StorageScannerData` is `(radius, exportC, wideview,
+  sortingMode)` with `DEFAULT` `(1, false, true, NAME)`, and the codec key is
+  **`exportc`**. `GuiStorageScanner.exportToStarred` has two choices — "Export to current
+  container" and "Export to first routable container" — and
+  `setCurrentChoice(isExportToCurrent() ? 0 : 1)`: `exportC = true` is the **current**
+  container, `false` (the default) the **first routable** one, the walk every slice since
+  6 uses.
+- **It affects the tick's GUI slot only.** `tickServer` passes `exportC` to
+  `injectStackInternal` for `SLOT_IN` and `false` for `SLOT_IN_AUTO`;
+  `injectStackFromScreen` also passes `false`. So the automation slot and the screen's
+  insert always walk.
+- **The selected attempt is the only attempt.** With `toSelected` and a real
+  `lastSelectedInventory`, `injectStackInternal` tries that one block entity (not another
+  scanner, not a null one), inserts what it will, and **returns** with the remainder: a
+  selected container that refuses leaves the stack in the slot. It never falls through to
+  the walk.
+- **The selection is the list's row.** `getInventoryForBlock(cpos)` sets
+  `lastSelectedInventory = cpos`, then lists that row's inventory — or, for the list's
+  first "All routable" row, `(-1, -1, -1)`, every starred inventory. The selected attempt
+  ignores that sentinel (`getY() != -1`) and does **not** test `isRoutable` (the list shows
+  every inventory in the box); the star filters the walk alone.
+- **Upstream's field is transient.** `lastSelectedInventory` is a plain field with no
+  saved key, so a relaunch loses it and a `current` scanner with no selection falls back
+  to the walk.
+
+### What the slice does
+
+- **`runtime`** (pure, tested): [`ExportMode`] — `word`/`from_word` (`current`,
+  `first`), `saved`/`from_saved` (the `exportC` boolean, default `First`) —,
+  [`ExportRoute`] and [`export_route`] (`Only(selected)` under `Current` with a
+  selection, `Walk` otherwise), [`export_line`] and [`selection_line`].
+- **`support`**: `KEY_EXPORT = "exportc"` and `KEY_SELECTED = "selected"`, the
+  `saved_export`/`saved_selection`/`selection_tag` readers and writer, the two commands
+  (their replies `export current|first` and `select x y z`), and the `route` parameter on
+  `inject_stack`: `Only(at)` builds its target list from `injectable_at` alone — the own
+  cell and another scanner skipped, no star and no radius, upstream's selected branch —
+  and the tick asks for the route on the **In** step only.
+- **The selection is saved** (deviation 11): upstream's transient field becomes a cell in
+  the block's compound, so a relaunch keeps both the mode and the row.
+- **Unchanged**: the scan readout (still the whole box), the star's filter on the walks,
+  the inject/request/give/insert paths and their prices.
+
+### Red → green (the rules)
+
+The three rules were written first with `word`/`from_word`/`export_line`/`selection_line`
+stubbed (`""`/`None`), `saved` `false`, `from_saved` always `First` and `export_route`
+always `Walk`, and the suite was run **before** implementing them
+(`ports/_shared/evidence/rftoolsstorage/slice13-red.log`, `TEST_EXIT:101`):
+
+```
+thread 'runtime::tests::the_current_choice_sends_the_stack_only_to_the_selected_inventory' (131071) panicked at src/runtime.rs:2139:9:
+assertion `left == right` failed: the current-container choice exports into the selected inventory
+  left: Walk
+ right: Only([12, 102, 3])
+...
+thread 'runtime::tests::the_export_and_selection_replies_name_the_choice_and_the_cell' (131072) panicked at src/runtime.rs:2163:9:
+assertion `left == right` failed
+  left: ""
+ right: "export current"
+...
+thread 'runtime::tests::the_export_choice_is_upstreams_exportc_flag_and_defaults_to_the_walk' (131073) panicked at src/runtime.rs:2109:9:
+assertion `left == right` failed
+  left: None
+ right: Some(Current)
+...
+test result: FAILED. 50 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+```
+
+Implemented, then **54 passed, 0 failed** (`sdk-test.log`, `slice13-test.log`): the
+runtime's 48 (45 + the three export rules) and the six glue tests, one of them new
+(`the_export_choice_and_the_selection_round_trip_through_the_saved_compound`).
+
+### In game (`ports/_shared/evidence/rftoolsstorage-e2e/`)
+
+| Leg | Log | Verdict |
+|---|---|---|
+| default, the launcher-built 0.2.13 package | `e2e-export.log` | **PASS** + `EXIT:0` |
+| control (the same Nightly without the package) | `e2e-export-control.log` | **FAIL** + `EXIT:1` — `{"error":"unknown item rftoolsstorage:storage_scanner"}` |
+| `EXPORT_SELFTEST=1` (the selected chest must *not* have taken the stack) | `e2e-export-selftest.log` | **FAIL** + `EXIT:1` — *"the current-container export sent the 64 stone to the selected B (64) and left A empty (0) … so this inverted assertion fails as it must"* |
+| the first reaching run (kept: it found the charge-trap in an extra assertion) | `e2e-export-first-run.log` | **FAIL** + `EXIT:1` — *"the walk left 5000, expected one rfPerInsert off 5000"* |
+
+`e2e-export.log` re-runs every earlier phase (slices 1–12 still pass), then asserts the
+brief's rig — scanner at S, radius 2, two empty chests two blocks away (A at S+2 on x,
+B at S+2 on z, so B is first in the x-major walk), both starred — with every `ctl` reply
+in the log:
+
+```
+saved exportc (default): Found no elements matching exportc
+export current: rftoolsstorage:storage_scanner: export current
+saved exportc: 1b
+select B: rftoolsstorage:storage_scanner: select 16 102 12
+saved selected (B): 16, 102, 10 has the following block data: {c: [I; 16, 102, 12]}
+export current, B selected: in-slot '', A 0, B 64, energy 4980
+select A: rftoolsstorage:storage_scanner: select 18 102 10
+export current, A selected: in-slot '', A 64, B 64
+saved exportc after the relaunch: 1b
+saved selected after the relaunch: 16, 102, 10 has the following block data: {c: [I; 18, 102, 10]}
+select the full barrel: rftoolsstorage:storage_scanner: select 16 102 11
+selected full barrel: in-slot 64, barrel slot 26 64, A 64, B 64
+export first: rftoolsstorage:storage_scanner: export first
+saved exportc: 0b
+export first: in-slot '', A 64, B 128, energy 5000
+```
+
+Five facts make that evidence rather than a print: the flag is **absent** on a fresh
+scanner and reads `1b` after the command (the mode is the saved `exportc`); the very
+first tick puts the 64 stone in the **selected B only** while the equally starred A stays
+0, for exactly one `rfPerInsert`; `select A` moves the next stack to A while B keeps its
+64 (the selection, not the walk order, decides); both keys survive quit + re-entry
+(`exportc` 1b, `selected` = A) and the mode still works; a **selected full barrel**
+leaves the 64 in the slot with A and B unchanged — the no-fall-through rule, which a
+walk would have broken (both chests had room); and `export first` saves `0b` and routes
+that same stack to the walk's first starred cell (B 128). `EXPORT_SELFTEST=1` inverts the
+first assertion and the run ends `FAIL:` + `EXIT:1`.
+
+### Deviations this slice adds
+
+1. **The selection is saved with the block** (deviation 11 above): upstream's
+   `lastSelectedInventory` is transient. The mode is upstream's own `exportc` key; the
+   cell is this port's `selected` key, written in the `{c: [I; x, y, z]}` shape a star
+   entry has.
+2. **The selected row does not change the readout.** Upstream's `getInventoryForBlock`
+   lists only the selected row's inventory; this port has no list widget, and `scan`
+   lists the whole box (slice 5's deviation 1), so `select` only feeds the export. The
+   row's contents view stays a gap with the widget.
+3. **`export first` is the way back to the walk**, not a "clear the selection" form: the
+   list's first row ("All routable") sets upstream's `(-1, -1, -1)` sentinel, which merely
+   disables the selected branch; the port's `first` mode does the same thing explicitly.
+
+### Coverage (the families this slice changes)
+
+| Family | State |
+|---|---|
+| `/rftoolsstorage export <pos> <current\|first>`, its parsed reply | **tested** — `export current` then `export first`, with `exportc` `1b` → `0b` (`e2e-export.log`) |
+| the choice is saved with the block (`exportc`) and survives a relaunch | **tested** — absent on a fresh scanner, `1b` after the command, `1b` after quit + re-entry (`e2e-export.log`); `the_export_choice_is_upstreams_exportc_flag…`, the round-trip glue test |
+| `/rftoolsstorage select <pos> <target>`, its parsed reply, and the saved cell | **tested** — `select B`, `select A`, `select <barrel>`; `{c: [I; …]}` read back, and after the relaunch (`e2e-export.log`); the glue test's malformed-entry cases |
+| `current`: the tick's GUI-slot stack goes to the selected inventory only | **tested** — B 64 with A 0 for one `rfPerInsert` (`e2e-export.log`); `the_current_choice_sends_the_stack_only…` |
+| the selection follows the list's row | **tested** — `select A` makes A 64 while B keeps 64 (`e2e-export.log`) |
+| a selected container that refuses does not fall through to the walk | **tested** — a full selected barrel leaves the 64 in the slot while both starred chests had room (`e2e-export.log`) |
+| `first` restores the starred walk | **tested** — the same stack goes to B (128) after `export first` (`e2e-export.log`) |
+| the choice affects the GUI slot only (the automation slot always walks) | unit-level by construction (`InjectSlot::In` is the only step routed through `export_route`); the earlier auto-slot leg still passes |
+| the selected row's contents view (`getInventoryForBlock`'s listing) | **not ported** (no list widget; `scan` lists the whole box — deviation 2) |
+| the XNet access tests and matcher on the selected attempt | **not ported** (true without XNet; slice 12's deviation 3) |
+| the GUI list widget itself, compact/cycle/visible-size, the remote/tablet variant, the claimed-land check | **not ported** (the screen is a fixed slot layout; `blocked(no permission query)` for the claim) |
+
+### Traps this slice paid for
+
+1. **The tick charges on every tick while a refused stack stays.** The barrel phase's
+   buffer drains while the 64 stone sits there, so a later "energy −20" assertion is
+   decided by how many ticks the chat round trip cost — the first reaching run failed on
+   exactly that (`e2e-export-first-run.log`). Assert the stack, and pin a charge only in
+   a phase whose stack leaves in one tick (the first export leg: 4,980).
+2. **The selected cell is not filtered by the star.** Upstream's selected attempt tests
+   `te != null`, "not a scanner", the XNet tests and the matcher — no `isRoutable`, no
+   radius. The port keeps that: `select` validates the cell at command time (in the box,
+   with an item capability, not the scanner), and the tick's `Only(at)` route uses
+   `injectable_at` alone, so a stale selection is inert rather than silently rerouted.
+3. **`data get` of `selected` prints one compound, not a list** — `{c: [I; 16, 102, 12]}`
+   — while `routable` prints the list. The assertion parses the cell inside either shape.
+4. **A relaunch mid-phase is what proves the deviation.** The star list's own relaunch
+   leg cannot stand in for it: the mode and the selection are two different keys, and
+   only a re-entry shows that a `current` scanner still knows where to export.
+5. **Two adjacent chests are one double chest** (slice 6's trap): A is on x, B on z, and
+   the full barrel is a barrel, so no pair joins.
+
 ## Verification
 
 Skills: superpowers/using-superpowers, brainstorming, writing-plans, test-driven-development, systematic-debugging, verification-before-completion; BeautifulRust/rust-best-practices
@@ -2227,6 +2451,28 @@ Skills: superpowers/using-superpowers, brainstorming, writing-plans, test-driven
 Full evidence in [`VALIDATION.md`](VALIDATION.md); the e2e logs are in
 `ports/_shared/evidence/rftoolsstorage-e2e/` (the game legs) and
 `ports/_shared/evidence/rftoolsstorage/` (the ladder, package and fits).
+
+**0.2.13 — the scanner's export choice (2026-11-23, pin `0a875da`)**
+
+| Step | Command | Result |
+|---|---|---|
+| Red proof | `cargo test` with `word`/`from_word`/`export_line`/`selection_line` stubbed, `saved` false, `from_saved` always `First` and `export_route` always `Walk` | **FAILED. 50 passed; 3 failed**, `TEST_EXIT:101` (`slice13-red.log`); quoted above |
+| Runtime + glue tests | `cargo test` | **54 passed**, 0 failed (`sdk-test.log`, `slice13-test.log`, `TEST_EXIT:0`) — 48 runtime + 6 glue |
+| Lints | `cargo clippy --all-targets -- -D warnings` | `CLIPPY_EXIT:0`, 0 warnings (`slice13-clippy.log`) |
+| Formatting | `rustfmt --edition 2024 --check src/{lib,support,runtime}.rs` | `FMT_EXIT:0` (`slice13-fmt.log`; the first check listed the import wrapping and one join, formatted, then re-run green) |
+| SDK gate | `cargo horizon-mod check` | `TREE_CHECK_EXIT:0` — *"…uses 540 items of the API (5 Part kinds, 2 capabilitys, 149 fields or variants, 18 hooks, 52 hook arguments, 2 macros, 168 methods, 29 traits, 115 types). Made for 0a875da."* (`slice13-tree-check.log`) |
+| Package | `rm -f Cargo.lock && cargo horizon-mod build`, twice | **98,817 B**, SHA-256 `f89f5974f411cf012a7c5a28242185e630bd6c9ffa726939863ceb1197baeb83`, **`cmp`-identical** (`slice13-build-1.log`, `slice13-build-2.log`); the packed README's 0.2.10 text was corrected after the first green leg, and `slice13-readme-delta.log` proves that rebuild changed **only** `README.md` (every `src/` entry and every other file byte-identical), after which all three game legs were re-run on the delivered file |
+| Package check | `cargo horizon-mod check rftoolsstorage.hmod` | `rftoolsstorage 0.2.13 (native-mod, format native-1/0a875da…/e59da90…, for 26.3)`, **98,817 bytes**, `f89f5974…eb83`, `FILE_CHECK_EXIT:0` (`slice13-check.log`) |
+| Entries | `unzip -l rftoolsstorage.hmod` | **67 files**, no `Cargo.lock`; `src/runtime.rs` byte-identical in tree and package (`9af88f59eccb`) |
+| Fits the pin | `cargo horizon-mod fits rftoolsstorage.hmod --build 0a875da` | `0a875da  made for`, `FITS_PIN_EXIT:0` (`slice13-fits.log`) |
+| Fits another build | `cargo horizon-mod fits rftoolsstorage.hmod --build 0b14f8a` | `0b14f8a  fits`, `FITS_OTHER_EXIT:0` (`slice13-fits.log`) |
+| Launcher build | `BUILD_LOCAL=1 launcher-game.sh build rftoolsstorage` | `Compiling rftoolsstorage (1 of 1)`, build tag `native-0a875da-f1a40e1d7361`, `LAUNCHER_BUILD_EXIT:0` (`slice13-launcher-build.log`) |
+| In game | `build-slot.sh run --step e2e -- bash ports/rftoolsstorage/tools/e2e.sh` (`CONTROL_GAME=`) | **PASS** + `EXIT:0` (`e2e-export.log`) |
+| Control | the same rig on the Nightly without the package | **FAIL** + `EXIT:1` (`e2e-export-control.log`) |
+| Selftest | `EXPORT_SELFTEST=1` (the selected chest must not have taken the stack) | **FAIL** + `EXIT:1` (`e2e-export-selftest.log`) |
+| e2e gate | `check-e2e-logs.py rftoolsstorage-e2e --strict` | `logs=36  ok=36  missing-exit=0  bad-exit=0`, exit 0 |
+| Package gate | `verify-sdk-package.py rftoolsstorage` | `1/1 package(s) verified`, exit 0 |
+| Skills gate | `check-skills.py --notes ports/rftoolsstorage --strict` | `Skills line present`, PASS |
 
 **0.2.12 — the scanner's routable star list (2026-11-23, pin `0a875da`)**
 
