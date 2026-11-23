@@ -20,10 +20,14 @@ A broken block's **contents travel on its own item** (`minecraft:block_entity_da
 with the lock and the module, and come back when it is placed.
 
 **The storage scanner.** `rftoolsstorage:storage_scanner` is the mod's second
-machine: a 50,000 FE buffer and `/rftoolsstorage scan <x> <y> <z>`, which reads
-the item capability of every inventory in the `pos ± radius` box and answers one
-entry a kind (`rftoolsstorage:storage_scanner: minecraft:stone 64 (4800/50000 FE)`).
-A scan costs 100 FE (`rfPerRequest`); below that it answers `no power`. The radius
+machine: a 50,000 FE buffer and `/rftoolsstorage scan <x> <y> <z> [query]`, which
+reads the item capability of every inventory in the `pos ± radius` box and answers
+one entry a kind (`rftoolsstorage:storage_scanner: minecraft:stone 64 (4800/50000 FE)`).
+The optional `query` is the GUI list's **search box** (`getMatcher`): every word
+must match — `@modid` as a namespace prefix, anything else a case-insensitive
+contains on the item's name — so `scan … @minecraft` lists both kinds while
+`scan … dirt` lists only the dirt. A scan costs 100 FE (`rfPerRequest`, filtered
+or not); below that it answers `no power`. The radius
 is the jar's GUI slider (1..20, default 1) as `/rftoolsstorage radius <x> <y> <z> <n>`.
 Its **tick** pushes the stack in its in slot (and the one automation puts in the
 auto slot) into the inventories that box finds, a stack a tick for 20 FE
@@ -43,7 +47,7 @@ the player's inventory into those inventories and charges one `rfPerInsert`, but
 |---|---|
 | `/rftoolsstorage info <x> <y> <z>` | a storage's readout: `stored/capacity item state` |
 | `/rftoolsstorage lock <x> <y> <z>` | toggles a storage's lock (the GUI's padlock) |
-| `/rftoolsstorage scan <x> <y> <z>` | what the inventories in the scanner's box hold, and the FE left |
+| `/rftoolsstorage scan <x> <y> <z> [query]` | what the inventories in the scanner's box hold (the search box's filter when a query is given), and the FE left |
 | `/rftoolsstorage radius <x> <y> <z> <n>` | sets the scanner's radius (1..20) |
 | `/rftoolsstorage request <x> <y> <z> <item> [n]` | pulls a kind out of the scanned inventories into the player (a tenth price for an explicit count) |
 | `/rftoolsstorage give <x> <y> <z> <item> [single]` | hands a whole stack (or one item with `single`) straight to the player for the full price; no out slot |
@@ -53,8 +57,9 @@ They need an operator or a player within 8 blocks of the block.
 
 ## What is not ported
 
-The crafting manager (a WIP in the jar itself), the storage scanner's GUI **list**
-(search, sort, compact, cycle, visible size) and the out slot's fill for the
+The crafting manager (a WIP in the jar itself), the storage scanner's GUI **list
+widget** (search is carried as `scan`'s query; sort, compact, cycle and visible
+size are not) and the out slot's fill for the
 no-player fallback, the `routable` star list, the storage control screen module (the give path's own
 caller; its behaviour is carried as `/rftoolsstorage give`),
 the scanner's remote/tablet variant, the claimed-land check
@@ -76,7 +81,7 @@ the old `.hnmod` pin (`1d63e0a5…` / `5a64af93…`) is retired with the format.
 
 ```sh
 cd ports/rftoolsstorage
-cargo test                                    # the pure rules: 35 runtime tests + 4 glue tests (39)
+cargo test                                    # the pure rules: 39 runtime tests + 4 glue tests (43)
 cargo clippy --all-targets -- -D warnings
 rustfmt --edition 2024 --check src/lib.rs src/support.rs src/runtime.rs
 cargo horizon-mod check                       # the SDK gate: format, manifest, code, API usage
@@ -93,15 +98,15 @@ The in-game legs need a **launcher-built** game carrying the package
 (`horizon-launcher native-build ports/rftoolsstorage --instance <i> --trust-native-code`),
 then `GAME=<that horizon-client> tools/e2e.sh`. The scenario has its
 counterfactual (`COUNTERFACTUAL=1`, a vanilla barrel) and its selftest
-(`SELFTEST=1`, `REQUEST_SELFTEST=1`, `GIVE_SELFTEST=1` and `INSERT_SELFTEST=1`,
-must fail).
+(`SELFTEST=1`, `REQUEST_SELFTEST=1`, `GIVE_SELFTEST=1`, `INSERT_SELFTEST=1` and
+`SCAN_SELFTEST=1`, must fail).
 
 Evidence and the exact commands: [`VALIDATION.md`](VALIDATION.md).
 
 ## Layout
 
 ```
-horizon-mod.toml        the only manifest: id, version 0.2.9, api "0.2", side "both",
+horizon-mod.toml        the only manifest: id, version 0.2.10, api "0.2", side "both",
                         capabilities, [native] game/horizon/mixins
 Cargo.toml              one crate; horizon-mod-api from .horizon/sdk
 src/lib.rs              the one #[mod_api::horizon_mod] impl Hooks (register, right_click_block,

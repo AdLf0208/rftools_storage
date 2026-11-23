@@ -13,7 +13,7 @@ differences, are in [`FINDINGS.md`](FINDINGS.md).
 publishing (ARCHITECTURE.md §8); the port carries the upstream MIT notice in
 [`LICENSE`](LICENSE) and its provenance in [`LICENSE-NOTICE.md`](LICENSE-NOTICE.md).
 
-**Format: the SDK package (2026-11-18), version 0.2.9.** One flat `.hmod` —
+**Format: the SDK package (2026-11-18), version 0.2.10.** One flat `.hmod` —
 `horizon-mod.toml` + `Cargo.toml` + `src/` + `assets/` + `data/` — built by the
 launcher against SDK nightly **`0a875da91dbb0fdcb7ba8c42c11341aa229af51a`** with
 horizon-mixins **`e59da9094f0c2fdda6c627fe9eff22dec6a906f0`** (see
@@ -25,7 +25,8 @@ horizon-mixins **`e59da9094f0c2fdda6c627fe9eff22dec6a906f0`** (see
 [`## Slice 6`](#slice-6--the-scanners-item-slots-and-the-inject-tick-version-026),
 [`## Slice 7`](#slice-7--the-scanners-request-path-version-027),
 [`## Slice 8`](#slice-8--the-scanners-give-from-screen-path-version-028),
-[`## Slice 9`](#slice-9--the-scanners-insert-from-screen-path-version-029)).
+[`## Slice 9`](#slice-9--the-scanners-insert-from-screen-path-version-029),
+[`## Slice 10`](#slice-10--the-scans-search-filter-version-0210)).
 The retired `.hnmod` container pinned Horizon `1d63e0a5…` / mixins `5a64af93…`;
 `src/runtime.rs` was byte-identical to the retired
 `mixins/rftoolsstorage/runtime.rs` until the 2026-11-18 review fixes gave it the
@@ -49,7 +50,9 @@ item or a whole stack straight to the player for the full `rfPerRequest`, with n
 out slot at all) and slice 9 (the scanner's **insert-from-screen path**:
 `/rftoolsstorage insert <pos> <item> [count]` pushes a stack out of the player's
 inventory into the scanned inventories and charges one `rfPerInsert`, but only when
-the stack went in whole) are implemented and verified
+the stack went in whole) and slice 10 (the scan's **search filter**: the GUI list's
+search box as `scan`'s optional term — every word a case-insensitive name contains
+or `@modid` a namespace prefix) are implemented and verified
 in a launcher-built game at the pin (the legs are listed per slice below;
 `ports/_shared/evidence/rftoolsstorage-e2e/`). The gap list below is the rest of
 the mod.
@@ -184,22 +187,24 @@ None. The two candidates were checked and left alone, on purpose:
 ## Gaps (the rest of the mod)
 
 - `crafting_manager` (the jar's own lang calls it "WIP! … not functional yet") and
-  the **storage scanner's remaining half**: the GUI's list widget (search, sort,
-  compact, cycle, visible size), the **remote/tablet variant**, the XNet
+  the **storage scanner's remaining half**: the GUI list widget's **sort, compact,
+  cycle and visible-size controls** (its **search** is slice 10, carried as `scan`'s
+  optional query), the **remote/tablet variant**, the XNet
   access settings and its `routable` star list (the port treats every scanned
   inventory as routable — slice 6's deviation 1), and the claimed-land check
   (`scannerNoRestrictions`; the pin has no `can_entity_destroy` **hook** exists at
   the pin, but it is a cancellable game event, not a query a mod can ask for a fake
   player — `blocked(no permission query)`). The **request path** is slice 7, the
-  give-from-screen path is slice 8 and the insert-from-screen path is slice 9.
+  give-from-screen path is slice 8, the insert-from-screen path is slice 9 and the
+  search filter is slice 10.
 - Storage tiers 2-4 (`storage_module1..3`; their recipes need McJtyLib's
   `mcjtylib:copy_components` recipe type, which the pin does not have), the
   remote module (`storage_module6`, "DO NOT USE" in the jar's lang) and the
   remote storage block.
 - The type modules (`generic`/`oredict`), the filter module, the dump module, the
   storage control module, the tablet, and the crafting grid.
-- The GUI's **list controls** (search, sort, compact, cycle, visible-size) and the
-  **two card slots beside the module's** (the type module is `@todo 1.14` upstream,
+- The GUI's **list controls** (sort, compact, cycle, visible-size; its search is
+  slice 10) and the **two card slots beside the module's** (the type module is `@todo 1.14` upstream,
   and the filter slot takes RFToolsBase's `FilterModuleItem`, which this port does
   not have), the module tooltip, JEI/TOP/XNet/RFToolsUtility compat, the
   `/rftoolsstorage list|restore` commands and the config. (The padlock and the
@@ -221,8 +226,8 @@ retired helper files and their mapping are in
 | `register` → `Registrar` | declares the block-entity type `rftoolsstorage:storage_block_entity` over the block, attaches its `BlockEntityPart`, declares the menu's `MenuPart`, and declares the block's container (100 slots, every face, inputs and outputs) with its menu; **also** the scanner's type `rftoolsstorage:storage_scanner_block_entity` with its Part and `block_energy` (50,000 FE, 500 a move, no external drain) |
 | `BlockEntityPart::block_entity` | gives `rftoolsstorage:modular_storage` a block entity with empty saved data (the module tier and the lock live in its compound; `Items` are the container's), and `rftoolsstorage:storage_scanner` one whose compound holds `energy` and `radius` |
 | `right_click_block` (cancel) | install / insert / seal / withdraw, and the action-bar readout |
-| `register_commands` | `/rftoolsstorage info <pos>`, `lock <pos>`, `scan <pos>`, `radius <pos> <radius>`, `request <pos> <item> [<count>]` (`block_pos`, `item`, `integer`), `give <pos> <item> [single]` (`block_pos`, `item`, `word`) and `insert <pos> <item> [<count>]` (`block_pos`, `item`, `integer`) |
-| `run_mod_command` | their answers (the scan costs `rfPerRequest`; the radius is the GUI slider's 1..20; the request prices an explicit count at a tenth of `rfPerRequest`, checks the out slot and the buffer, pulls from the scanned inventories and gives the stack to the player, or leaves it in the out slot when there is no player; the give prices one item or a stack at the whole `rfPerRequest`, has **no** out slot, and pulls straight into the player in one transaction; the insert pushes the player's stack out, pricing the walk at one `rfPerInsert` and charging it **only when the stack emptied**) |
+| `register_commands` | `/rftoolsstorage info <pos>`, `lock <pos>`, `scan <pos> [query]`, `radius <pos> <radius>`, `request <pos> <item> [<count>]` (`block_pos`, `item`, `integer`), `give <pos> <item> [single]` (`block_pos`, `item`, `word`) and `insert <pos> <item> [<count>]` (`block_pos`, `item`, `integer`) |
+| `run_mod_command` | their answers (the scan costs `rfPerRequest`; its optional `query` is the GUI list's search box — every word a case-insensitive name contains or `@modid` a namespace prefix, `getMatcher`; the radius is the GUI slider's 1..20; the request prices an explicit count at a tenth of `rfPerRequest`, checks the out slot and the buffer, pulls from the scanned inventories and gives the stack to the player, or leaves it in the out slot when there is no player; the give prices one item or a stack at the whole `rfPerRequest`, has **no** out slot, and pulls straight into the player in one transaction; the insert pushes the player's stack out, pricing the walk at one `rfPerInsert` and charging it **only when the stack emptied**) |
 | `block_entity_ticks` / `block_entity_tick` (BlockEntityPart) | the scanner ticks: the GUI input, then the automation input, each an `rfPerInsert` attempt into the scanned inventories (slice 6) |
 | `Registrar::block_container` | the scanner's three slots (`SLOT_IN` 0, `SLOT_OUT` 1, `SLOT_IN_AUTO` 2): automation inserts into the auto slot only, every slot extractable, no menu |
 | `screen` / `screen_draw` / `screen_click` (BlockEntityPart, API 19/20) | the menu's 366 x 210 layout, the title, the inventory label and the padlock; a press on the padlock's rectangle answers button 0 |
@@ -273,6 +278,10 @@ inventory slots; each call writes the remainder back into that slot).
 The clones (`ports/_shared/upstream/rftoolsstorage`, `…/mcjtylib`) were deleted after
 these findings were recorded; slice 9's four files were read from the repository's raw
 URLs at the same commit into `/tmp/opencode` and deleted after the findings were recorded.
+Slice 10: `StorageScannerTileEntity.java` again (`getMatcher`, `makeSearchPredicate`,
+`performSearch`) and `GuiStorageScanner.java` (`startSearch`, the search field's caller and
+the client-side filter), read from the repository's raw URLs at the same commit into
+`/tmp/opencode` and deleted after the findings were recorded.
 
 ## Migration to the SDK format — version 0.2.0
 
@@ -917,6 +926,8 @@ after the findings were recorded.
 2. **`search` is not carried.** Upstream's `getMatcher` filters the list by item name or `@modid`;
    the port's readout is the unfiltered list, because the GUI that shows a filtered list is the gap
    below. The rule is recorded with the gap, not invented as a command argument.
+   *(Slice 10 carries it: `scan`'s optional query — see
+   [Slice 10](#slice-10--the-scans-search-filter-version-0210).)*
 3. **The claimed-land check is not carried** (`blocked(no permission query)`): upstream asks
    `level.getBlockState(p).canEntityDestroy(level, p, fakePlayer)` and defaults
    `scannerNoRestrictions` to false. The pin's `can_entity_destroy` is a cancellable **hook** (a
@@ -1674,6 +1685,146 @@ the run ends `FAIL:` + `EXIT:1`.
    place" — run the default with `CONTROL_GAME=` (that log **is** the control leg;
    keep it as `e2e-insert-control.log`).
 
+## Slice 10 — the scan's search filter (version 0.2.10)
+
+The gap line slice 9 left, verbatim from this file's gap list:
+
+> the GUI list widget's **sort, compact, cycle and visible-size controls** (its **search** is
+> slice 10, carried as `scan`'s optional query)
+
+and slice 5's deviation 2, which this slice closes:
+
+> **`search` is not carried.** Upstream's `getMatcher` filters the list by item name or `@modid`;
+> the port's readout is the unfiltered list, because the GUI that shows a filtered list is the gap
+> below.
+
+The slice is the **search half of the scanner's list widget**, carried as the readout's optional
+term: `/rftoolsstorage scan <pos> [query]`. It fits the **machines** tier: the same block entity's
+saved buffer and radius, the neighbours' item capability and the command the scan already is — no
+renderer, no screen and no new vanilla hook. Upstream source read at
+`fc1b18a7f070d0030671e1db1d3aab90699fd160`
+(`StorageScannerTileEntity.getMatcher`/`makeSearchPredicate`, lines 475–499; the raw files were
+read into `/tmp/opencode` and deleted after the findings were recorded).
+
+**Pin:** Horizon `0a875da91dbb0fdcb7ba8c42c11341aa229af51a`, horizon-mixins
+`e59da9094f0c2fdda6c627fe9eff22dec6a906f0`, mod API 0.2, game 26.3. **Version 0.2.10.**
+
+### What it does
+
+- **The rule is `getMatcher`'s.** The query is lower-cased and split on whitespace; **every** word
+  must match (upstream builds `matcher.and(...)`), and an empty query matches every kind
+  (`if (matcher == null) matcher = s -> true`).
+- **A word that starts with `@` is the namespace.** Upstream tests
+  `Tools.getModid(s).toLowerCase().startsWith(split.substring(1))` — a **prefix**, not a contains, so
+  `@min` matches `minecraft` and `@craft` does not.
+- **Any other word is a contains on the item's name**, case-insensitively
+  (`s.getHoverName().getString().toLowerCase().contains(split)`), so `dirt` matches *Dirt* and
+  `ak lo` matches *Oak Log*.
+- **The filter narrows the readout before the count is merged**, one entry a kind as before: a kind
+  the query rejects is not listed, and when nothing matches the reply is `empty`.
+- **The price does not change.** A filtered scan costs the same `rfPerRequest` (100 FE), charged
+  before the walk and even when nothing matches: the readout *is* the list a request is made from
+  (slice 5's deviation 1), and upstream's search narrows that same list.
+
+### Red → green (the rule)
+
+The three new rules (`matches_search`, `search_namespace`, `search_name`) and their four tests were
+written first with the functions stubbed (the matcher `false`, the namespace `""`, the name `""`),
+and the suite was run **before** implementing them
+(`ports/_shared/evidence/rftoolsstorage/slice10-red.log`, `TEST_EXIT:101`):
+
+```
+thread 'runtime::tests::a_search_word_matches_the_name_case_insensitively' (37135) panicked at src/runtime.rs:1600:9:
+the hover name is compared lower-cased
+...
+thread 'runtime::tests::the_search_name_comes_from_the_item_ids_path' (37153) panicked at src/runtime.rs:1664:9:
+assertion `left == right` failed: the path's underscores are spaces
+  left: ""
+ right: "oak log"
+...
+test result: FAILED. 39 passed; 4 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+...
+TEST_EXIT:101
+```
+
+Implemented, then **43 passed, 0 failed** (`sdk-test.log`): the runtime's 39 (35 + the four search
+rules) and the four glue tests.
+
+### In game (`ports/_shared/evidence/rftoolsstorage-e2e/`)
+
+| Leg | Log | Verdict |
+|---|---|---|
+| default, the launcher-built 0.2.10 package | `e2e-scanfilter.log` | **PASS** + `EXIT:0` |
+| control (the same Nightly without the package) | `e2e-scanfilter-control.log` | **FAIL** + `EXIT:1` — `{"error":"unknown item rftoolsstorage:storage_scanner"}` |
+| `SCAN_SELFTEST=1` (this slice's inverted assertion) | `e2e-scanfilter-selftest.log` | **FAIL** + `EXIT:1` — *"the 'dirt' query listed only minecraft:dirt 32 and not the stone 64 two blocks away …, so this inverted assertion fails as it must"* |
+
+`e2e-scanfilter.log` re-runs every earlier phase (slices 1–9 still pass), then asserts the brief's
+rig — scanner at S, radius 3, a chest at S+2 holding 64 stone, one at S+3 holding 32 dirt, the
+buffer set back to 5,000 — with every `ctl` reply in the log:
+
+```
+== THE SCAN FILTER: the GUI list's search box — every word is '@modid' (a namespace prefix) or a case-insensitive name contains ==
+scan @minecraft: rftoolsstorage:storage_scanner: minecraft:dirt 32, minecraft:stone 64 (4900/50000 FE); buffer now 4900
+scan dirt: rftoolsstorage:storage_scanner: minecraft:dirt 32 (4800/50000 FE); buffer now 4800
+scan stone: rftoolsstorage:storage_scanner: minecraft:stone 64 (4700/50000 FE); buffer now 4700
+scan @nomatch: rftoolsstorage:storage_scanner: empty (4600/50000 FE); buffer now 4600
+== the unfiltered scan still lists both — the differential for the filter ==
+scan (no query): rftoolsstorage:storage_scanner: minecraft:dirt 32, minecraft:stone 64 (4500/50000 FE); buffer now 4500
+```
+
+Three facts make that more than a print: `@minecraft` lists **both** kinds while `dirt` and `stone`
+each list **one** (the contains works on both names, and the namespace prefix keeps both); the buffer
+walks **5,000 → 4,900 → 4,800 → 4,700 → 4,600 → 4,500**, so a filtered scan and the `empty` answer
+each cost one `rfPerRequest`; and the unfiltered scan right after them lists both again — the
+**differential** that proves the filter, not the rig, removed the stone from `dirt`. `SCAN_SELFTEST=1`
+inverts the `dirt` assertion and the run ends `FAIL:` + `EXIT:1`.
+
+### Deviations this slice adds
+
+1. **The name is the item id's path, not `getHoverName()`.** Upstream compares the English hover name
+   on the server (`Component.getString()` resolves the server's language map). The SDK exposes the
+   hover name only on the client (`ItemsClientHost::hover_name` is `ClientSetup`; `Host` has no
+   item-name read and `translate` is client-only), so the port compares the id's path with its
+   underscores as spaces (`minecraft:oak_log` → `oak log`). That is identical for every item whose
+   lang key is its path — all vanilla items and the modded items this build carries — and a mod item
+   whose image is a hand-written name (`rftoolsstorage:storage_module0` → *Storage Module (T1)*) is
+   found by its id's words rather than its display words.
+2. **The query is a command term, not a text field.** Upstream's search is the GUI's `TextField`;
+   the port has no screen for the list (still the gap), so the same rule is `scan`'s optional
+   argument. The command word is a **greedy `text`**: Brigadier's `word` excludes `@`, so a `word`
+   argument could not carry `@modid` at all (trap 1).
+
+### Coverage (the families this slice changes)
+
+| Family | State |
+|---|---|
+| `/rftoolsstorage scan <pos> [query]`, its parsed reply | **tested** — `@minecraft` → both kinds, `dirt` → `minecraft:dirt 32`, `stone` → `minecraft:stone 64`, `@nomatch` → `empty`, each at its own buffer (`e2e-scanfilter.log`) |
+| each word a case-insensitive contains on the name | **tested** — `dirt`/`stone` in game; `dirt`/`STONE`/`ak lo` and the negative in `a_search_word_matches_the_name_case_insensitively` |
+| `@modid` a namespace **prefix** | **tested** — `@minecraft` in game; `@mine` true, `@craft` false, `@nomatch` false in `a_search_that_starts_with_at_matches_the_namespace_by_prefix` |
+| every word ANDed; empty query matches all | **tested** — `@minecraft stone` true, `@minecraft dirt` false in `every_search_word_must_match_and_an_empty_search_matches_everything`; the in-game no-query differential |
+| the price: one `rfPerRequest`, also for `empty` | **tested** — 4,900 → 4,600 → 4,500 in game (every query costs 100) |
+| the name from the id path; the namespace | **tested** — `the_search_name_comes_from_the_item_ids_path` |
+| the GUI's sort, compact, cycle and visible-size controls, the remote/tablet variant, XNet settings, the claimed-land check | **not ported** (the rest of the list; `blocked(no permission query)` for the claim) |
+
+### Traps this slice paid for
+
+1. **`@` is not in a Brigadier `word`.** The first usage sketch was `[query:word]`, and its character
+   set (letters, digits, `_ - . +`) would have made `@minecraft` unparseable — the command would have
+   refused the very assertion this slice rests on. The argument is the greedy `text` kind, which is
+   the usage's last argument.
+2. **Charge before the filter.** The price is spent before the walk (slice 5's order), so `@nomatch`
+   costs 100 and answers `empty (…/50000 FE)`. A filter applied before `spend_power` would have made
+   an unmatched scan free, which upstream's request path never does.
+3. **The e2e's rig is the radius-3 one.** The brief's chests (S+2 stone 64, S+3 dirt 32) are the
+   slice-5 rig; the filter phase reuses them at radius 3 rather than seeding new chests, and sets the
+   buffer back to 5,000 first so its 4,900… is exact. Two adjacent chests are one double chest, so
+   S+2 and S+3 stay two cells apart in a row.
+4. **The unfiltered scan is the differential, not a cost.** Without it a filter that dropped
+   *everything* would pass every per-query assertion; the last scan lists both kinds and proves the
+   chests still hold them.
+5. **`launcher-game.sh env` exports `CONTROL_GAME`** (slice 9's trap 6 still applies): the default
+   leg runs with `CONTROL_GAME=` and the control leg with the export.
+
 ## Verification
 
 Skills: superpowers/using-superpowers, brainstorming, writing-plans, test-driven-development, systematic-debugging, verification-before-completion; BeautifulRust/rust-best-practices
@@ -1681,6 +1832,28 @@ Skills: superpowers/using-superpowers, brainstorming, writing-plans, test-driven
 Full evidence in [`VALIDATION.md`](VALIDATION.md); the e2e logs are in
 `ports/_shared/evidence/rftoolsstorage-e2e/` (the game legs) and
 `ports/_shared/evidence/rftoolsstorage/` (the ladder, package and fits).
+
+**0.2.10 — the scan's search filter (2026-11-23, pin `0a875da`)**
+
+| Step | Command | Result |
+|---|---|---|
+| Red proof | `cargo test` with `matches_search`/`search_namespace`/`search_name` stubbed | **FAILED. 39 passed; 4 failed**, `TEST_EXIT:101` (`slice10-red.log`); quoted above |
+| Runtime + glue tests | `cargo test` | **43 passed**, 0 failed (`sdk-test.log`, `slice10-test.log`, `TEST_EXIT:0`) — 39 runtime + 4 glue |
+| Lints | `cargo clippy --all-targets -- -D warnings` | `CLIPPY_EXIT:0`, 0 warnings (`sdk-clippy.log`, `slice10-clippy.log`) |
+| Formatting | `rustfmt --edition 2024 --check src/{lib,support,runtime}.rs` | `FMT_EXIT:0` (`slice10-fmt.log`) |
+| SDK gate | `cargo horizon-mod check` | `TREE_CHECK_EXIT:0` — *"…uses 537 items of the API (5 Part kinds, 2 capabilitys, 147 fields or variants, 18 hooks, 52 hook arguments, 2 macros, 167 methods, 29 traits, 115 types). Made for 0a875da."* (`slice10-tree-check.log`) |
+| Package | `rm -f Cargo.lock && cargo horizon-mod build`, twice | **88,702 B**, SHA-256 `1aadf54d967054073d7b0898e1c6b60005829440d54105bb69296543d494f868`, **`cmp`-identical** (`slice10-build-1.log`, `slice10-build-2.log`) |
+| Package check | `cargo horizon-mod check rftoolsstorage.hmod` | `rftoolsstorage 0.2.10 (native-mod, format native-1/0a875da…/e59da90…, for 26.3)`, **88,702 bytes**, `1aadf54d…f868`, `FILE_CHECK_EXIT:0` (`sdk-check.log`, `slice10-check.log`) |
+| Entries | `unzip -l rftoolsstorage.hmod` | **67 files**, no `Cargo.lock`; `src/runtime.rs` byte-identical in tree and package (`be8bc239…20a3`) (`sdk-sha256.txt`) |
+| Fits the pin | `cargo horizon-mod fits rftoolsstorage.hmod --build 0a875da` | `0a875da  made for`, `FITS_PIN_EXIT:0` (sha `1aadf54d…f868` in the log) (`sdk-fits.log`, `slice10-fits.log`) |
+| Fits another build | `cargo horizon-mod fits rftoolsstorage.hmod --build 0b14f8a` | `0b14f8a  fits`, `FITS_OTHER_EXIT:0` (`sdk-fits.log`, `slice10-fits.log`) |
+| Launcher build | `BUILD_LOCAL=1 launcher-game.sh build rftoolsstorage` | `Compiling rftoolsstorage (1 of 1)`, build tag `native-0a875da-7094a7593c52`, `LAUNCHER_BUILD_EXIT:0` (`slice10-launcher-build.log`) |
+| In game | `build-slot.sh run --step e2e -- bash ports/rftoolsstorage/tools/e2e.sh` (`CONTROL_GAME=`) | **PASS** + `EXIT:0` (`e2e-scanfilter.log`) |
+| Control | the same rig on the Nightly without the package | **FAIL** + `EXIT:1` (`e2e-scanfilter-control.log`) |
+| Selftest | `SCAN_SELFTEST=1` (the `dirt` query must not have listed the stone) | **FAIL** + `EXIT:1` (`e2e-scanfilter-selftest.log`) |
+| e2e gate | `check-e2e-logs.py rftoolsstorage-e2e --strict` | `logs=25  ok=25`, exit 0 |
+| Package gate | `verify-sdk-package.py rftoolsstorage` | `1/1 package(s) verified`, exit 0 |
+| Skills gate | `check-skills.py --notes ports/rftoolsstorage --strict` | `Skills line present`, PASS |
 
 **0.2.9 — the scanner's insert-from-screen path (2026-11-22, pin `0a875da`)**
 

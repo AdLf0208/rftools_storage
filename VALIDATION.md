@@ -2,11 +2,12 @@
 
 Slice 1 (the `modular_storage` block with a tier-1 storage module).
 
-**Version 0.2.9 is the current SDK package (2026-11-22):** one flat `.hmod`, SDK
+**Version 0.2.10 is the current SDK package (2026-11-23):** one flat `.hmod`, SDK
 nightly `0a875da91dbb0fdcb7ba8c42c11341aa229af51a`, mixins
-`e59da9094f0c2fdda6c627fe9eff22dec6a906f0`. **§0i is this slice's evidence (the
-scanner's insert-from-screen path) and is where the in-game legs are**; §0h is
-slice 8's (the give-from-screen path), §0f slice 7's (the request path), §0e
+`e59da9094f0c2fdda6c627fe9eff22dec6a906f0`. **§0j is this slice's evidence (the
+scan's search filter) and is where the in-game legs are**; §0i is
+slice 9's (the scanner's insert-from-screen path), §0h slice 8's (the
+give-from-screen path), §0f slice 7's (the request path), §0e
 slice 6's (the scanner's slots and inject tick), §0d slice 5's (the scanner's block
 and scan), §0c slice 3's (the card slot), §0b slice 2's (the menu) and §0 the 0.2.0
 migration;
@@ -17,6 +18,64 @@ history. The 0.2.x `tools/e2e.sh` runs on a launcher-built game
 Every command below ran through `ports/tools/build-slot.sh` (a lease per step);
 in 0.1.0 compile steps forwarded to the second machine and game legs ran locally
 because the script uses `--offscreen`.
+
+## 0j. The scan's search filter — version 0.2.10 (2026-11-23)
+
+Slice 10: `StorageScannerTileEntity.getMatcher` / `makeSearchPredicate` reached as
+`/rftoolsstorage scan <pos> [query]` — the GUI list's search box. Every
+whitespace-separated word must match (upstream ANDs the predicates): `@modid` is a
+**prefix** test on the item's namespace (`startsWith`), anything else a
+case-insensitive contains on the item's name; an empty query matches everything.
+The price is unchanged — one `rfPerRequest`, charged before the walk and also when
+the query matches nothing (`empty`). The slice plan, with the gap line and the
+upstream reading, is `ports/_shared/evidence/rftoolsstorage/SLICE-10-PLAN.md`.
+Ladder and package logs: `ports/_shared/evidence/rftoolsstorage/`; game legs:
+`ports/_shared/evidence/rftoolsstorage-e2e/`.
+
+| Step | Command | Result | Log |
+|---|---|---|---|
+| red proof | `cargo test` with `matches_search`, `search_namespace`, `search_name` stubbed | **FAILED. 39 passed; 4 failed**, `TEST_EXIT:101` | `slice10-red.log` |
+| tests | `cargo test` | `running 43 tests` → **43 passed**, 0 failed, `TEST_EXIT:0` (39 runtime + 4 glue) | `sdk-test.log`, `slice10-test.log` |
+| lints | `cargo clippy --all-targets -- -D warnings` | `Finished`, **CLIPPY_EXIT:0**, 0 warnings | `sdk-clippy.log`, `slice10-clippy.log` |
+| format | `rustfmt --edition 2024 --check src/{lib,support,runtime}.rs` | `FMT_EXIT:0` | `slice10-fmt.log` |
+| SDK gate | `cargo horizon-mod check` | **TREE_CHECK_EXIT:0** — *"… 537 items of the API (5 Part kinds, 2 capabilitys, 147 fields or variants, 18 hooks, 52 hook arguments, 2 macros, 167 methods, 29 traits, 115 types). Made for 0a875da."* | `slice10-tree-check.log` |
+| package | `rm -f Cargo.lock && cargo horizon-mod build`, twice | **88,702 B**, SHA-256 `1aadf54d967054073d7b0898e1c6b60005829440d54105bb69296543d494f868`, **`cmp`-identical** | `slice10-build-1.log`, `slice10-build-2.log` |
+| package check | `cargo horizon-mod check rftoolsstorage.hmod` | `rftoolsstorage 0.2.10 (native-mod, format native-1/0a875da…/e59da90…, for 26.3)`, **88,702 bytes**, `1aadf54d…f868`, **FILE_CHECK_EXIT:0** | `sdk-check.log`, `slice10-check.log` |
+| entries | `unzip -l rftoolsstorage.hmod` | **67 files**, no `Cargo.lock`; `src/runtime.rs` byte-identical in tree and package (`be8bc239…20a3`) | `sdk-sha256.txt` |
+| fits, the pin | `cargo horizon-mod fits rftoolsstorage.hmod --build 0a875da` | `0a875da  made for`, **FITS_PIN_EXIT:0** (sha printed in the log) | `sdk-fits.log`, `slice10-fits.log` |
+| fits, another build | `cargo horizon-mod fits rftoolsstorage.hmod --build 0b14f8a` | `0b14f8a  fits`, **FITS_OTHER_EXIT:0** | `sdk-fits.log`, `slice10-fits.log` |
+| launcher build | `BUILD_LOCAL=1 ports/tools/launcher-game.sh build rftoolsstorage` | `Compiling rftoolsstorage (1 of 1)`, tag `native-0a875da-7094a7593c52`, **LAUNCHER_BUILD_EXIT:0** | `slice10-launcher-build.log` |
+| in game | `build-slot.sh run --job W1-rftoolsstorage --step e2e -- bash ports/rftoolsstorage/tools/e2e.sh` (`CONTROL_GAME=`) | **PASS** + `EXIT:0` | `rftoolsstorage-e2e/e2e-scanfilter.log` |
+| control | the same leg on the Nightly **without** the package | **FAIL** + `EXIT:1` (`{"error":"unknown item rftoolsstorage:storage_scanner"}`) | `e2e-scanfilter-control.log` |
+| selftest (this slice) | `SCAN_SELFTEST=1` (asserts the `dirt` query did list the stone) | **FAIL** + `EXIT:1` — *"the 'dirt' query listed only minecraft:dirt 32 and not the stone 64 two blocks away …"* | `e2e-scanfilter-selftest.log` |
+| e2e gate | `python3 ports/tools/check-e2e-logs.py rftoolsstorage-e2e --strict` | `logs=25  ok=25`, exit 0 | — |
+| package gate | `python3 ports/tools/verify-sdk-package.py rftoolsstorage` | `1/1 package(s) verified`, exit 0 | — |
+| skills gate | `python3 ports/tools/check-skills.py --notes ports/rftoolsstorage --strict` | PASS | — |
+
+The default leg's filter phase (abridged; the log has every `ctl` reply):
+
+```
+== THE SCAN FILTER: the GUI list's search box — every word is '@modid' (a namespace prefix) or a case-insensitive name contains ==
+scan @minecraft: rftoolsstorage:storage_scanner: minecraft:dirt 32, minecraft:stone 64 (4900/50000 FE); buffer now 4900
+scan dirt: rftoolsstorage:storage_scanner: minecraft:dirt 32 (4800/50000 FE); buffer now 4800
+scan stone: rftoolsstorage:storage_scanner: minecraft:stone 64 (4700/50000 FE); buffer now 4700
+scan @nomatch: rftoolsstorage:storage_scanner: empty (4600/50000 FE); buffer now 4600
+== the unfiltered scan still lists both — the differential for the filter ==
+scan (no query): rftoolsstorage:storage_scanner: minecraft:dirt 32, minecraft:stone 64 (4500/50000 FE); buffer now 4500
+```
+
+The rig is the brief's: the scanner at S with radius 3, a chest at S+2 holding 64
+stone, a chest at S+3 holding 32 dirt, the buffer reset to 5,000. `@minecraft`
+lists both kinds while `dirt` and `stone` each list one, the buffer falls by
+exactly 100 for every query (including the `empty` one), and the unfiltered scan
+after them lists both again — the differential that proves the filter did the
+removal. The fail-capable assertion is the inverted leg:
+
+```
+== SCAN_SELFTEST: assert the 'dirt' query DID list the stone (must fail) ==
+FAIL: the 'dirt' query listed only minecraft:dirt 32 and not the stone 64 two blocks away (rftoolsstorage:storage_scanner: minecraft:dirt 32 (4800/50000 FE)), so this inverted assertion fails as it must
+EXIT:1
+```
 
 ## 0i. The scanner's insert-from-screen path — version 0.2.9 (2026-11-22)
 

@@ -42,10 +42,11 @@ use crate::runtime::{
     Slot, Storage, card_accepts, carried_slot_in, clamp_radius, gave_line, give_amount,
     give_nothing_line, give_price, inject_plan, injectable_at, insert_amount, insert_charge,
     insert_line, insert_nothing_line, insert_partial_line, insert_price, is_storage_scanner,
-    lock_press, may_inspect, merge_counts, module_id, module_tier, no_power_line, no_routable_line,
-    out_slot_room, request_amount, request_charge, request_line, request_no_power_line,
-    request_nothing_line, request_out_slot_line, request_price, restored_count, scan_line,
-    scan_positions, scanner_radius, slot_accepts, spend_power,
+    lock_press, matches_search, may_inspect, merge_counts, module_id, module_tier, no_power_line,
+    no_routable_line, out_slot_room, request_amount, request_charge, request_line,
+    request_no_power_line, request_nothing_line, request_out_slot_line, request_price,
+    restored_count, scan_line, scan_positions, scanner_radius, search_name, search_namespace,
+    slot_accepts, spend_power,
 };
 
 /// The block this slice implements, exactly as the content declares it.
@@ -1503,14 +1504,17 @@ fn saved_radius(data: Option<&Compound>) -> i32 {
     scanner_radius(number(field(data, KEY_RADIUS)).and_then(|value| i32::try_from(value).ok()))
 }
 
-/// `/rftoolsstorage scan <pos>`: what the inventories in the scanner's box hold.
+/// `/rftoolsstorage scan <pos> [query]`: what the inventories in the scanner's box
+/// hold, filtered by the GUI list's search box when the command names one.
 ///
 /// Upstream's GUI lists them for free and charges `rfPerRequest` when the player
 /// pulls an item out; this port has no list widget (a gap, `notes.md`), so the
 /// readout is the whole player surface and it costs the request's price. With
 /// less than that in the buffer the scan is refused with `no power` and nothing
-/// is read or spent.
-fn scan_readout(host: &mut dyn ServerHost, pos: [i32; 3]) -> String {
+/// is read or spent. The search costs the same: upstream's filter narrows the
+/// list the request is made from, and this readout is that list (slice 5's
+/// deviation 1), so a filtered scan is charged like an unfiltered one.
+fn scan_readout(host: &mut dyn ServerHost, pos: [i32; 3], query: &str) -> String {
     let block = block_id_at(&*host, pos);
     if !is_storage_scanner(&block) {
         return format!("{block}: not a storage scanner");
@@ -1523,7 +1527,7 @@ fn scan_readout(host: &mut dyn ServerHost, pos: [i32; 3]) -> String {
     let Some(after) = spend_power(stored) else {
         return format!("{block}: {}", no_power_line(stored));
     };
-    let found = scan_found(host, pos, saved_radius(data.as_ref()));
+    let found = scan_found(host, pos, saved_radius(data.as_ref()), query);
     if let Ok(after) = i32::try_from(after) {
         let mut spent = Compound::new();
         spent.insert(KEY_ENERGY.into(), Tag::Int(after));
@@ -1537,8 +1541,10 @@ fn scan_readout(host: &mut dyn ServerHost, pos: [i32; 3]) -> String {
 /// mod container), read slot by slot and summed. The scanner's own cell and any
 /// other storage scanner are skipped, as upstream skips its own tile entity; a
 /// position with no inventory, in an unloaded chunk or in a level that is not in
-/// place answers nothing.
-fn scan_found(host: &mut dyn ServerHost, pos: [i32; 3], radius: i32) -> Vec<Found> {
+/// place answers nothing. `query` is the GUI search box, `scan`'s optional term:
+/// a kind the search rejects is left out of the list, exactly as `getMatcher`
+/// narrows the widget's cache (`matches_search`).
+fn scan_found(host: &mut dyn ServerHost, pos: [i32; 3], radius: i32, query: &str) -> Vec<Found> {
     let Some(level) = host.level(host.dimension()) else {
         return Vec::new();
     };
@@ -1557,7 +1563,13 @@ fn scan_found(host: &mut dyn ServerHost, pos: [i32; 3], radius: i32) -> Vec<Foun
             };
             let count = handler.amount(host, index);
             if count > 0 {
-                entries.push((resource.item().id(&*host), count));
+                let id = resource.item().id(&*host);
+                if !query.is_empty()
+                    && !matches_search(query, search_namespace(&id), &search_name(&id))
+                {
+                    continue;
+                }
+                entries.push((id, count));
             }
         }
     }
@@ -2140,9 +2152,9 @@ pub(crate) fn on_register_commands(event: &mut RegisterCommandsEvent<'_>) {
     event
         .commands
         .push(Command::new("rftoolsstorage lock <pos:block_pos>"));
-    event
-        .commands
-        .push(Command::new("rftoolsstorage scan <pos:block_pos>"));
+    event.commands.push(Command::new(
+        "rftoolsstorage scan <pos:block_pos> [query:text]",
+    ));
     event.commands.push(Command::new(
         "rftoolsstorage radius <pos:block_pos> <radius:integer>",
     ));
@@ -2237,7 +2249,13 @@ pub(crate) fn on_run_mod_command(
                 None => format!("{block}: not a modular storage"),
             }
         }
-        "scan" => scan_readout(host, pos),
+        "scan" => {
+            let query = match event.command.argument("query") {
+                Some(CommandArgumentValue::String(text)) => text.as_str(),
+                _ => "",
+            };
+            scan_readout(host, pos, query)
+        }
         "request" => {
             let Some(requested) = item_argument!(event.command.argument("item")) else {
                 feedback(

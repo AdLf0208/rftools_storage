@@ -534,6 +534,48 @@ pub fn no_power_line(stored: u32) -> String {
     format!("no power ({stored}/{SCANNER_MAX_ENERGY} FE)")
 }
 
+// --- the scan's search filter (slice 10) ------------------------------------
+
+/// Whether one kind passes the GUI list's search (`StorageScannerTileEntity
+/// .getMatcher` / `makeSearchPredicate`): the search is split on whitespace and
+/// **every** word must match (upstream ANDs the predicates); a word that starts
+/// with `@` is the rest of it matched against the item's namespace by prefix
+/// (upstream's `startsWith`), any other word is a case-insensitive contains on
+/// the item's name. An empty search matches every kind (`getMatcher`'s
+/// `s -> true`).
+#[must_use]
+pub fn matches_search(search: &str, namespace: &str, name: &str) -> bool {
+    let namespace = namespace.to_lowercase();
+    let name = name.to_lowercase();
+    search.split_whitespace().all(|word| {
+        let word = word.to_lowercase();
+        match word.strip_prefix('@') {
+            Some(modid) => namespace.starts_with(modid),
+            None => name.contains(&word),
+        }
+    })
+}
+
+/// The namespace a search's `@modid` word is tested against: the part of an item
+/// id before its `:`, `minecraft` for an id with no namespace.
+#[must_use]
+pub fn search_namespace(id: &str) -> &str {
+    id.split_once(':')
+        .map_or("minecraft", |(namespace, _)| namespace)
+}
+
+/// The name a plain search word is tested against: the item id's path with its
+/// underscores as spaces (`minecraft:oak_log` -> `oak log`). Upstream tests
+/// `ItemStack.getHoverName()`, which the SDK answers only on the client, so the
+/// id path is the server-side reading of the name (`notes.md`, slice 10's
+/// deviation 1).
+#[must_use]
+pub fn search_name(id: &str) -> String {
+    id.split_once(':')
+        .map_or(id, |(_, path)| path)
+        .replace('_', " ")
+}
+
 // --- the scanner's item slots and its inject tick (slice 6) ----------------
 
 /// `StorageScannerContainer.SLOT_IN`: the GUI's input slot, which a player fills
@@ -1562,5 +1604,94 @@ mod tests {
             no_routable_line(5_000),
             "there are no routable inventories (5000/50000 FE)"
         );
+    }
+
+    #[test]
+    fn a_search_word_matches_the_name_case_insensitively() {
+        assert!(
+            matches_search("dirt", "minecraft", "Dirt"),
+            "the hover name is compared lower-cased"
+        );
+        assert!(
+            matches_search("STONE", "minecraft", "Stone"),
+            "the search is lower-cased too"
+        );
+        assert!(
+            matches_search("ak lo", "minecraft", "Oak Log"),
+            "a word is a contains, not a whole-name match"
+        );
+        assert!(
+            !matches_search("dirt", "minecraft", "Stone"),
+            "a word no name holds matches nothing"
+        );
+    }
+
+    #[test]
+    fn a_search_that_starts_with_at_matches_the_namespace_by_prefix() {
+        assert!(
+            matches_search("@minecraft", "minecraft", "Stone"),
+            "@modid tests the namespace"
+        );
+        assert!(
+            matches_search("@mine", "minecraft", "Stone"),
+            "upstream uses startsWith, so a namespace prefix matches"
+        );
+        assert!(
+            !matches_search("@craft", "minecraft", "Stone"),
+            "a namespace substring that is not a prefix does not match"
+        );
+        assert!(
+            !matches_search("@nomatch", "minecraft", "Stone"),
+            "an unknown namespace matches nothing"
+        );
+    }
+
+    #[test]
+    fn every_search_word_must_match_and_an_empty_search_matches_everything() {
+        assert!(
+            matches_search("", "minecraft", "Stone"),
+            "an empty search is getMatcher's s -> true"
+        );
+        assert!(
+            matches_search("   ", "minecraft", "Stone"),
+            "whitespace only is an empty search"
+        );
+        assert!(
+            matches_search("@minecraft stone", "minecraft", "Stone"),
+            "two words that both match pass"
+        );
+        assert!(
+            !matches_search("@minecraft dirt", "minecraft", "Stone"),
+            "one word that does not match fails the whole search"
+        );
+        assert!(
+            !matches_search("stone dirt", "minecraft", "Stone"),
+            "every word is ANDed, not ORed"
+        );
+    }
+
+    #[test]
+    fn the_search_name_comes_from_the_item_ids_path() {
+        assert_eq!(
+            search_name("minecraft:oak_log"),
+            "oak log",
+            "the path's underscores are spaces"
+        );
+        assert_eq!(search_name("minecraft:stone"), "stone");
+        assert_eq!(
+            search_namespace("rftoolsstorage:storage_scanner"),
+            "rftoolsstorage"
+        );
+        assert_eq!(
+            search_namespace("minecraft:stone"),
+            "minecraft",
+            "@minecraft is the namespace of every vanilla item"
+        );
+        assert_eq!(
+            search_namespace("stone"),
+            "minecraft",
+            "an id without a namespace is the default one"
+        );
+        assert_eq!(search_name("stone"), "stone");
     }
 }
