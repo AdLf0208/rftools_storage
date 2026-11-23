@@ -39,14 +39,14 @@ use crate::runtime::{
     Found, GiveAmount, InsertCharge, Kind, LEVEL_ADMINS, LockPress, RequestCharge,
     SCANNER_AUTO_SLOT, SCANNER_IN_SLOT, SCANNER_MAX_ENERGY, SCANNER_OUT_SLOT,
     SCANNER_RECEIVE_PER_TICK, SCANNER_RF_PER_INSERT, SCANNER_SLOTS, SLOT_LIMIT, STORAGE_SCANNER,
-    Slot, Storage, card_accepts, carried_slot_in, clamp_radius, gave_line, give_amount,
-    give_nothing_line, give_price, inject_plan, injectable_at, insert_amount, insert_charge,
-    insert_line, insert_nothing_line, insert_partial_line, insert_price, is_storage_scanner,
-    lock_press, matches_search, may_inspect, merge_counts, module_id, module_tier, no_power_line,
-    no_routable_line, out_slot_room, request_amount, request_charge, request_line,
-    request_no_power_line, request_nothing_line, request_out_slot_line, request_price,
-    restored_count, scan_line, scan_positions, scanner_radius, search_name, search_namespace,
-    slot_accepts, spend_power,
+    Slot, SortingMode, Storage, card_accepts, carried_slot_in, clamp_radius, gave_line,
+    give_amount, give_nothing_line, give_price, inject_plan, injectable_at, insert_amount,
+    insert_charge, insert_line, insert_nothing_line, insert_partial_line, insert_price,
+    is_storage_scanner, lock_press, matches_search, may_inspect, merge_counts, module_id,
+    module_tier, no_power_line, no_routable_line, out_slot_room, request_amount, request_charge,
+    request_line, request_no_power_line, request_nothing_line, request_out_slot_line,
+    request_price, restored_count, scan_line, scan_positions, scanner_radius, search_name,
+    search_namespace, slot_accepts, sort_found, spend_power,
 };
 
 /// The block this slice implements, exactly as the content declares it.
@@ -58,6 +58,10 @@ const BE_TYPE: &str = "rftoolsstorage:storage_block_entity";
 const SCANNER_BE_TYPE: &str = "rftoolsstorage:storage_scanner_block_entity";
 /// The saved compound key of the scanner's radius (`StorageScannerData.radius`).
 const KEY_RADIUS: &str = "radius";
+/// The saved compound key of the scanner list's sort choice (`SortingMode`):
+/// upstream's own `Value.createEnum("sortMode", …)` key, so the order survives a
+/// relaunch. The value is the enum's serialized name (`AMOUNT_DESCENDING`).
+const KEY_SORT: &str = "sortMode";
 /// The saved compound key of a machine's FE buffer: the name the game's own
 /// energy handler reads and writes (`ModEnergyBuffer`).
 const KEY_ENERGY: &str = "energy";
@@ -1504,6 +1508,16 @@ fn saved_radius(data: Option<&Compound>) -> i32 {
     scanner_radius(number(field(data, KEY_RADIUS)).and_then(|value| i32::try_from(value).ok()))
 }
 
+/// The scanner's saved list order: `SortingMode` under the `sortMode` key, and
+/// `NAME` when the block has never been given one (`StorageScannerData.DEFAULT.
+/// sortingMode`), which is the order every slice before this one printed.
+fn saved_sort(data: Option<&Compound>) -> SortingMode {
+    match field(data, KEY_SORT) {
+        Some(Tag::String(name)) => SortingMode::from_saved(Some(name.to_string_lossy().as_ref())),
+        _ => SortingMode::from_saved(None),
+    }
+}
+
 /// `/rftoolsstorage scan <pos> [query]`: what the inventories in the scanner's box
 /// hold, filtered by the GUI list's search box when the command names one.
 ///
@@ -1528,6 +1542,7 @@ fn scan_readout(host: &mut dyn ServerHost, pos: [i32; 3], query: &str) -> String
         return format!("{block}: {}", no_power_line(stored));
     };
     let found = scan_found(host, pos, saved_radius(data.as_ref()), query);
+    let found = sort_found(saved_sort(data.as_ref()), &found);
     if let Ok(after) = i32::try_from(after) {
         let mut spent = Compound::new();
         spent.insert(KEY_ENERGY.into(), Tag::Int(after));
@@ -1536,7 +1551,8 @@ fn scan_readout(host: &mut dyn ServerHost, pos: [i32; 3], query: &str) -> String
     format!("{block}: {}", scan_line(after, &found))
 }
 
-/// The kinds every inventory in the scanner's box holds, one entry a kind: a
+/// The kinds every inventory in the scanner's box holds, one entry a kind in the
+/// order the walk first met them (the caller applies the saved list order): a
 /// neighbour's item capability (the game's own answer for a chest, a barrel or a
 /// mod container), read slot by slot and summed. The scanner's own cell and any
 /// other storage scanner are skipped, as upstream skips its own tile entity; a
@@ -2015,6 +2031,35 @@ fn set_radius(host: &mut dyn ServerHost, pos: [i32; 3], wanted: i32) -> Option<i
     Some(radius)
 }
 
+/// `/rftoolsstorage sort <pos> <mode>`: the GUI list's sort choice
+/// (`GuiStorageScanner`'s `sortChoice`, whose labels are `SortingMode
+/// .description`). Saves the mode in the scanner's compound under upstream's
+/// `sortMode` key (the serialized enum name), so the order survives a relaunch,
+/// and answers with it. `Tag` is refused: upstream sorts it by the "largest" tag
+/// an item is in, and this pin's tag service exposes no item-tag enumeration
+/// (`runtime::SortingMode::available`), so the port would have to invent an order.
+fn sort_readout(host: &mut dyn ServerHost, pos: [i32; 3], wanted: &str) -> String {
+    let block = block_id_at(&*host, pos);
+    if !is_storage_scanner(&block) {
+        return format!("{block}: not a storage scanner");
+    }
+    let Some(mode) = SortingMode::from_description(wanted) else {
+        return format!("{block}: unknown sort mode '{wanted}' (Amount+, Amount-, Mod, Tag, Name)");
+    };
+    if !mode.available() {
+        return format!(
+            "{block}: sort Tag is not available in this build (it needs an item's tags, which this build does not list)"
+        );
+    }
+    let Some(entity) = scanner_entity(&*host, pos) else {
+        return format!("{block}: not a storage scanner");
+    };
+    let mut data = Compound::new();
+    data.insert(KEY_SORT.into(), Tag::String(mode.serialized_name().into()));
+    let _ = entity.merge_data(host, data);
+    format!("{block}: sort {}", mode.description())
+}
+
 /// The level that is ticking: a block entity's tick runs with its own level in
 /// place, which is not necessarily the dimension a command would act in.
 fn ticking_level(host: &dyn ServerHost) -> Option<LevelRef> {
@@ -2159,6 +2204,9 @@ pub(crate) fn on_register_commands(event: &mut RegisterCommandsEvent<'_>) {
         "rftoolsstorage radius <pos:block_pos> <radius:integer>",
     ));
     event.commands.push(Command::new(
+        "rftoolsstorage sort <pos:block_pos> <mode:word>",
+    ));
+    event.commands.push(Command::new(
         "rftoolsstorage request <pos:block_pos> <item:item> [count:integer]",
     ));
     event.commands.push(Command::new(
@@ -2183,7 +2231,7 @@ pub(crate) fn on_run_mod_command(
     let Some(CommandArgumentValue::BlockPos(pos)) = event.command.argument("pos") else {
         feedback(
             host,
-            "usage: /rftoolsstorage info|lock|scan|radius|request|give|insert <x> <y> <z> …",
+            "usage: /rftoolsstorage info|lock|scan|radius|sort|request|give|insert <x> <y> <z> …",
         );
         return Flow::Cancel;
     };
@@ -2329,6 +2377,16 @@ pub(crate) fn on_run_mod_command(
                 Some(radius) => format!("{block}: radius {radius}"),
                 None => format!("{block}: not a storage scanner"),
             }
+        }
+        "sort" => {
+            let Some(CommandArgumentValue::String(mode)) = event.command.argument("mode") else {
+                feedback(
+                    host,
+                    "usage: /rftoolsstorage sort <x> <y> <z> <Amount+|Amount-|Mod|Tag|Name>",
+                );
+                return Flow::Cancel;
+            };
+            sort_readout(host, pos, mode)
         }
         _ => return Flow::Continue,
     };

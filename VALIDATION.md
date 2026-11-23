@@ -2,10 +2,11 @@
 
 Slice 1 (the `modular_storage` block with a tier-1 storage module).
 
-**Version 0.2.10 is the current SDK package (2026-11-23):** one flat `.hmod`, SDK
+**Version 0.2.11 is the current SDK package (2026-11-23):** one flat `.hmod`, SDK
 nightly `0a875da91dbb0fdcb7ba8c42c11341aa229af51a`, mixins
-`e59da9094f0c2fdda6c627fe9eff22dec6a906f0`. **§0j is this slice's evidence (the
-scan's search filter) and is where the in-game legs are**; §0i is
+`e59da9094f0c2fdda6c627fe9eff22dec6a906f0`. **§0k is this slice's evidence (the
+scan list's sort choice) and is where the in-game legs are**; §0j is slice 10's
+(the scan's search filter), §0i is
 slice 9's (the scanner's insert-from-screen path), §0h slice 8's (the
 give-from-screen path), §0f slice 7's (the request path), §0e
 slice 6's (the scanner's slots and inject tick), §0d slice 5's (the scanner's block
@@ -18,6 +19,68 @@ history. The 0.2.x `tools/e2e.sh` runs on a launcher-built game
 Every command below ran through `ports/tools/build-slot.sh` (a lease per step);
 in 0.1.0 compile steps forwarded to the second machine and game legs ran locally
 because the script uses `--offscreen`.
+
+## 0k. The scan list's sort choice — version 0.2.11 (2026-11-23)
+
+Slice 11: `SortingMode` reached as `/rftoolsstorage sort <pos> <mode>` — the GUI
+list's sort, saved in the scanner's compound under upstream's `sortMode` key and
+applied by `scan`. `Amount+`/`Amount-` sort by the merged count and are stable
+(equal counts keep the walk's first-seen order); `Mod` groups the namespace then
+the item id; `Name` is the id order and the default; `Tag` is
+`blocked(no item-tag enumeration)` — the SDK's `Tags` service answers only
+item-in-named-tag membership, not an item's tags, which `findLargestTag` needs.
+The slice plan, with the gap line and the upstream reading, is
+`ports/_shared/evidence/rftoolsstorage/SLICE-11-PLAN.md`. Ladder and package
+logs: `ports/_shared/evidence/rftoolsstorage/`; game legs:
+`ports/_shared/evidence/rftoolsstorage-e2e/`.
+
+| Step | Command | Result | Log |
+|---|---|---|---|
+| red proof | `cargo test` with `description`/`serialized_name`/`from_description`/`from_saved`/`available`/`sort_found` stubbed | **FAILED. 42 passed; 4 failed**, `TEST_EXIT:101` | `slice11-red.log` |
+| tests | `cargo test` | `running 46 tests` → **46 passed**, 0 failed, `TEST_EXIT:0` (42 runtime + 4 glue) | `sdk-test.log`, `slice11-test.log` |
+| lints | `cargo clippy --all-targets -- -D warnings` | `Finished`, **CLIPPY_EXIT:0**, 0 warnings | `sdk-clippy.log`, `slice11-clippy.log` |
+| format | `rustfmt --edition 2024 --check src/{lib,support,runtime}.rs` | `FMT_EXIT:0` | `slice11-fmt.log` |
+| SDK gate | `cargo horizon-mod check` | **TREE_CHECK_EXIT:0** — *"… 537 items of the API (5 Part kinds, 2 capabilitys, 147 fields or variants, 18 hooks, 52 hook arguments, 2 macros, 167 methods, 29 traits, 115 types). Made for 0a875da."* | `slice11-tree-check.log` |
+| package | `rm -f Cargo.lock && cargo horizon-mod build`, twice | **91,952 B**, SHA-256 `7820eeccb3d40fba47ef72041bce5c39a216d700dd1cd43756c10af7ba4979a8`, **`cmp`-identical** | `slice11-build-1.log`, `slice11-build-2.log` |
+| package check | `cargo horizon-mod check rftoolsstorage.hmod` | `rftoolsstorage 0.2.11 (native-mod, format native-1/0a875da…/e59da90…, for 26.3)`, **91,952 bytes**, `7820eecc…79a8`, **FILE_CHECK_EXIT:0** | `sdk-check.log`, `slice11-check.log` |
+| entries | `unzip -l rftoolsstorage.hmod` | **67 files**, no `Cargo.lock`; `src/runtime.rs` byte-identical in tree and package (`2417ab53a2fb`) | — |
+| fits, the pin | `cargo horizon-mod fits rftoolsstorage.hmod --build 0a875da` | `0a875da  made for`, **FITS_PIN_EXIT:0** | `sdk-fits.log`, `slice11-fits.log` |
+| fits, another build | `cargo horizon-mod fits rftoolsstorage.hmod --build 0b14f8a` | `0b14f8a  fits`, **FITS_OTHER_EXIT:0** | `sdk-fits.log`, `slice11-fits.log` |
+| launcher build | `BUILD_LOCAL=1 ports/tools/launcher-game.sh build rftoolsstorage` | `Compiling rftoolsstorage (1 of 1)`, tag `native-0a875da-a6e0d2c73be2`, **LAUNCHER_BUILD_EXIT:0** | `slice11-launcher-build.log` |
+| in game | `build-slot.sh run --job e2e-rftoolsstorage --step e2e -- bash ports/rftoolsstorage/tools/e2e.sh` (`CONTROL_GAME=`) | **PASS** + `EXIT:0` | `rftoolsstorage-e2e/e2e-sort.log` |
+| control | the same leg on the Nightly **without** the package | **FAIL** + `EXIT:1` (`{"error":"unknown item rftoolsstorage:storage_scanner"}`) | `e2e-sort-control.log` |
+| selftest (this slice) | `SORT_SELFTEST=1` (asserts the `Amount-` reply did start with stone) | **FAIL** + `EXIT:1` — *"the Amount- scan started with minecraft:dirt 64 and not the stone 32 …"* | `e2e-sort-selftest.log` |
+| e2e gate | `python3 ports/tools/check-e2e-logs.py rftoolsstorage-e2e --strict` | `logs=28  ok=28`, exit 0 | — |
+| package gate | `python3 ports/tools/verify-sdk-package.py rftoolsstorage` | `1/1 package(s) verified`, exit 0 | — |
+| skills gate | `python3 ports/tools/check-skills.py --notes ports/rftoolsstorage --strict` | PASS | — |
+
+The default leg's sort phase (abridged; the log has every `ctl` reply):
+
+```
+== THE SORT CHOICE: the GUI list's sort — Amount+, Amount-, Mod, Name (Tag is blocked at this pin) ==
+  chest at 18,102,-6: 32 x minecraft:stone
+  chest at 19,102,-6: 64 x minecraft:dirt
+sort Amount-: rftoolsstorage:storage_scanner: sort Amount-
+saved sortMode: AMOUNT_DESCENDING
+scan Amount-: rftoolsstorage:storage_scanner: minecraft:dirt 64, minecraft:stone 32 (4900/50000 FE); buffer now 4900
+sort Amount+: rftoolsstorage:storage_scanner: sort Amount+
+scan Amount+: rftoolsstorage:storage_scanner: minecraft:stone 32, minecraft:dirt 64 (4800/50000 FE)
+sort Name: rftoolsstorage:storage_scanner: sort Name
+scan Name: rftoolsstorage:storage_scanner: minecraft:dirt 64, minecraft:stone 32 (4700/50000 FE)
+== the Mod order puts a rftoolsstorage stack after both minecraft kinds ==
+sort Mod: rftoolsstorage:storage_scanner: sort Mod
+scan Mod: rftoolsstorage:storage_scanner: minecraft:dirt 64, minecraft:stone 32, rftoolsstorage:storage_module0 1 (4600/50000 FE)
+```
+
+The brief's rig: a chest at S+2 holding 32 stone, one at S+3 holding 64 dirt, the
+buffer at 5,000, radius 3. The same two chests answer dirt-first under `Amount-`
+and stone-first under `Amount+` (the order is the mode, not the rig); `Name`
+answers the dirt first again (the differential against `Amount+`); and the third
+chest's `rftoolsstorage:storage_module0` sorts after both `minecraft:` kinds under
+`Mod`. The saved compound reads `AMOUNT_DESCENDING`, and the relaunch leg sets
+`Amount-` on the restored search rig, quits and re-enters, and reads
+`minecraft:stone 64, minecraft:dirt 32` back with `sortMode` still
+`AMOUNT_DESCENDING`.
 
 ## 0j. The scan's search filter — version 0.2.10 (2026-11-23)
 

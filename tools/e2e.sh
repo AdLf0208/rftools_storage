@@ -75,14 +75,24 @@
 #      only the dirt (4,800), `scan <pos> stone` only the stone (4,700) and
 #      `scan <pos> @nomatch` answers `empty` with the price still paid (4,600);
 #      the unfiltered `scan <pos>` lists both again (4,500) — the differential.
+#  18. **the sort choice (slice 11)**: the GUI list's sort, as a saved mode. At
+#      radius 3 with a chest two away holding 32 stone and one three away holding
+#      64 dirt, `sort <pos> Amount-` + `scan` answers `minecraft:dirt 64,
+#      minecraft:stone 32` and saves `AMOUNT_DESCENDING`; `Amount+` answers the
+#      stone first; `Name` answers the dirt first (the differential); a third
+#      chest's `rftoolsstorage:storage_module0` sorts after both `minecraft:`
+#      kinds under `Mod`; and the saved `Amount-` order is read back after a
+#      relaunch (the search phase's rig restored first).
 #
 # SELFTEST=1 keeps the scenario and asserts that the tick did NOT push the stone
 # into the chest, so the run MUST fail with a `FAIL:` verdict (the assertion the
 # slice rests on is proved able to fail). REQUEST_SELFTEST=1 does the same for the
 # request path (the chest must NOT have dropped to 96), GIVE_SELFTEST=1 for the
 # give path (the give must NOT have handed the stone over), INSERT_SELFTEST=1
-# for the insert path (the chest must NOT have received the 64 stone) and
-# SCAN_SELFTEST=1 for the scan filter (the `dirt` query must NOT list the stone).
+# for the insert path (the chest must NOT have received the 64 stone),
+# SCAN_SELFTEST=1 for the scan filter (the `dirt` query must NOT list the stone)
+# and SORT_SELFTEST=1 for the sort (the `Amount-` reply must NOT start with
+# stone).
 # COUNTERFACTUAL=1 puts a vanilla barrel where the scanner would be and proves the
 # same commands answer `not a storage scanner` on it. CONTROL_GAME runs the same
 # rig on the Nightly without the package and fails there (`EXIT:1`): the block and
@@ -112,6 +122,7 @@ REQUEST_SELFTEST=${REQUEST_SELFTEST:-0}
 GIVE_SELFTEST=${GIVE_SELFTEST:-0}
 INSERT_SELFTEST=${INSERT_SELFTEST:-0}
 SCAN_SELFTEST=${SCAN_SELFTEST:-0}
+SORT_SELFTEST=${SORT_SELFTEST:-0}
 
 SCANNER=rftoolsstorage:storage_scanner
 STORAGE=rftoolsstorage:modular_storage
@@ -192,6 +203,12 @@ radius_cmd() { # x y z n
     local line
     line=$(reply radius "$1" "$2" "$3" "$4")
     [ -n "$line" ] || fail "the radius command at $1,$2,$3 answered nothing: $(ctl messages 6 | jq -c '.chat')"
+    echo "$line"
+}
+sort_cmd() { # x y z mode
+    local line
+    line=$(reply sort "$1" "$2" "$3" "$4")
+    [ -n "$line" ] || fail "the sort command at $1,$2,$3 answered nothing: $(ctl messages 6 | jq -c '.chat')"
     echo "$line"
 }
 request_cmd() { # x y z item [count]
@@ -564,6 +581,80 @@ echo "$line" | grep -q "^$SCANNER: minecraft:dirt 32, minecraft:stone 64 (4500/$
     || fail "the unfiltered scan after the queries answered: $line"
 [ "$spent" = "$((5000 - 5 * PRICE))" ] || fail "the differential scan left $spent FE, expected $((5000 - 5 * PRICE))"
 
+say "THE SORT CHOICE: the GUI list's sort — Amount+, Amount-, Mod, Name (Tag is blocked at this pin)"
+# The brief's rig: a chest two away with 32 stone, one three away with 64 dirt,
+# the buffer back at 5,000 and radius 3. The counts are the opposite of the
+# search phase's, so Amount- (dirt first) and Name (dirt first) agree while
+# Amount+ (stone first) differs — the differential that proves the order is the
+# mode, not the rig. Every scan still costs one rfPerRequest.
+fill_chest "$CHEST_X" "$SY" "$SZ" minecraft:stone 32
+fill_chest "$FAR_X" "$SY" "$SZ" minecraft:dirt 64
+set_energy "$SX" "$SY" "$SZ" 5000
+line=$(sort_cmd "$SX" "$SY" "$SZ" 'Amount-')
+echo "sort Amount-: $line"
+echo "$line" | grep -q "^$SCANNER: sort Amount-$" || fail "the sort command answered: $line"
+saved_sort=$(data_block "$SX" "$SY" "$SZ" sortMode)
+echo "saved sortMode: $saved_sort"
+[ "$saved_sort" = AMOUNT_DESCENDING ] || fail "the saved sortMode is '$saved_sort', expected AMOUNT_DESCENDING"
+line=$(scan "$SX" "$SY" "$SZ")
+spent=$(energy_of "$SX" "$SY" "$SZ")
+echo "scan Amount-: $line; buffer now $spent"
+echo "$line" | grep -q "^$SCANNER: minecraft:dirt 64, minecraft:stone 32 (4900/$MAX_FE FE)$" \
+    || fail "the Amount- scan answered: $line"
+[ "$spent" = "$((5000 - PRICE))" ] || fail "the Amount- scan left $spent FE, expected $((5000 - PRICE))"
+
+if [ "$SORT_SELFTEST" = 1 ]; then
+    say "SORT_SELFTEST: assert the Amount- reply DID start with stone (must fail)"
+    case "$line" in
+        *"$SCANNER: minecraft:stone "*)
+            fail "the Amount- scan started with stone ($line), so the order is broken and this inverted assertion wrongly held" ;;
+        *)
+            fail "the Amount- scan started with minecraft:dirt 64 and not the stone 32 ($line), so this inverted assertion fails as it must" ;;
+    esac
+fi
+
+line=$(sort_cmd "$SX" "$SY" "$SZ" 'Amount+')
+echo "sort Amount+: $line"
+echo "$line" | grep -q "^$SCANNER: sort Amount+$" || fail "the sort command answered: $line"
+line=$(scan "$SX" "$SY" "$SZ")
+echo "scan Amount+: $line"
+echo "$line" | grep -q "^$SCANNER: minecraft:stone 32, minecraft:dirt 64 (4800/$MAX_FE FE)$" \
+    || fail "the Amount+ scan answered: $line"
+
+line=$(sort_cmd "$SX" "$SY" "$SZ" Name)
+echo "sort Name: $line"
+echo "$line" | grep -q "^$SCANNER: sort Name$" || fail "the sort command answered: $line"
+line=$(scan "$SX" "$SY" "$SZ")
+echo "scan Name: $line"
+echo "$line" | grep -q "^$SCANNER: minecraft:dirt 64, minecraft:stone 32 (4700/$MAX_FE FE)$" \
+    || fail "the Name scan answered: $line"
+
+say "the Mod order puts a rftoolsstorage stack after both minecraft kinds"
+# A third chest (not adjacent to the row, so it cannot merge) holds the port's
+# own module item: minecraft sorts before rftoolsstorage.
+MODX=$((SX - 2))
+MODZ=$SZ
+fill_chest "$MODX" "$SY" "$MODZ" rftoolsstorage:storage_module0 1
+line=$(sort_cmd "$SX" "$SY" "$SZ" Mod)
+echo "sort Mod: $line"
+echo "$line" | grep -q "^$SCANNER: sort Mod$" || fail "the sort command answered: $line"
+line=$(scan "$SX" "$SY" "$SZ")
+echo "scan Mod: $line"
+echo "$line" | grep -q "^$SCANNER: minecraft:dirt 64, minecraft:stone 32, rftoolsstorage:storage_module0 1 (4600/$MAX_FE FE)$" \
+    || fail "the Mod scan answered: $line"
+ctl setblock "$MODX" "$SY" "$MODZ" minecraft:air >/dev/null
+ctl wait 4 >/dev/null
+
+# Restore the search phase's rig and the default order for the rest of the run.
+fill_chest "$CHEST_X" "$SY" "$SZ" minecraft:stone 64
+fill_chest "$FAR_X" "$SY" "$SZ" minecraft:dirt 32
+line=$(sort_cmd "$SX" "$SY" "$SZ" Name)
+echo "sort back to Name: $line"
+line=$(scan "$SX" "$SY" "$SZ")
+echo "scan after the sort phase: $line"
+echo "$line" | grep -q "^$SCANNER: minecraft:dirt 32, minecraft:stone 64 (" \
+    || fail "the restored NAME scan answered: $line"
+
 say "an emptied buffer refuses the scan with no power, and reads nothing"
 set_energy "$SX" "$SY" "$SZ" 0
 line=$(scan "$SX" "$SY" "$SZ")
@@ -606,7 +697,13 @@ line=$(scan "$((X + 5))" "$Y" "$STORAGE_AT")
 echo "scan of the modular storage: $line"
 echo "$line" | grep -q "^$STORAGE: not a storage scanner$" || fail "the modular storage answered: $line"
 
-say "the radius and the buffer survive a relaunch, and the scan still answers"
+say "the radius, the buffer and the saved sort choice survive a relaunch, and the scan still answers"
+line=$(sort_cmd "$SX" "$SY" "$SZ" 'Amount-')
+echo "sort before the relaunch: $line"
+line=$(scan "$SX" "$SY" "$SZ")
+echo "scan before the relaunch: $line"
+echo "$line" | grep -q "^$SCANNER: minecraft:stone 64, minecraft:dirt 32 (" \
+    || fail "the Amount- scan before the relaunch answered: $line"
 before=$(energy_of "$SX" "$SY" "$SZ")
 ctl quit >/dev/null 2>&1 || true
 sleep 5
@@ -615,11 +712,14 @@ launch "$GAME"
 ctl wait 20 >/dev/null
 after=$(energy_of "$SX" "$SY" "$SZ")
 saved_radius=$(data_block "$SX" "$SY" "$SZ" radius)
+saved_sort=$(data_block "$SX" "$SY" "$SZ" sortMode)
 line=$(scan "$SX" "$SY" "$SZ")
-echo "relaunch: buffer $before -> $after, radius $saved_radius; scan: $line"
+echo "relaunch: buffer $before -> $after, radius $saved_radius, sort $saved_sort; scan: $line"
 [ "$after" = "$before" ] || fail "the relaunch changed the buffer $before -> $after"
 [ "$saved_radius" = 3 ] || fail "the relaunch changed the radius to $saved_radius"
-echo "$line" | grep -q 'minecraft:stone 64' || fail "the scan after the relaunch answered: $line"
+[ "$saved_sort" = AMOUNT_DESCENDING ] || fail "the relaunch lost the sort choice (saved '$saved_sort')"
+echo "$line" | grep -q "^$SCANNER: minecraft:stone 64, minecraft:dirt 32 (" \
+    || fail "the scan after the relaunch answered: $line"
 
 say "THE INJECT TICK: 64 stone in the in-slot goes to the chest two blocks away, for one rfPerInsert"
 # The chest must be empty (and alone: two adjacent chests are one double chest), so
@@ -1135,4 +1235,4 @@ echo "give rftoolsbase:machine_frame: $frame"
 echo "$frame" | grep -q 'unknown item' || fail "this build has rftoolsbase:machine_frame, so the recipe is not blocked and must be crafted: $frame"
 
 ctl close >/dev/null 2>&1 || true
-echo "PASS: the storage scanner places and reads back with its facing; a fresh one has no power (no power (0/50000 FE)) and reads nothing; at its default radius 1 it finds nothing two blocks away; /rftoolsstorage radius 2 widens the box and the scan answers minecraft:stone 64 for a chest two blocks away while the chest three away (minecraft:dirt 32) is outside it; radius 3 lists both, one entry a kind; every scan costs rfPerRequest (5,000 -> 4,900 -> 4,800 -> 4,700, printed in the reply); THE SCAN FILTER (the GUI's search box) keeps '@minecraft' listing both kinds, narrows 'dirt' to minecraft:dirt 32 and 'stone' to minecraft:stone 64, answers 'empty' for '@nomatch' with the price still paid (4,600), and leaves the unfiltered scan listing both (4,500) as the differential; an emptied buffer refuses with no power and reads nothing, and charging it again makes the scan answer again; scan and radius refuse a chest and the modular storage (not a storage scanner); the radius and the buffer survive a relaunch; THE INJECT TICK pushes 64 stone from the in-slot into the empty chest two blocks away so its Items[0] reads minecraft:stone x64 while the buffer drops by exactly one rfPerInsert (5000 -> 4980), and with the buffer at 0 the next stack stays in the slot and the chest keeps its 64, recharging proving the stall was the power (chest 128); the auto slot routes too (chest 160); items the game puts in the container are routed for one rfPerInsert; a stack nothing accepts is still charged one attempt (20 FE pays one, 19 pays none) and stays in the slot; the walk passes a full barrel for the chest behind it; the tick never writes the out slot; THE REQUEST PATH pulls 32 stone from a chest of 128 into the player's inventory (the reference's straight-to-inventory default), leaving the chest at 96 and the buffer at 4,990 for an explicit count, refuses a kind nothing holds and charges nothing, refuses below the price with the price line (costs 10, have 9), sends a ctl command's 16-stone request straight to the player too, and refuses a request whose out slot holds another kind without pulling or charging; THE INSERT PATH pushes the player's 64 stone into the chest two blocks away so its Items[0] reads minecraft:stone x64 and empties the player's stack for exactly one rfPerInsert (5000 -> 4980), inserts an explicit 10 of 64 for one more rfPerInsert, takes only the 32 a nearly-full barrel has room for and charges NOTHING for the partial insert, moves nothing and charges nothing against a full barrel (the player keeps 64), refuses a box with no routable inventory (there are no routable inventories, no charge) and refuses a chest (not a storage scanner); THE GIVE PATH hands the whole stack (64) straight to the player from a chest of 64, empties the chest and charges the FULL rfPerRequest (5000 -> 4900) with the out slot still holding the request counterfactual's dirt (it has no out slot), hands exactly one item with [single] (chest 3 -> 2, buffer 4900 -> 4800), refuses a kind nothing holds and charges nothing, and refuses below the full price with the price line (costs 100, have 99) without touching the chest, and a give on a chest is refused as not a storage scanner; the loot table drops the scanner on a survival break; the modular storage still answers 0/0 empty no module; and a barrel answers not a storage scanner to the same commands"
+echo "PASS: the storage scanner places and reads back with its facing; a fresh one has no power (no power (0/50000 FE)) and reads nothing; at its default radius 1 it finds nothing two blocks away; /rftoolsstorage radius 2 widens the box and the scan answers minecraft:stone 64 for a chest two blocks away while the chest three away (minecraft:dirt 32) is outside it; radius 3 lists both, one entry a kind; every scan costs rfPerRequest (5,000 -> 4,900 -> 4,800 -> 4,700, printed in the reply); THE SCAN FILTER (the GUI's search box) keeps '@minecraft' listing both kinds, narrows 'dirt' to minecraft:dirt 32 and 'stone' to minecraft:stone 64, answers 'empty' for '@nomatch' with the price still paid (4,600), and leaves the unfiltered scan listing both (4,500) as the differential; THE SORT CHOICE orders the list (Amount- = dirt 64, stone 32, Amount+ = stone 32, dirt 64, Name = dirt 64, stone 32, Mod puts rftoolsstorage:storage_module0 after both minecraft kinds), and the saved AMOUNT_DESCENDING mode orders the list after a relaunch too (stone 64, dirt 32); an emptied buffer refuses with no power and reads nothing, and charging it again makes the scan answer again; scan and radius refuse a chest and the modular storage (not a storage scanner); the radius and the buffer survive a relaunch; THE INJECT TICK pushes 64 stone from the in-slot into the empty chest two blocks away so its Items[0] reads minecraft:stone x64 while the buffer drops by exactly one rfPerInsert (5000 -> 4980), and with the buffer at 0 the next stack stays in the slot and the chest keeps its 64, recharging proving the stall was the power (chest 128); the auto slot routes too (chest 160); items the game puts in the container are routed for one rfPerInsert; a stack nothing accepts is still charged one attempt (20 FE pays one, 19 pays none) and stays in the slot; the walk passes a full barrel for the chest behind it; the tick never writes the out slot; THE REQUEST PATH pulls 32 stone from a chest of 128 into the player's inventory (the reference's straight-to-inventory default), leaving the chest at 96 and the buffer at 4,990 for an explicit count, refuses a kind nothing holds and charges nothing, refuses below the price with the price line (costs 10, have 9), sends a ctl command's 16-stone request straight to the player too, and refuses a request whose out slot holds another kind without pulling or charging; THE INSERT PATH pushes the player's 64 stone into the chest two blocks away so its Items[0] reads minecraft:stone x64 and empties the player's stack for exactly one rfPerInsert (5000 -> 4980), inserts an explicit 10 of 64 for one more rfPerInsert, takes only the 32 a nearly-full barrel has room for and charges NOTHING for the partial insert, moves nothing and charges nothing against a full barrel (the player keeps 64), refuses a box with no routable inventory (there are no routable inventories, no charge) and refuses a chest (not a storage scanner); THE GIVE PATH hands the whole stack (64) straight to the player from a chest of 64, empties the chest and charges the FULL rfPerRequest (5000 -> 4900) with the out slot still holding the request counterfactual's dirt (it has no out slot), hands exactly one item with [single] (chest 3 -> 2, buffer 4900 -> 4800), refuses a kind nothing holds and charges nothing, and refuses below the full price with the price line (costs 100, have 99) without touching the chest, and a give on a chest is refused as not a storage scanner; the loot table drops the scanner on a survival break; the modular storage still answers 0/0 empty no module; and a barrel answers not a storage scanner to the same commands"

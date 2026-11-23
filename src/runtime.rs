@@ -489,8 +489,9 @@ pub struct Found {
     pub count: u32,
 }
 
-/// Merges the kinds an inventory walk found into one entry a kind, sorted by
-/// item id — upstream's `SortingMode.NAME`, the default.
+/// Merges the kinds an inventory walk found into one entry a kind, in the order
+/// the walk first met them — the base the stable amount sort keeps for equal
+/// counts (`GuiStorageScanner.updateContentsList`).
 #[must_use]
 pub fn merge_counts(entries: &[(String, u32)]) -> Vec<Found> {
     let mut found: Vec<Found> = Vec::new();
@@ -498,15 +499,13 @@ pub fn merge_counts(entries: &[(String, u32)]) -> Vec<Found> {
         if *count == 0 {
             continue;
         }
-        match found.binary_search_by(|entry| entry.item.as_str().cmp(item.as_str())) {
-            Ok(index) => found[index].count = found[index].count.saturating_add(*count),
-            Err(index) => found.insert(
-                index,
-                Found {
-                    item: item.clone(),
-                    count: *count,
-                },
-            ),
+        if let Some(entry) = found.iter_mut().find(|entry| entry.item == *item) {
+            entry.count = entry.count.saturating_add(*count);
+        } else {
+            found.push(Found {
+                item: item.clone(),
+                count: *count,
+            });
         }
     }
     found
@@ -574,6 +573,121 @@ pub fn search_name(id: &str) -> String {
     id.split_once(':')
         .map_or(id, |(_, path)| path)
         .replace('_', " ")
+}
+
+// --- the scan list's sort choice (slice 11) --------------------------------
+
+/// Upstream's `SortingMode`: the scanner GUI list's five orders. `Name` is the
+/// default (`StorageScannerData.DEFAULT.sortingMode`), which is the order every
+/// slice before this one printed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SortingMode {
+    /// `AMOUNT_ASCENDING` — the GUI's "Amount+".
+    AmountAscending,
+    /// `AMOUNT_DESCENDING` — the GUI's "Amount-".
+    AmountDescending,
+    /// `MOD` — the GUI's "Mod".
+    Mod,
+    /// `TAG` — the GUI's "Tag"; blocked at this pin, see [`SortingMode::available`].
+    Tag,
+    /// `NAME` — the GUI's "Name", the default.
+    Name,
+}
+
+impl SortingMode {
+    /// The GUI choice's label (`SortingMode.description`), which `sort` takes.
+    #[must_use]
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::AmountAscending => "Amount+",
+            Self::AmountDescending => "Amount-",
+            Self::Mod => "Mod",
+            Self::Tag => "Tag",
+            Self::Name => "Name",
+        }
+    }
+
+    /// `StringRepresentable.getSerializedName()`: the value the saved compound
+    /// holds under `sortMode`, the key upstream's `Value.createEnum` uses.
+    #[must_use]
+    pub fn serialized_name(self) -> &'static str {
+        match self {
+            Self::AmountAscending => "AMOUNT_ASCENDING",
+            Self::AmountDescending => "AMOUNT_DESCENDING",
+            Self::Mod => "MOD",
+            Self::Tag => "TAG",
+            Self::Name => "NAME",
+        }
+    }
+
+    /// `SortingMode.byDescription`: the GUI's label back to the mode, matched
+    /// exactly as the choice is written (`s.equals(mode.description)`).
+    #[must_use]
+    pub fn from_description(text: &str) -> Option<Self> {
+        [
+            Self::AmountAscending,
+            Self::AmountDescending,
+            Self::Mod,
+            Self::Tag,
+            Self::Name,
+        ]
+        .into_iter()
+        .find(|mode| mode.description() == text)
+    }
+
+    /// A saved serialized name back to the mode. A missing or unknown value is
+    /// the default (`StorageScannerData.DEFAULT.sortingMode` is `NAME`); a saved
+    /// `TAG` also reads as `NAME`, because this pin cannot compute that order
+    /// (see [`SortingMode::available`]).
+    #[must_use]
+    pub fn from_saved(saved: Option<&str>) -> Self {
+        saved.and_then(Self::from_serialized).unwrap_or(Self::Name)
+    }
+
+    /// A serialized name back to the mode, for the three orders this pin can
+    /// compute (`TAG` is deliberately absent, see [`SortingMode::available`]).
+    fn from_serialized(name: &str) -> Option<Self> {
+        [Self::AmountAscending, Self::AmountDescending, Self::Mod]
+            .into_iter()
+            .find(|mode| mode.serialized_name() == name)
+    }
+
+    /// Whether this order can be computed at this pin. `TAG` sorts by the
+    /// "largest" tag an item is in (`GuiStorageScanner.findLargestTag`), which
+    /// needs the set of tags an item belongs to. The SDK's `Tags` service
+    /// (`horizon_mod_vocab::Tags`) answers only whether an item is in a **named**
+    /// tag and lists a tag's members, with no way to list an item's tags or every
+    /// tag, so `TAG` is `blocked(no item-tag enumeration)`.
+    #[must_use]
+    pub fn available(self) -> bool {
+        !matches!(self, Self::Tag)
+    }
+}
+
+/// Applies the GUI list's order to the merged counts (`GuiStorageScanner
+/// .updateContentsList`). `Name` is the item id's order — the server-side
+/// reading of the display name (slice 10's deviation 1); `Mod` groups the
+/// namespace then the item id (upstream compares the namespace and breaks a tie
+/// on the hover name); `Amount+`/`Amount-` sort by the merged count and are
+/// **stable**, so equal counts keep the order the walk first met them (upstream
+/// calls `List.sort`, which is stable and has no secondary key). `Tag` cannot be
+/// computed at this pin (see [`SortingMode::available`]) and falls back to
+/// `Name`.
+#[must_use]
+pub fn sort_found(mode: SortingMode, found: &[Found]) -> Vec<Found> {
+    let mut sorted = found.to_vec();
+    match mode {
+        SortingMode::AmountAscending => sorted.sort_by_key(|entry| entry.count),
+        SortingMode::AmountDescending => {
+            sorted.sort_by_key(|entry| std::cmp::Reverse(entry.count));
+        }
+        SortingMode::Mod => sorted.sort_by(|a, b| {
+            (search_namespace(&a.item), a.item.as_str())
+                .cmp(&(search_namespace(&b.item), b.item.as_str()))
+        }),
+        SortingMode::Name | SortingMode::Tag => sorted.sort_by(|a, b| a.item.cmp(&b.item)),
+    }
+    sorted
 }
 
 // --- the scanner's item slots and its inject tick (slice 6) ----------------
@@ -1279,19 +1393,24 @@ mod tests {
 
     #[test]
     fn the_scan_counts_each_kind_once_across_the_inventories_it_found() {
-        let found = merge_counts(&[
+        let merged = merge_counts(&[
             ("minecraft:stone".to_owned(), 64),
             ("minecraft:dirt".to_owned(), 3),
             ("minecraft:stone".to_owned(), 32),
         ]);
-        assert_eq!(found.len(), 2, "one entry a kind");
+        assert_eq!(merged.len(), 2, "one entry a kind");
+        assert_eq!(
+            merged[0].item, "minecraft:stone",
+            "the walk's first-seen order is the base the amount sort's stability keeps"
+        );
+        assert_eq!(merged[0].count, 96, "64 + 32, the whole count");
+        assert_eq!(merged[1].item, "minecraft:dirt");
+        let found = sort_found(SortingMode::Name, &merged);
         assert_eq!(
             found[0].item, "minecraft:dirt",
-            "sorted by item id (the GUI's NAME mode)"
+            "the default NAME order is the item id's"
         );
-        assert_eq!(found[0].count, 3);
         assert_eq!(found[1].item, "minecraft:stone");
-        assert_eq!(found[1].count, 96, "64 + 32, the whole count");
         assert!(
             merge_counts(&[]).is_empty(),
             "nothing found, nothing listed"
@@ -1693,5 +1812,146 @@ mod tests {
             "an id without a namespace is the default one"
         );
         assert_eq!(search_name("stone"), "stone");
+    }
+
+    #[test]
+    fn the_list_modes_are_the_gui_s_five_choices_and_default_to_name() {
+        // SortingMode, verbatim: the labels are the GUI's choice text and the
+        // saved value is the enum's serialized name (StorageScannerData.CODEC).
+        assert_eq!(SortingMode::AmountAscending.description(), "Amount+");
+        assert_eq!(SortingMode::AmountDescending.description(), "Amount-");
+        assert_eq!(SortingMode::Mod.description(), "Mod");
+        assert_eq!(SortingMode::Tag.description(), "Tag");
+        assert_eq!(SortingMode::Name.description(), "Name");
+        assert_eq!(
+            SortingMode::AmountDescending.serialized_name(),
+            "AMOUNT_DESCENDING"
+        );
+        assert_eq!(SortingMode::Mod.serialized_name(), "MOD");
+        assert_eq!(
+            SortingMode::from_description("Amount-"),
+            Some(SortingMode::AmountDescending),
+            "the command takes the GUI's label"
+        );
+        assert_eq!(
+            SortingMode::from_description("Name"),
+            Some(SortingMode::Name)
+        );
+        assert_eq!(
+            SortingMode::from_description("name"),
+            None,
+            "byDescription is exact, not case-insensitive"
+        );
+        assert_eq!(SortingMode::from_description("Bogus"), None);
+        assert_eq!(
+            SortingMode::from_saved(None),
+            SortingMode::Name,
+            "StorageScannerData.DEFAULT.sortingMode is NAME"
+        );
+        assert_eq!(SortingMode::from_saved(Some("MOD")), SortingMode::Mod);
+        assert_eq!(
+            SortingMode::from_saved(Some("NOPE")),
+            SortingMode::Name,
+            "an unknown saved value is the default"
+        );
+        assert_eq!(
+            SortingMode::from_saved(Some("TAG")),
+            SortingMode::Name,
+            "TAG cannot be honoured at this pin, so it reads as the default"
+        );
+        assert!(SortingMode::Name.available());
+        assert!(SortingMode::AmountAscending.available());
+        assert!(SortingMode::Mod.available());
+        assert!(
+            !SortingMode::Tag.available(),
+            "the SDK has no item-tag enumeration; upstream's findLargestTag needs one"
+        );
+    }
+
+    #[test]
+    fn the_scan_list_sorts_by_the_chosen_mode() {
+        let walk = merge_counts(&[
+            ("minecraft:stone".to_owned(), 32),
+            ("minecraft:dirt".to_owned(), 64),
+            ("rftoolsstorage:storage_module0".to_owned(), 1),
+        ]);
+        assert_eq!(
+            walk.iter()
+                .map(|entry| entry.item.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "minecraft:stone",
+                "minecraft:dirt",
+                "rftoolsstorage:storage_module0"
+            ],
+            "merge_counts keeps the walk's first-seen order"
+        );
+        let items = |mode: SortingMode| {
+            sort_found(mode, &walk)
+                .into_iter()
+                .map(|entry| (entry.item, entry.count))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            items(SortingMode::AmountAscending),
+            vec![
+                ("rftoolsstorage:storage_module0".to_owned(), 1),
+                ("minecraft:stone".to_owned(), 32),
+                ("minecraft:dirt".to_owned(), 64),
+            ],
+            "Amount+ is the count ascending"
+        );
+        assert_eq!(
+            items(SortingMode::AmountDescending),
+            vec![
+                ("minecraft:dirt".to_owned(), 64),
+                ("minecraft:stone".to_owned(), 32),
+                ("rftoolsstorage:storage_module0".to_owned(), 1),
+            ],
+            "Amount- is the count descending"
+        );
+        assert_eq!(
+            items(SortingMode::Name),
+            vec![
+                ("minecraft:dirt".to_owned(), 64),
+                ("minecraft:stone".to_owned(), 32),
+                ("rftoolsstorage:storage_module0".to_owned(), 1),
+            ],
+            "Name is the item id's order"
+        );
+        assert_eq!(
+            items(SortingMode::Mod),
+            vec![
+                ("minecraft:dirt".to_owned(), 64),
+                ("minecraft:stone".to_owned(), 32),
+                ("rftoolsstorage:storage_module0".to_owned(), 1),
+            ],
+            "Mod groups minecraft before rftoolsstorage"
+        );
+    }
+
+    #[test]
+    fn amount_sorting_is_stable_so_equal_counts_keep_the_walk_order() {
+        let walk = merge_counts(&[
+            ("minecraft:dirt".to_owned(), 64),
+            ("minecraft:stone".to_owned(), 32),
+            ("minecraft:sand".to_owned(), 64),
+        ]);
+        assert_eq!(
+            sort_found(SortingMode::AmountDescending, &walk)
+                .into_iter()
+                .map(|entry| entry.item)
+                .collect::<Vec<_>>(),
+            ["minecraft:dirt", "minecraft:sand", "minecraft:stone"],
+            "equal counts keep the order the walk first met them (a stable sort)"
+        );
+        assert_eq!(
+            sort_found(SortingMode::AmountAscending, &walk)
+                .into_iter()
+                .map(|entry| entry.item)
+                .collect::<Vec<_>>(),
+            ["minecraft:stone", "minecraft:dirt", "minecraft:sand"],
+            "the ascending direction is stable too"
+        );
     }
 }

@@ -13,7 +13,7 @@ differences, are in [`FINDINGS.md`](FINDINGS.md).
 publishing (ARCHITECTURE.md §8); the port carries the upstream MIT notice in
 [`LICENSE`](LICENSE) and its provenance in [`LICENSE-NOTICE.md`](LICENSE-NOTICE.md).
 
-**Format: the SDK package (2026-11-18), version 0.2.10.** One flat `.hmod` —
+**Format: the SDK package (2026-11-18), version 0.2.11.** One flat `.hmod` —
 `horizon-mod.toml` + `Cargo.toml` + `src/` + `assets/` + `data/` — built by the
 launcher against SDK nightly **`0a875da91dbb0fdcb7ba8c42c11341aa229af51a`** with
 horizon-mixins **`e59da9094f0c2fdda6c627fe9eff22dec6a906f0`** (see
@@ -26,7 +26,8 @@ horizon-mixins **`e59da9094f0c2fdda6c627fe9eff22dec6a906f0`** (see
 [`## Slice 7`](#slice-7--the-scanners-request-path-version-027),
 [`## Slice 8`](#slice-8--the-scanners-give-from-screen-path-version-028),
 [`## Slice 9`](#slice-9--the-scanners-insert-from-screen-path-version-029),
-[`## Slice 10`](#slice-10--the-scans-search-filter-version-0210)).
+[`## Slice 10`](#slice-10--the-scans-search-filter-version-0210),
+[`## Slice 11`](#slice-11--the-scanner-lists-sort-choice-version-0211)).
 The retired `.hnmod` container pinned Horizon `1d63e0a5…` / mixins `5a64af93…`;
 `src/runtime.rs` was byte-identical to the retired
 `mixins/rftoolsstorage/runtime.rs` until the 2026-11-18 review fixes gave it the
@@ -52,7 +53,10 @@ out slot at all) and slice 9 (the scanner's **insert-from-screen path**:
 inventory into the scanned inventories and charges one `rfPerInsert`, but only when
 the stack went in whole) and slice 10 (the scan's **search filter**: the GUI list's
 search box as `scan`'s optional term — every word a case-insensitive name contains
-or `@modid` a namespace prefix) are implemented and verified
+or `@modid` a namespace prefix) and slice 11 (the scan list's **sort choice**:
+`/rftoolsstorage sort <pos> <mode>` sets the GUI list's order — `Amount+`, `Amount-`,
+`Mod` or `Name`, saved with the block so it survives a relaunch; `Tag` is
+`blocked(no item-tag enumeration)`) are implemented and verified
 in a launcher-built game at the pin (the legs are listed per slice below;
 `ports/_shared/evidence/rftoolsstorage-e2e/`). The gap list below is the rest of
 the mod.
@@ -187,24 +191,26 @@ None. The two candidates were checked and left alone, on purpose:
 ## Gaps (the rest of the mod)
 
 - `crafting_manager` (the jar's own lang calls it "WIP! … not functional yet") and
-  the **storage scanner's remaining half**: the GUI list widget's **sort, compact,
-  cycle and visible-size controls** (its **search** is slice 10, carried as `scan`'s
-  optional query), the **remote/tablet variant**, the XNet
+  the **storage scanner's remaining half**: the GUI list widget's **compact, cycle
+  and visible-size controls** (its **search** is slice 10, carried as `scan`'s
+  optional query, and its **sort** is slice 11, carried as `sort`'s saved mode and
+  `scan`'s order), the **remote/tablet variant**, the XNet
   access settings and its `routable` star list (the port treats every scanned
   inventory as routable — slice 6's deviation 1), and the claimed-land check
   (`scannerNoRestrictions`; the pin has no `can_entity_destroy` **hook** exists at
   the pin, but it is a cancellable game event, not a query a mod can ask for a fake
   player — `blocked(no permission query)`). The **request path** is slice 7, the
-  give-from-screen path is slice 8, the insert-from-screen path is slice 9 and the
-  search filter is slice 10.
+  give-from-screen path is slice 8, the insert-from-screen path is slice 9, the
+  search filter is slice 10 and the sort is slice 11; `Tag` sorting is
+  `blocked(no item-tag enumeration)`.
 - Storage tiers 2-4 (`storage_module1..3`; their recipes need McJtyLib's
   `mcjtylib:copy_components` recipe type, which the pin does not have), the
   remote module (`storage_module6`, "DO NOT USE" in the jar's lang) and the
   remote storage block.
 - The type modules (`generic`/`oredict`), the filter module, the dump module, the
   storage control module, the tablet, and the crafting grid.
-- The GUI's **list controls** (sort, compact, cycle, visible-size; its search is
-  slice 10) and the **two card slots beside the module's** (the type module is `@todo 1.14` upstream,
+- The GUI's **list controls** (compact, cycle, visible-size; its search is
+  slice 10 and its sort is slice 11, both carried) and the **two card slots beside the module's** (the type module is `@todo 1.14` upstream,
   and the filter slot takes RFToolsBase's `FilterModuleItem`, which this port does
   not have), the module tooltip, JEI/TOP/XNet/RFToolsUtility compat, the
   `/rftoolsstorage list|restore` commands and the config. (The padlock and the
@@ -1825,6 +1831,167 @@ inverts the `dirt` assertion and the run ends `FAIL:` + `EXIT:1`.
 5. **`launcher-game.sh env` exports `CONTROL_GAME`** (slice 9's trap 6 still applies): the default
    leg runs with `CONTROL_GAME=` and the control leg with the export.
 
+## Slice 11 — the scanner list's sort choice (version 0.2.11)
+
+The gap line slice 10 left, verbatim from this file's gap list:
+
+> the GUI list widget's **sort, compact, cycle and visible-size controls** (its **search** is
+> slice 10, carried as `scan`'s optional query)
+
+Slice 11 is the **sort** half, carried as the readout's saved choice:
+`/rftoolsstorage sort <pos> <mode>` sets the GUI list's order and `scan` applies it. It fits the
+**machines** tier: the same block entity's saved compound, the neighbours' item capability and the
+readout the scan already is — no renderer, no screen, no new vanilla hook. Upstream read at
+`fc1b18a7f070d0030671e1db1d3aab90699fd160`
+(`modules/scanner/tools/SortingMode.java`, `modules/scanner/data/StorageScannerData.java`,
+`modules/scanner/client/GuiStorageScanner.java` `updateContentsList`/`compareByMod`/`compareByTag`/
+`findLargestTag`, `modules/scanner/blocks/StorageScannerTileEntity.java` `getSortMode`/`setSortMode`;
+the raw files were read into `/tmp/opencode` and deleted after the findings were recorded).
+
+**Pin:** Horizon `0a875da91dbb0fdcb7ba8c42c11341aa229af51a`, horizon-mixins
+`e59da9094f0c2fdda6c627fe9eff22dec6a906f0`, mod API 0.2, game 26.3. **Version 0.2.11.**
+
+### The artefact's rules (read, not invented)
+
+`SortingMode` is `AMOUNT_ASCENDING("Amount+")`, `AMOUNT_DESCENDING("Amount-")`, `MOD("Mod")`,
+`TAG("Tag")`, `NAME("Name")`; `StorageScannerData.DEFAULT.sortingMode` is **`NAME`**, the order
+every earlier slice printed. `GuiStorageScanner.updateContentsList`:
+
+| mode | comparator | tie-break |
+|---|---|---|
+| `AMOUNT_ASCENDING` | `Comparator.comparing(ItemStack::getCount)` | none — `List.sort` is **stable**, so equal counts keep the server list's order |
+| `AMOUNT_DESCENDING` | `Comparator.comparing(ItemStack::getCount).reversed()` | none — stable, same |
+| `MOD` | `Tools.getId(s1).getNamespace().compareTo(…)` | then `getHoverName().getString().compareTo(…)` (raw, case-sensitive) |
+| `TAG` | `findLargestTag(s1).compareTo(findLargestTag(s2))` | then the hover name (raw) |
+| `NAME` | `Comparator.comparing(itemStack -> itemStack.getHoverName().getString())` | n/a |
+
+The port reads the display name server-side as the item id (slice 10's deviation 1, the hover name
+is client-only), so `Name` is the item id's order, `Mod` is the namespace then the id (the tie
+upstream breaks on the hover name), and the amount sorts are stable over `merge_counts`' first-seen
+order — the walk's order, the server list's analogue. `merge_counts` therefore no longer sorts by
+id; it keeps the order the walk met each kind, and `sort_found` applies the mode (the default
+`Name` still prints the id order, so every earlier leg is unchanged).
+
+`TAG` is **`blocked(no item-tag enumeration)`**: upstream sorts by the "largest" tag an item is in
+(`findLargestTag`), which needs the set of tags an item belongs to. The SDK's `Tags` service
+(`crates/horizon-mod-vocab/src/world/tags.rs`) answers only `key`, `is_in_tag(item, TagKey)` and a
+tag's members (`items`/`fluids`/`blocks`), and `surface.json` confirms there is no `Tags::names` or
+item→tags read — forward membership only. The command refuses `Tag` with a line naming the gap, and
+a saved `TAG` (only another build could write one) reads back as `NAME`.
+
+The saved key is upstream's `sortMode` (`Value.createEnum("sortMode", …)`); the value is the enum's
+serialized name (`AMOUNT_DESCENDING`), as `StorageScannerData.CODEC` writes it.
+
+### Red → green (the rules)
+
+The three sort rules were written first with the functions stubbed (`description`/`serialized_name`
+returned `""`, `from_description` `None`, `from_saved` `Name`, `available` `false`, `sort_found`
+returned its input), and the suite was run **before** implementing them
+(`ports/_shared/evidence/rftoolsstorage/slice11-red.log`, `TEST_EXIT:101`):
+
+```
+thread 'runtime::tests::the_list_modes_are_the_gui_s_five_choices_and_default_to_name' (55349) panicked at src/runtime.rs:1770:9:
+assertion `left == right` failed
+  left: ""
+ right: "Amount+"
+...
+thread 'runtime::tests::amount_sorting_is_stable_so_equal_counts_keep_the_walk_order' (55340) panicked at src/runtime.rs:1895:9:
+assertion `left == right` failed: the ascending direction is stable too
+  left: ["minecraft:dirt", "minecraft:sand", "minecraft:stone"]
+ right: ["minecraft:stone", "minecraft:dirt", "minecraft:sand"]
+...
+thread 'runtime::tests::the_scan_counts_each_kind_once_across_the_inventories_it_found' (55352) panicked at src/runtime.rs:1351:9:
+assertion `left == right` failed: the walk's first-seen order is the base the amount sort's stability keeps
+  left: "minecraft:dirt"
+ right: "minecraft:stone"
+...
+test result: FAILED. 42 passed; 4 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+TEST_EXIT:101
+```
+
+Implemented, then **46 passed, 0 failed** (`sdk-test.log`): the runtime's 42 (39 + the three sort
+rules) and the four glue tests.
+
+### In game (`ports/_shared/evidence/rftoolsstorage-e2e/`)
+
+| Leg | Log | Verdict |
+|---|---|---|
+| default, the launcher-built 0.2.11 package | `e2e-sort.log` | **PASS** + `EXIT:0` |
+| control (the same Nightly without the package) | `e2e-sort-control.log` | **FAIL** + `EXIT:1` — `{"error":"unknown item rftoolsstorage:storage_scanner"}` |
+| `SORT_SELFTEST=1` (the `Amount-` reply must not start with stone) | `e2e-sort-selftest.log` | **FAIL** + `EXIT:1` — *"the Amount- scan started with minecraft:dirt 64 and not the stone 32 …"* |
+
+`e2e-sort.log` re-runs every earlier phase (slices 1–10 still pass), then asserts the brief's rig —
+scanner at S, radius 3, chest S+2 = **32 stone**, chest S+3 = **64 dirt**, buffer 5,000 — with every
+`ctl` reply in the log:
+
+```
+== THE SORT CHOICE: the GUI list's sort — Amount+, Amount-, Mod, Name (Tag is blocked at this pin) ==
+sort Amount-: rftoolsstorage:storage_scanner: sort Amount-
+saved sortMode: AMOUNT_DESCENDING
+scan Amount-: rftoolsstorage:storage_scanner: minecraft:dirt 64, minecraft:stone 32 (4900/50000 FE); buffer now 4900
+sort Amount+: rftoolsstorage:storage_scanner: sort Amount+
+scan Amount+: rftoolsstorage:storage_scanner: minecraft:stone 32, minecraft:dirt 64 (4800/50000 FE)
+sort Name: rftoolsstorage:storage_scanner: sort Name
+scan Name: rftoolsstorage:storage_scanner: minecraft:dirt 64, minecraft:stone 32 (4700/50000 FE)
+== the Mod order puts a rftoolsstorage stack after both minecraft kinds ==
+sort Mod: rftoolsstorage:storage_scanner: sort Mod
+scan Mod: rftoolsstorage:storage_scanner: minecraft:dirt 64, minecraft:stone 32, rftoolsstorage:storage_module0 1 (4600/50000 FE)
+```
+
+Three facts make that evidence rather than a print: the same two chests answer **dirt-first** under
+`Amount-` and **stone-first** under `Amount+`, so the order is the mode, not the rig; `Name` answers
+the dirt first again — the differential against `Amount+` — while the id order (`dirt` < `stone`)
+agrees with `Amount-` on this rig by coincidence, which is why `Amount+` is the leg that moves; and
+the third chest's `rftoolsstorage:storage_module0` lands **after both** `minecraft:` kinds under
+`Mod` (`minecraft` < `rftoolsstorage`). The saved compound reads `AMOUNT_DESCENDING` after the
+command, and the **relaunch** leg sets `Amount-` on the search phase's restored rig, quits, re-enters
+and reads `minecraft:stone 64, minecraft:dirt 32` back with `sortMode` still `AMOUNT_DESCENDING`
+(`relaunch: buffer 4800 -> 4800, radius 3, sort AMOUNT_DESCENDING; scan: … minecraft:stone 64,
+minecraft:dirt 32 (4700/50000 FE)`). `SORT_SELFTEST=1` inverts the first `Amount-` assertion and the
+run ends `FAIL:` + `EXIT:1`.
+
+### Deviations this slice adds
+
+1. **`TAG` is refused** (`blocked(no item-tag enumeration)`, above): the other four modes are carried.
+2. **The tie-break is the item id, not the hover name**, for `Name` and for `Mod`'s same-namespace
+   tie: upstream compares `getHoverName().getString()`, which the SDK exposes only on the client
+   (slice 10's deviation 1). For every vanilla item and every carried mod item whose lang key is its
+   path the two agree; a hand-named mod item sorts by its id's words.
+3. **The amount sort's base order is the scan walk's** (`x`, then `y`, then `z`, then slot): upstream
+   sorts the server's per-inventory list stably, which this port's merged readout replaces. Equal
+   counts keep that first-seen order, which is the artefact's own tie rule (a stable sort with no
+   secondary key), not a new one.
+
+### Coverage (the families this slice changes)
+
+| Family | State |
+|---|---|
+| `/rftoolsstorage sort <pos> <mode>`, its parsed reply | **tested** — `sort Amount-`, `sort Amount+`, `sort Name`, `sort Mod` (`e2e-sort.log`) |
+| the four carried orders | **tested** — dirt-first/stone-first/dirt-first/module-last in game; the unit rules in `the_scan_list_sorts_by_the_chosen_mode` |
+| the saved choice (`sortMode`, serialized enum) | **tested** — `AMOUNT_DESCENDING` read after the command and after a relaunch, with the same order (`e2e-sort.log`) |
+| the amount tie-break (stable) | **tested** — `amount_sorting_is_stable_so_equal_counts_keep_the_walk_order`; the in-game rig has no tie |
+| `Mod` groups the namespace then the id | **tested** — the module after both `minecraft:` kinds; the unit rule |
+| `Name` is the default and the id order | **tested** — the default scans of every earlier leg, plus `Name` in this one; the unit rule |
+| `Tag` | **blocked(no item-tag enumeration)** — the command refuses it with a line naming the gap |
+| the GUI list widget itself, compact/cycle/visible-size, the remote/tablet variant, XNet settings, the claimed-land check | **not ported** (the screen is a fixed slot layout; `blocked(no permission query)` for the claim) |
+
+### Traps this slice paid for
+
+1. **The brief's rig is not the search phase's rig.** The search phase's chests are 64 stone / 32
+   dirt; the sort assertion needs 32 stone / 64 dirt, so the phase re-seeds both, then restores them
+   (and `Name`) so the relaunch, inject, request, insert and give legs keep their numbers. Seeding a
+   chest with `setblock` + `item replace` is the clean way; `data merge` would replace the whole list.
+2. **The module chest must not be adjacent.** Two adjacent chests join (slice 6's trap); the module
+   chest goes two blocks the **other** way on x and is removed after the `Mod` phase, so no later
+   scan or inject walk sees it.
+3. **`sort` is a `word`, and `+`/`-` are in Brigadier's word set.** `Amount+` and `Amount-` parse;
+   a `text` would be greedier than a single word and swallow the next argument if one is added later.
+4. **The saved key is a string.** `data get block … sortMode` prints the quoted enum name; the port
+   stores `AMOUNT_DESCENDING`, not the label `Amount-`, so the command's vocabulary and the saved
+   value stay separate (the label is the GUI's, the serialized name is the codec's).
+5. **The version bump is what forces the launcher to recompile.** With `0.2.11` the build printed
+   `Compiling rftoolsstorage (1 of 1)` and a new build tag; without it the cached 0.2.10 package runs.
+
 ## Verification
 
 Skills: superpowers/using-superpowers, brainstorming, writing-plans, test-driven-development, systematic-debugging, verification-before-completion; BeautifulRust/rust-best-practices
@@ -1832,6 +1999,28 @@ Skills: superpowers/using-superpowers, brainstorming, writing-plans, test-driven
 Full evidence in [`VALIDATION.md`](VALIDATION.md); the e2e logs are in
 `ports/_shared/evidence/rftoolsstorage-e2e/` (the game legs) and
 `ports/_shared/evidence/rftoolsstorage/` (the ladder, package and fits).
+
+**0.2.11 — the scanner list's sort choice (2026-11-23, pin `0a875da`)**
+
+| Step | Command | Result |
+|---|---|---|
+| Red proof | `cargo test` with `description`/`serialized_name`/`from_description`/`from_saved`/`available`/`sort_found` stubbed | **FAILED. 42 passed; 4 failed**, `TEST_EXIT:101` (`slice11-red.log`); quoted above |
+| Runtime + glue tests | `cargo test` | **46 passed**, 0 failed (`sdk-test.log`, `slice11-test.log`, `TEST_EXIT:0`) — 42 runtime + 4 glue |
+| Lints | `cargo clippy --all-targets -- -D warnings` | `CLIPPY_EXIT:0`, 0 warnings (`sdk-clippy.log`, `slice11-clippy.log`) |
+| Formatting | `rustfmt --edition 2024 --check src/{lib,support,runtime}.rs` | `FMT_EXIT:0` (`slice11-fmt.log`) |
+| SDK gate | `cargo horizon-mod check` | `TREE_CHECK_EXIT:0` — *"…uses 537 items of the API (5 Part kinds, 2 capabilitys, 147 fields or variants, 18 hooks, 52 hook arguments, 2 macros, 167 methods, 29 traits, 115 types). Made for 0a875da."* (`slice11-tree-check.log`) |
+| Package | `rm -f Cargo.lock && cargo horizon-mod build`, twice | **91,952 B**, SHA-256 `7820eeccb3d40fba47ef72041bce5c39a216d700dd1cd43756c10af7ba4979a8`, **`cmp`-identical** (`slice11-build-1.log`, `slice11-build-2.log`) |
+| Package check | `cargo horizon-mod check rftoolsstorage.hmod` | `rftoolsstorage 0.2.11 (native-mod, format native-1/0a875da…/e59da90…, for 26.3)`, **91,952 bytes**, `7820eecc…79a8`, `FILE_CHECK_EXIT:0` (`sdk-check.log`, `slice11-check.log`) |
+| Entries | `unzip -l rftoolsstorage.hmod` | **67 files**, no `Cargo.lock`; `src/runtime.rs` byte-identical in tree and package (`2417ab53a2fb`) |
+| Fits the pin | `cargo horizon-mod fits rftoolsstorage.hmod --build 0a875da` | `0a875da  made for`, `FITS_PIN_EXIT:0` (`sdk-fits.log`, `slice11-fits.log`) |
+| Fits another build | `cargo horizon-mod fits rftoolsstorage.hmod --build 0b14f8a` | `0b14f8a  fits`, `FITS_OTHER_EXIT:0` (`sdk-fits.log`, `slice11-fits.log`) |
+| Launcher build | `BUILD_LOCAL=1 launcher-game.sh build rftoolsstorage` | `Compiling rftoolsstorage (1 of 1)`, build tag `native-0a875da-a6e0d2c73be2`, `LAUNCHER_BUILD_EXIT:0` (`slice11-launcher-build.log`) |
+| In game | `build-slot.sh run --step e2e -- bash ports/rftoolsstorage/tools/e2e.sh` (`CONTROL_GAME=`) | **PASS** + `EXIT:0` (`e2e-sort.log`) |
+| Control | the same rig on the Nightly without the package | **FAIL** + `EXIT:1` (`e2e-sort-control.log`) |
+| Selftest | `SORT_SELFTEST=1` (the `Amount-` reply must not start with stone) | **FAIL** + `EXIT:1` (`e2e-sort-selftest.log`) |
+| e2e gate | `check-e2e-logs.py rftoolsstorage-e2e --strict` | `logs=28  ok=28  missing-exit=0  bad-exit=0`, exit 0 |
+| Package gate | `verify-sdk-package.py rftoolsstorage` | `1/1 package(s) verified`, exit 0 |
+| Skills gate | `check-skills.py --notes ports/rftoolsstorage --strict` | `Skills line present`, PASS |
 
 **0.2.10 — the scan's search filter (2026-11-23, pin `0a875da`)**
 
