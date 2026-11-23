@@ -40,14 +40,15 @@ use crate::runtime::{
     LockPress, RequestCharge, SCANNER_AUTO_SLOT, SCANNER_IN_SLOT, SCANNER_MAX_ENERGY,
     SCANNER_OUT_SLOT, SCANNER_RECEIVE_PER_TICK, SCANNER_RF_PER_INSERT, SCANNER_SLOTS, SLOT_LIMIT,
     STORAGE_SCANNER, Slot, SortingMode, Storage, card_accepts, carried_slot_in, clamp_radius,
-    export_line, export_route, gave_line, give_amount, give_nothing_line, give_price, inject_plan,
-    injectable_at, insert_amount, insert_charge, insert_line, insert_nothing_line,
-    insert_partial_line, insert_price, is_routable, is_storage_scanner, lock_press, matches_search,
-    may_inspect, merge_counts, module_id, module_tier, no_power_line, no_routable_line,
-    out_slot_room, request_amount, request_charge, request_line, request_no_power_line,
-    request_nothing_line, request_out_slot_line, request_price, restored_count, routable_line,
-    routing_target, scan_line, scan_positions, scanner_radius, search_name, search_namespace,
-    selection_line, slot_accepts, sort_found, spend_power, star,
+    contents_line, contents_refused_line, contents_row, export_line, export_route, gave_line,
+    give_amount, give_nothing_line, give_price, inject_plan, injectable_at, insert_amount,
+    insert_charge, insert_line, insert_nothing_line, insert_partial_line, insert_price,
+    is_routable, is_storage_scanner, lock_press, matches_search, may_inspect, merge_counts,
+    module_id, module_tier, no_power_line, no_routable_line, out_slot_room, request_amount,
+    request_charge, request_line, request_no_power_line, request_nothing_line,
+    request_out_slot_line, request_price, restored_count, routable_line, routing_target, scan_line,
+    scan_positions, scanner_radius, search_name, search_namespace, selection_line, slot_accepts,
+    sort_found, spend_power, star,
 };
 
 /// The block this slice implements, exactly as the content declares it.
@@ -1634,6 +1635,28 @@ fn scan_readout(host: &mut dyn ServerHost, pos: [i32; 3], query: &str) -> String
     format!("{block}: {}", scan_line(after, &found))
 }
 
+/// Every non-empty slot of one cell's inventory, one `(item, count)` an entry in
+/// slot order: the cell's item capability (the game's own answer for a chest, a
+/// barrel or a mod container), asked with no side. A cell with no inventory — air,
+/// another storage scanner, an unloaded chunk — answers nothing.
+fn cell_entries(host: &mut dyn ServerHost, level: LevelRef, at: [i32; 3]) -> Vec<(String, u32)> {
+    let Some(handler) = level.capability(&mut *host, &ITEMS, at, None) else {
+        return Vec::new();
+    };
+    let size = handler.size(host);
+    let mut entries = Vec::new();
+    for index in 0..size {
+        let Some(resource) = handler.resource(host, index) else {
+            continue;
+        };
+        let count = handler.amount(host, index);
+        if count > 0 {
+            entries.push((resource.item().id(&*host), count));
+        }
+    }
+    entries
+}
+
 /// The kinds every inventory in the scanner's box holds, one entry a kind in the
 /// order the walk first met them (the caller applies the saved list order): a
 /// neighbour's item capability (the game's own answer for a chest, a barrel or a
@@ -1652,27 +1675,71 @@ fn scan_found(host: &mut dyn ServerHost, pos: [i32; 3], radius: i32, query: &str
         if at == pos || level.block(&*host, at) == Some(scanner_key()) {
             continue;
         }
-        let Some(handler) = level.capability(&mut *host, &ITEMS, at, None) else {
-            continue;
-        };
-        let size = handler.size(host);
-        for index in 0..size {
-            let Some(resource) = handler.resource(host, index) else {
+        for (id, count) in cell_entries(host, level, at) {
+            if !query.is_empty() && !matches_search(query, search_namespace(&id), &search_name(&id))
+            {
                 continue;
-            };
-            let count = handler.amount(host, index);
-            if count > 0 {
-                let id = resource.item().id(&*host);
-                if !query.is_empty()
-                    && !matches_search(query, search_namespace(&id), &search_name(&id))
-                {
-                    continue;
-                }
-                entries.push((id, count));
             }
+            entries.push((id, count));
         }
     }
     merge_counts(&entries)
+}
+
+/// `/rftoolsstorage contents <pos> <target|all>`: the list's **row contents view**
+/// (`StorageScannerTileEntity.getInventoryForBlock`), reached through a command.
+///
+/// A single cell lists that inventory's own contents (`addItemsFromInventory`), no
+/// matter whether it is starred — the list shows every inventory in the box. The
+/// `all` row is the list's first line ("All routable"), upstream's `(-1, -1, -1)`
+/// sentinel, and lists **only the starred** inventories: the same set the routing
+/// walks filter by, read here as `countItems(..., starred = true)` is.
+///
+/// The rows are the cells the scan found ([`contents_row`]): a cell outside the
+/// box, the scanner itself, another storage scanner or a cell with no inventory is
+/// refused, because the GUI can only select a line its list shows.
+///
+/// A row listing is **not a request**, so nothing is charged: upstream's
+/// `getInventoryForBlock` never calls `consumeEnergy`, and the GUI lists for free.
+/// The saved sort choice orders the listing as it orders `scan`'s.
+fn contents_readout(host: &mut dyn ServerHost, pos: [i32; 3], target: Option<[i32; 3]>) -> String {
+    let block = block_id_at(&*host, pos);
+    if !is_storage_scanner(&block) {
+        return format!("{block}: not a storage scanner");
+    }
+    let Some(entity) = scanner_entity(&*host, pos) else {
+        return format!("{block}: not a storage scanner");
+    };
+    let data = entity.data(&*host);
+    let radius = saved_radius(data.as_ref());
+    let sort = saved_sort(data.as_ref());
+    let Some(level) = host.level(host.dimension()) else {
+        return match target {
+            Some(at) => format!("{block}: {}", contents_refused_line(at)),
+            None => format!("{block}: {}", contents_line(None, &[])),
+        };
+    };
+    let entries = match target {
+        Some(at) => {
+            let scanner_there = level.block(&*host, at) == Some(scanner_key());
+            let has_inventory =
+                !scanner_there && level.capability(&mut *host, &ITEMS, at, None).is_some();
+            if !contents_row(pos, radius, at, scanner_there, has_inventory) {
+                return format!("{block}: {}", contents_refused_line(at));
+            }
+            cell_entries(host, level, at)
+        }
+        None => {
+            let routable = saved_routable(data.as_ref());
+            let mut entries = Vec::new();
+            for at in scan_targets(&*host, level, pos, radius, &routable) {
+                entries.extend(cell_entries(host, level, at));
+            }
+            entries
+        }
+    };
+    let found = sort_found(sort, &merge_counts(&entries));
+    format!("{block}: {}", contents_line(target, &found))
 }
 
 /// `/rftoolsstorage request <pos> <item> [<count>]`: the GUI's request path
@@ -2437,6 +2504,12 @@ pub(crate) fn on_register_commands(event: &mut RegisterCommandsEvent<'_>) {
         "rftoolsstorage scan <pos:block_pos> [query:text]",
     ));
     event.commands.push(Command::new(
+        "rftoolsstorage contents <pos:block_pos> <target:block_pos>",
+    ));
+    event
+        .commands
+        .push(Command::new("rftoolsstorage contents <pos:block_pos> all"));
+    event.commands.push(Command::new(
         "rftoolsstorage radius <pos:block_pos> <radius:integer>",
     ));
     event.commands.push(Command::new(
@@ -2467,16 +2540,19 @@ pub(crate) fn on_run_mod_command(
     host: &mut dyn ServerHost,
     event: &mut RunModCommandEvent<'_>,
 ) -> Flow {
-    let [root, sub] = event.command.literals.as_slice() else {
+    let Some(root) = event.command.literals.first() else {
         return Flow::Continue;
     };
     if root != "rftoolsstorage" {
         return Flow::Continue;
     }
+    let Some(sub) = event.command.literals.get(1).cloned() else {
+        return Flow::Continue;
+    };
     let Some(CommandArgumentValue::BlockPos(pos)) = event.command.argument("pos") else {
         feedback(
             host,
-            "usage: /rftoolsstorage info|lock|scan|radius|sort|routable|export|select|request|give|insert <x> <y> <z> …",
+            "usage: /rftoolsstorage info|lock|scan|contents|radius|sort|routable|export|select|request|give|insert <x> <y> <z> …",
         );
         return Flow::Cancel;
     };
@@ -2548,6 +2624,24 @@ pub(crate) fn on_run_mod_command(
                 _ => "",
             };
             scan_readout(host, pos, query)
+        }
+        "contents" => {
+            // The list's rows: a cell, or `all` — the list's first "All routable"
+            // line, whose usage carries no `target` argument, so the absence of the
+            // argument is the row. Both are free: a listing is not a request.
+            match event.command.argument("target") {
+                Some(CommandArgumentValue::BlockPos(target)) => {
+                    contents_readout(host, pos, Some(*target))
+                }
+                Some(_) => {
+                    feedback(
+                        host,
+                        "usage: /rftoolsstorage contents <x> <y> <z> <target x> <target y> <target z> | all",
+                    );
+                    return Flow::Cancel;
+                }
+                None => contents_readout(host, pos, None),
+            }
         }
         "request" => {
             let Some(requested) = item_argument!(event.command.argument("item")) else {

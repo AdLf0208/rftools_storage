@@ -13,7 +13,7 @@ differences, are in [`FINDINGS.md`](FINDINGS.md).
 publishing (ARCHITECTURE.md §8); the port carries the upstream MIT notice in
 [`LICENSE`](LICENSE) and its provenance in [`LICENSE-NOTICE.md`](LICENSE-NOTICE.md).
 
-**Format: the SDK package (2026-11-18), version 0.2.13.** One flat `.hmod` —
+**Format: the SDK package (2026-11-18), version 0.2.14.** One flat `.hmod` —
 `horizon-mod.toml` + `Cargo.toml` + `src/` + `assets/` + `data/` — built by the
 launcher against SDK nightly **`0a875da91dbb0fdcb7ba8c42c11341aa229af51a`** with
 horizon-mixins **`e59da9094f0c2fdda6c627fe9eff22dec6a906f0`** (see
@@ -29,7 +29,8 @@ horizon-mixins **`e59da9094f0c2fdda6c627fe9eff22dec6a906f0`** (see
 [`## Slice 10`](#slice-10--the-scans-search-filter-version-0210),
 [`## Slice 11`](#slice-11--the-scanner-lists-sort-choice-version-0211),
 [`## Slice 12`](#slice-12--the-scanners-routable-star-list-version-0212),
-[`## Slice 13`](#slice-13--the-scanners-export-choice-version-0213)).
+[`## Slice 13`](#slice-13--the-scanners-export-choice-version-0213),
+[`## Slice 14`](#slice-14--the-lists-row-contents-view-version-0214)).
 The retired `.hnmod` container pinned Horizon `1d63e0a5…` / mixins `5a64af93…`;
 `src/runtime.rs` was byte-identical to the retired
 `mixins/rftoolsstorage/runtime.rs` until the 2026-11-18 review fixes gave it the
@@ -69,7 +70,11 @@ tick's GUI-slot stack goes only into the inventory the list's selected row names
 (`/rftoolsstorage select <pos> <target>`), and refuses rather than falling
 through to the starred walk; the mode is saved under upstream's `exportc` key,
 and the selection — upstream's transient `lastSelectedInventory` — is saved too,
-so a relaunch does not silently change where items go) are implemented and
+so a relaunch does not silently change where items go) and slice 14 (the scanner
+list's **row contents view**: `/rftoolsstorage contents <pos> <target|all>` lists
+one row's inventory — starred or not — while `all`, the list's first "All routable"
+line, lists only the **starred** inventories, and neither costs FE because a
+listing is not a request) are implemented and
 verified in a launcher-built game at the pin (the legs are listed per slice
 below; `ports/_shared/evidence/rftoolsstorage-e2e/`). The gap list below is the
 rest of the mod.
@@ -198,9 +203,10 @@ rest of the mod.
     `{c: [I; x, y, z]}` compound, the shape a `routable` entry has), so the mode and
     the selection both survive a relaunch. `export first` is the way back to the walk
     (upstream's "All routable" list row, which sets the `(-1, -1, -1)` sentinel), so no
-    "clear the selection" form is needed. The selection's *contents view* is not
-    carried: `scan` still lists the whole box (slice 5's deviation 1), while upstream's
-    list would show only the selected row's inventory.
+    "clear the selection" form is needed. The selection's *contents view* **is** carried
+    (slice 14, `/rftoolsstorage contents <pos> <target|all>`); what `scan` still does
+    is list the whole box, slice 5's deviation 1, and it stays that way so the priced
+    readout and the free row view are two different surfaces.
 
 ## Upstream defects fixed
 
@@ -222,9 +228,9 @@ None. The two candidates were checked and left alone, on purpose:
   `/rftoolsstorage routable <pos> <target> <on|off>` — the set is saved and filters
   every routing walk, while the scan still lists every inventory; its **export
   choice** is slice 13, carried as `export`'s saved mode and `select`'s saved cell,
-  and its per-row contents view — `getInventoryForBlock` listing only the selected
-  row — is not carried, because `scan` lists the whole box, slice 5's substitute for
-  the list), the
+  and its per-row contents view is slice 14, carried as `contents <pos> <target|all>`
+  — one row's inventory, or the starred ones for the list's "All routable" line,
+  for free), the
   **remote/tablet variant**, the XNet access settings (slice 12 carries the star
   list but not `InventoryAccessSettings`' per-inventory input/output permissions,
   which need the XNet side), and the claimed-land check
@@ -263,8 +269,8 @@ retired helper files and their mapping are in
 | `register` → `Registrar` | declares the block-entity type `rftoolsstorage:storage_block_entity` over the block, attaches its `BlockEntityPart`, declares the menu's `MenuPart`, and declares the block's container (100 slots, every face, inputs and outputs) with its menu; **also** the scanner's type `rftoolsstorage:storage_scanner_block_entity` with its Part and `block_energy` (50,000 FE, 500 a move, no external drain) |
 | `BlockEntityPart::block_entity` | gives `rftoolsstorage:modular_storage` a block entity with empty saved data (the module tier and the lock live in its compound; `Items` are the container's), and `rftoolsstorage:storage_scanner` one whose compound holds `energy`, `radius`, the list's `sortMode` and the `routable` star list (slice 12: one `{c: [I; x, y, z]}` compound a starred cell, upstream's shape; the key is absent until the first star) |
 | `right_click_block` (cancel) | install / insert / seal / withdraw, and the action-bar readout |
-| `register_commands` | `/rftoolsstorage info <pos>`, `lock <pos>`, `scan <pos> [query]`, `radius <pos> <radius>`, `sort <pos> <mode>`, `routable <pos> <target> <on\|off>` (`block_pos`, `block_pos`, `word`), `export <pos> <current\|first>` (`block_pos`, `word`), `select <pos> <target>` (`block_pos`, `block_pos`), `request <pos> <item> [<count>]` (`block_pos`, `item`, `integer`), `give <pos> <item> [single]` (`block_pos`, `item`, `word`) and `insert <pos> <item> [<count>]` (`block_pos`, `item`, `integer`) |
-| `run_mod_command` | their answers (the scan costs `rfPerRequest`; its optional `query` is the GUI list's search box — every word a case-insensitive name contains or `@modid` a namespace prefix, `getMatcher`; the radius is the GUI slider's 1..20; the request prices an explicit count at a tenth of `rfPerRequest`, checks the out slot and the buffer, pulls from the scanned inventories and gives the stack to the player, or leaves it in the out slot when there is no player; the give prices one item or a stack at the whole `rfPerRequest`, has **no** out slot, and pulls straight into the player in one transaction; the insert pushes the player's stack out, pricing the walk at one `rfPerInsert` and charging it **only when the stack emptied**; `routable` is the GUI's per-inventory star, saved under upstream's `routable` key — it starts empty, and only a starred cell is routed into) |
+| `register_commands` | `/rftoolsstorage info <pos>`, `lock <pos>`, `scan <pos> [query]`, `contents <pos> <target>` and `contents <pos> all` (two usages: a row's cell, and the list's "All routable" line as a literal), `radius <pos> <radius>`, `sort <pos> <mode>`, `routable <pos> <target> <on\|off>` (`block_pos`, `block_pos`, `word`), `export <pos> <current\|first>` (`block_pos`, `word`), `select <pos> <target>` (`block_pos`, `block_pos`), `request <pos> <item> [<count>]` (`block_pos`, `item`, `integer`), `give <pos> <item> [single]` (`block_pos`, `item`, `word`) and `insert <pos> <item> [<count>]` (`block_pos`, `item`, `integer`) |
+| `run_mod_command` | their answers (the scan costs `rfPerRequest`; its optional `query` is the GUI list's search box — every word a case-insensitive name contains or `@modid` a namespace prefix, `getMatcher`; the radius is the GUI slider's 1..20; the request prices an explicit count at a tenth of `rfPerRequest`, checks the out slot and the buffer, pulls from the scanned inventories and gives the stack to the player, or leaves it in the out slot when there is no player; the give prices one item or a stack at the whole `rfPerRequest`, has **no** out slot, and pulls straight into the player in one transaction; the insert pushes the player's stack out, pricing the walk at one `rfPerInsert` and charging it **only when the stack emptied**; `routable` is the GUI's per-inventory star, saved under upstream's `routable` key — it starts empty, and only a starred cell is routed into; `contents` is the list's row contents view, `getInventoryForBlock`'s single-row branch for a cell and its `(-1, -1, -1)` "All routable" branch for `all` — the starred rows — over the saved sort, and **free**: a listing is not a request, so it never reads or spends the buffer) |
 | `block_entity_ticks` / `block_entity_tick` (BlockEntityPart) | the scanner ticks: the GUI input, then the automation input, each an `rfPerInsert` attempt into the **starred** scanned inventories (slice 6; the star filter is slice 12; the GUI slot's **export choice** is slice 13 — `current` sends it only into the selected inventory and does not fall through, `first` is the walk) |
 | `Registrar::block_container` | the scanner's three slots (`SLOT_IN` 0, `SLOT_OUT` 1, `SLOT_IN_AUTO` 2): automation inserts into the auto slot only, every slot extractable, no menu |
 | `screen` / `screen_draw` / `screen_click` (BlockEntityPart, API 19/20) | the menu's 366 x 210 layout, the title, the inventory label and the padlock; a press on the padlock's rectangle answers button 0 |
@@ -332,6 +338,14 @@ the "All routable inventories" label), and **McJtyLib** `1.21_neo` @
 `ef393e608eebc188a6e1decbf110506a55cc0725` `varia/BlockPosTools.java` (the `c` int-array
 entry shape). Read from the raw URLs into `/tmp/opencode` and deleted after the findings
 were recorded.
+Slice 14: the same `StorageScannerTileEntity.java` (`getInventoryForBlock`'s two
+branches and `lastSelectedInventory`, `addItemsFromInventory`/`addItemStack`'s
+same-item-and-components merge, `countItems(…, starred)`'s `isRoutable` filter,
+`findInventories`' row test — in range, not a `StorageScannerTileEntity`, an item
+capability — and `isValid`), and `client/GuiStorageScanner.java`
+(`updateContentsList`'s sort and search over whichever row is shown). Read with a
+shallow clone into `/tmp/opencode/rfsprobe` at `fc1b18a7`, deleted after the
+findings were recorded.
 Slice 13: `StorageScannerTileEntity.java` again (`exportC`'s field and accessors,
 `injectStackInternal`'s `toSelected` branch and its `return`, `tickServer`,
 `getInventoryForBlock`, `lastSelectedInventory`, `getInputMatcher`/`isInputFromGui`),
@@ -2444,6 +2458,186 @@ first assertion and the run ends `FAIL:` + `EXIT:1`.
 5. **Two adjacent chests are one double chest** (slice 6's trap): A is on x, B on z, and
    the full barrel is a barrel, so no pair joins.
 
+## Slice 14 — the list's row contents view (version 0.2.14)
+
+The gap line slice 13 left, verbatim from its coverage table and deviation 11:
+
+> the selected row's contents view (`getInventoryForBlock`'s listing) | **not ported** (no list
+> widget; `scan` lists the whole box — deviation 2)
+
+The slice is that view: `/rftoolsstorage contents <pos> <target|all>`. It is the other half of
+`getInventoryForBlock` — a cell lists **that** inventory's contents, and the list's first
+"All routable" line (upstream's `(-1, -1, -1)` sentinel) lists **only the starred** inventories,
+which is `countItems(…, starred = true)`'s half of the star, observable in this port for the first
+time. It fits the **machines** tier: the same block entity's saved radius, sort and star set, the
+neighbours' item capability and a readout — no renderer, no screen, no new vanilla hook. Upstream
+read at `fc1b18a7f070d0030671e1db1d3aab90699fd160` (`StorageScannerTileEntity.java`,
+`GuiStorageScanner.java`; the shallow clone was deleted after the findings were recorded).
+
+**Pin:** Horizon `0a875da91dbb0fdcb7ba8c42c11341aa229af51a`, horizon-mixins
+`e59da9094f0c2fdda6c627fe9eff22dec6a906f0`, mod API 0.2, game 26.3. **Version 0.2.14.**
+
+### The artefact's rules (read, not invented)
+
+- **Two branches, one method.** `getInventoryForBlock(cpos, stacks, craftable)` sets
+  `lastSelectedInventory = cpos` and then: for `cpos.getY() == -1` it walks `inventories` and calls
+  `addItemsFromInventory` only for `routable.contains(blockPos)`; otherwise it calls
+  `addItemsFromInventory(cpos)` — no `isRoutable`, no radius, no star. A single row is therefore
+  listed whether or not the player starred it. (Slice 13's `select` writes the same field; this
+  slice is its read.)
+- **The rows are the scan's own list.** `inventories` is filled by `findInventories`: in range, not a
+  `StorageScannerTileEntity`, not a `CraftingManagerTileEntity` (a family this port does not carry),
+  and `getCapability(Capabilities.ItemHandler.BLOCK, …, null) != null`. A cell outside the box, the
+  scanner's own cell, another scanner or an empty cell has no row, so the GUI cannot select it. The
+  port's `contents_row` is exactly that test.
+- **The merge is item + components.** `addItemStack` grows an entry only for
+  `ItemStack.isSameItemSameComponents`. This port's readout is one entry a kind (`Found {item,
+  count}`, the shape `scan` already prints), so the row view shares that model — deviation 2.
+- **The listing is free.** `getInventoryForBlock` never calls `consumeEnergy`: the GUI lists for
+  free and the buffer is spent on the request paths alone (`requestStack`,
+  `giveToPlayerFromScreen`, `injectStackFromScreen`, the tick). **`contents` costs no FE** — not
+  `rfPerRequest`, not a tenth — and a listing at a 0 buffer answers. `scan` stays priced: it is the
+  *request substitute* readout of slice 5's deviation 1, a different surface, and every earlier
+  leg's prices are unchanged.
+- **The GUI sorts and filters whichever row it shows** (`updateContentsList`). The port applies the
+  saved sort to `contents` (one saved mode, `sort`); the search stays `scan`'s typed argument
+  (deviation 3).
+
+### What the slice does
+
+- **`runtime`** (pure, tested): `in_scan_box` (the cube `findInventories` walks), [`contents_row`]
+  (in the box, not the scanner's cell, an inventory), `contents_line` (the row's kinds, or the all
+  row's), `contents_refused_line`, and `found_list` — the listing lifted out of `scan_line` so the
+  priced readout and the free row view print in one voice.
+- **`support`**: `cell_entries` (one cell's capability slot by slot, extracted from `scan_found`),
+  `contents_readout` (the two branches, the row test, the saved sort, no charge), the two usages
+  `contents <pos> <target>` and `contents <pos> all`, and the dispatch arm. `all` is the second
+  usage's literal, so the invocation's literal path is `[rftoolsstorage, contents, all]` and the
+  **absent** `target` names that row; a cell is the `block_pos` argument.
+- **Unchanged**: `scan` (the whole box, still 100 FE), the star's routing filter, the
+  request/give/insert prices, the export route.
+
+### Red → green (the rules)
+
+The three rules were written first with the functions stubbed (`in_scan_box`/`contents_row` false,
+`contents_line`/`contents_refused_line` empty) and the suite was run **before** implementing them
+(`slice14-red.log`, `TEST_EXIT:101`):
+
+```
+thread 'runtime::tests::a_contents_row_is_an_inventory_the_scan_lists' panicked at src/runtime.rs:2252:9:
+a chest in the box is a row
+...
+thread 'runtime::tests::the_contents_reply_names_the_row_or_the_all_row_and_its_kinds' panicked at src/runtime.rs:2290:9:
+assertion `left == right` failed
+  left: ""
+ right: "contents 16 102 12: minecraft:stone 128"
+...
+thread 'runtime::tests::a_cell_the_scan_did_not_list_is_refused_with_the_box_reason' panicked at src/runtime.rs:2327:9:
+assertion `left == right` failed
+  left: ""
+ right: "19 102 10 is not an inventory in the scan box"
+...
+test result: FAILED. 54 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out
+TEST_EXIT:101
+```
+
+The next run found a **defect in the test**, not in the code: its "y is bounded" case named
+`[18, 103, 10]` for a radius-2 box, which is *inside* it (`the box is a cube: y is bounded too`
+failed because the cell was in the box). The rule was right; the case was corrected to
+`[18, 105, 10]`. Implemented, then **57 passed, 0 failed** (`sdk-test.log`, `slice14-test.log`): the
+runtime's 51 (48 + 3) and the six glue tests.
+
+### In game (`ports/_shared/evidence/rftoolsstorage-e2e/`)
+
+| Leg | Log | Verdict |
+|---|---|---|
+| default, the launcher-built 0.2.14 package | `e2e-contents.log` | **PASS** + `EXIT:0` |
+| control (the same Nightly without the package) | `e2e-contents-control.log` | **FAIL** + `EXIT:1` — `{"error":"unknown item rftoolsstorage:storage_scanner"}` |
+| `CONTENTS_SELFTEST=1` (the row view of B must NOT have listed its 128) | `e2e-contents-selftest.log` | **FAIL** + `EXIT:1` — *"the row view of B answered 'rftoolsstorage:storage_scanner: contents 13 102 0: minecraft:stone 128' for the 128 stone it holds, so this inverted assertion fails as it must"* |
+
+The rig — scanner at S = 13,102,10, radius 2, A at S+2 on **x** with 64 stone, B at S+2 on **z**
+with 128 stone, both starred, buffer **0** — with every `ctl` reply in the log:
+
+```
+radius: rftoolsstorage:storage_scanner: radius 2
+star A: rftoolsstorage:storage_scanner: routable 15 102 10 on
+star B: rftoolsstorage:storage_scanner: routable 13 102 12 on
+contents B: rftoolsstorage:storage_scanner: contents 13 102 12: minecraft:stone 128
+contents A: rftoolsstorage:storage_scanner: contents 15 102 10: minecraft:stone 64
+energy after two row listings: 0/50000
+un-star B: rftoolsstorage:storage_scanner: routable 13 102 12 off
+contents all (B unstarred): rftoolsstorage:storage_scanner: contents all: minecraft:stone 64
+contents B (unstarred): rftoolsstorage:storage_scanner: contents 13 102 12: minecraft:stone 128
+un-star A: rftoolsstorage:storage_scanner: routable 15 102 10 off
+contents all (nothing starred): rftoolsstorage:storage_scanner: contents all: empty
+star B again: rftoolsstorage:storage_scanner: routable 13 102 12 on
+contents all (B only): rftoolsstorage:storage_scanner: contents all: minecraft:stone 128
+contents at S+3 (outside radius 2): rftoolsstorage:storage_scanner: 16 102 10 is not an inventory in the scan box
+contents of the scanner itself: rftoolsstorage:storage_scanner: 13 102 10 is not an inventory in the scan box
+contents of an empty cell: rftoolsstorage:storage_scanner: 14 102 10 is not an inventory in the scan box
+energy after three refusals: 0/50000
+```
+
+Five facts make that evidence rather than a print: **the two rows differ** (128 vs 64 from one
+scanner, so the target is what selects the inventory); **the buffer is 0 before and after** every
+listing and every refusal — a listing is not a request, and this is the assertion that would fail if
+`contents` were priced (the earlier `scan` legs at 0 FE answer `no power`); **`all` is the starred
+half** — un-starring B drops it from the all row (64) while **B's own row still lists its 128**,
+which is the single-row branch's missing `isRoutable` test; with nothing starred the all row is
+`empty`, and starring B alone lists its 128 (the membership is the rule, not the walk order); and
+**the rows are the scan's list** — an outside cell, the scanner itself and an empty cell are each
+refused with the same reason. `CONTENTS_SELFTEST=1` inverts the first assertion and the run ends
+`FAIL:` + `EXIT:1`.
+
+### Deviations this slice adds
+
+1. **The commands are the list's two rows, not a widget.** Upstream's view is
+   `GuiStorageScanner.updateContentsList` over `getInventoryForBlock`'s answer; this port has no list
+   widget (still the gap), so the same answer is `contents <pos> <target|all>` — a cell for a row,
+   `all` for the first line. The rows and the star filter are the same; only the surface differs.
+2. **One entry a kind**, item id and count, as `scan` (slice 5's `Found`): upstream keeps two stacks
+   of one item apart when their components differ. The collapse `scan` already makes; the row's and
+   the star's behaviour are unaffected.
+3. **The search is `scan`'s argument, not `contents`'s.** The GUI's search box narrows whichever row
+   is shown; the port's search is a typed term (slice 10), so `contents` lists the row unfiltered and
+   `scan <pos> <query>` is how a listing is narrowed. The saved sort *is* applied to `contents`,
+   because it is saved state, as it is to `scan`.
+4. **A row the scan did not find is refused** rather than answering `empty`: the GUI can only select
+   a line its list shows. A cell that lost its inventory between the scan and the command is refused
+   the same way (the port walks the box per command; there is no cached list).
+
+### Coverage (the families this slice changes)
+
+| Family | State |
+|---|---|
+| `/rftoolsstorage contents <pos> <target\|all>`, its parsed reply | **tested** — `contents 13 102 12: minecraft:stone 128`, `contents all: minecraft:stone 64`, `… empty` (`e2e-contents.log`) |
+| a row lists that inventory, starred or not | **tested** — B's row lists 128 while B is unstarred (`e2e-contents.log`); `a_contents_row_is_an_inventory_the_scan_lists` |
+| `all` lists only the starred rows (`countItems(…, starred = true)`'s other half) | **tested** — the all row reads 128, then 64 when B is un-starred, `empty` with nothing starred, 128 with B alone (`e2e-contents.log`) |
+| a row the scan did not find is refused | **tested** — outside the box, the scanner's cell and an empty cell (`e2e-contents.log`); `contents_refused_line` |
+| the price: none, a listing is not a request | **tested** — every listing and refusal runs at buffer 0, which stays 0 (`e2e-contents.log`) |
+| the saved sort orders the row | by construction (the same `sort_found` + `saved_sort` as `scan`); the rig holds one kind, so there is no in-game order assertion |
+| the GUI list widget itself, compact/cycle/visible-size, the remote/tablet variant, XNet settings, the claimed-land check | **not ported** (the screen is a fixed slot layout; `blocked(no permission query)` for the claim) |
+
+### Traps this slice paid for
+
+1. **A literal may follow an argument in a usage** (`contents <pos:block_pos> all`): the pin's
+   `usage_nodes` accepts a word after an argument (only a word after an *optional* argument, or after
+   a greedy `text`, is refused) and merges the two usages into one tree. So the dispatch reads
+   `literals` by index (not the old two-element destructure), and the `all` row is identified by the
+   **absent** `target` argument — which doubles as proof the parse went down that branch.
+2. **The buffer is the fail-capable half of "free".** Assert `energy` before and after, at 0: a
+   priced `contents` answers `no power` and the assertion fails on the reply, not on a coincidence.
+3. **Two adjacent chests are one double chest** (slice 6's trap): A is on x, B on z, two blocks out
+   on different axes — the rig the star and export phases already use.
+4. **The scanner's own slots must stay empty** while the phase counts a chest: the tick runs during
+   every `ctl wait`, and a stack in the in/auto slot would be routed into A or B between two
+   listings. `seed_slots "$SX" "$SY" "$SZ" ''` clears the container before the star calls.
+5. **A doc edit after the build breaks `package matches the tree`.** The first delivered 0.2.14
+   (101,395 B) was built, checked, fitted and played green — and then this README's "What is not
+   ported" line was corrected, which the gate caught as `differs: README.md`. The honest route is a
+   rebuild (101,409 B) and the three legs again on the delivered file, which is what the logs above
+   are. Edit docs **before** the final build, every time.
+
 ## Verification
 
 Skills: superpowers/using-superpowers, brainstorming, writing-plans, test-driven-development, systematic-debugging, verification-before-completion; BeautifulRust/rust-best-practices
@@ -2451,6 +2645,29 @@ Skills: superpowers/using-superpowers, brainstorming, writing-plans, test-driven
 Full evidence in [`VALIDATION.md`](VALIDATION.md); the e2e logs are in
 `ports/_shared/evidence/rftoolsstorage-e2e/` (the game legs) and
 `ports/_shared/evidence/rftoolsstorage/` (the ladder, package and fits).
+
+**0.2.14 — the list's row contents view (2026-11-23, pin `0a875da`)**
+
+| Step | Command | Result |
+|---|---|---|
+| Red proof | `cargo test` with `in_scan_box`/`contents_row` false and `contents_line`/`contents_refused_line` empty | **FAILED. 54 passed; 3 failed**, `TEST_EXIT:101` (`slice14-red.log`); quoted above |
+| Runtime + glue tests | `cargo test` | **57 passed**, 0 failed (`sdk-test.log`, `slice14-test.log`, `TEST_EXIT:0`) — 51 runtime + 6 glue |
+| Lints | `cargo clippy --all-targets -- -D warnings` | `CLIPPY_EXIT:0`, 0 warnings (`slice14-clippy.log`; the first run flagged `cloned_ref_to_slice_refs` in the new test, fixed with `std::slice::from_ref`) |
+| Formatting | `rustfmt --edition 2024 --check src/{lib,support,runtime}.rs` | `FMT_EXIT:0` (`slice14-fmt.log`; the first check listed the wrapped `contents_readout` match arm, formatted, then re-run green) |
+| SDK gate | `cargo horizon-mod check` | `TREE_CHECK_EXIT:0` — *"…uses 540 items of the API (5 Part kinds, 2 capabilitys, 149 fields or variants, 18 hooks, 52 hook arguments, 2 macros, 168 methods, 29 traits, 115 types). Made for 0a875da."* (`slice14-tree-check.log`) |
+| Package | `rm -f Cargo.lock && cargo horizon-mod build`, twice | **101,409 B**, SHA-256 `4fde9c1eff9f97aea14f1324981d3c872e1b8d41d2155117dbe8d8bf22b53463`, **`cmp`-identical** (`slice14-build-1.log`, `slice14-build-2.log`); the first delivered build (101,395 B, sha `8d839714…bb90`) was superseded when this README's "What is not ported" line was corrected after it — `verify-sdk-package` caught that as `differs: README.md`, and the delivered file is the rebuild from the final tree |
+| Package check | `cargo horizon-mod check rftoolsstorage.hmod` | `rftoolsstorage 0.2.14 (native-mod, format native-1/0a875da…/e59da90…, for 26.3)`, **101,409 bytes**, `4fde9c1e…3463`, `FILE_CHECK_EXIT:0` (`slice14-check.log`) |
+| Entries | `unzip -l rftoolsstorage.hmod` | **67 files**, no `Cargo.lock`; `src/runtime.rs` byte-identical in tree and package (`2badcc21abb7`) |
+| Fits the pin | `cargo horizon-mod fits rftoolsstorage.hmod --build 0a875da` | `0a875da  made for`, `FITS_PIN_EXIT:0` (`slice14-fits.log`) |
+| Fits another build | `cargo horizon-mod fits rftoolsstorage.hmod --build 0b14f8a` | `0b14f8a  fits`, `FITS_OTHER_EXIT:0` (`slice14-fits.log`) |
+| Launcher build | `BUILD_LOCAL=1 launcher-game.sh build rftoolsstorage` (the two stale `native-*` tags carrying 0.2.13 removed first) | `Compiling rftoolsstorage (1 of 1)`, tag `native-0a875da-3123db72eda1`, `LAUNCHER_BUILD_EXIT:0` (`slice14-launcher-build.log`) |
+| In game | `build-slot.sh run --step e2e -- bash ports/rftoolsstorage/tools/e2e.sh` (`CONTROL_GAME=`) | **PASS** + `EXIT:0` (`e2e-contents.log`) |
+| Control | the same rig on the Nightly without the package | **FAIL** + `EXIT:1` (`e2e-contents-control.log`) |
+| Selftest | `CONTENTS_SELFTEST=1` (the row view of B must not have listed 128) | **FAIL** + `EXIT:1` (`e2e-contents-selftest.log`) |
+| e2e gate | `check-e2e-logs.py rftoolsstorage-e2e --strict` | `logs=39  ok=39  missing-exit=0  bad-exit=0`, exit 0 |
+| Package gate | `verify-sdk-package.py rftoolsstorage` | `1/1 package(s) verified`, exit 0 |
+| Recipe types | `check-recipe-types.py rftoolsstorage` | `rftoolsstorage: ok`, exit 0 |
+| Skills gate | `check-skills.py --notes ports/rftoolsstorage --strict` | `Skills line present`, PASS |
 
 **0.2.13 — the scanner's export choice (2026-11-23, pin `0a875da`)**
 

@@ -511,11 +511,11 @@ pub fn merge_counts(entries: &[(String, u32)]) -> Vec<Found> {
     found
 }
 
-/// The scan's answer after a paid scan: what the inventories hold, then the
-/// buffer left.
+/// The kinds a scan or a list row shows, in the readout's voice: one
+/// `item count` an entry, comma separated, or `empty` when nothing matched.
 #[must_use]
-pub fn scan_line(after: u32, found: &[Found]) -> String {
-    let items = if found.is_empty() {
+pub fn found_list(found: &[Found]) -> String {
+    if found.is_empty() {
         "empty".to_owned()
     } else {
         found
@@ -523,7 +523,14 @@ pub fn scan_line(after: u32, found: &[Found]) -> String {
             .map(|entry| format!("{} {}", entry.item, entry.count))
             .collect::<Vec<_>>()
             .join(", ")
-    };
+    }
+}
+
+/// The scan's answer after a paid scan: what the inventories hold, then the
+/// buffer left.
+#[must_use]
+pub fn scan_line(after: u32, found: &[Found]) -> String {
+    let items = found_list(found);
     format!("{items} ({after}/{SCANNER_MAX_ENERGY} FE)")
 }
 
@@ -885,6 +892,58 @@ pub fn export_line(mode: ExportMode) -> String {
 pub fn selection_line(at: [i32; 3]) -> String {
     let [x, y, z] = at;
     format!("select {x} {y} {z}")
+}
+
+// --- the list's row contents view (slice 14) ------------------------------
+
+/// Whether `at` is inside the scanner's box on every axis (`pos - radius ..=
+/// pos + radius`), upstream's `inRange` — the cube `findInventories` walks, not a
+/// sphere.
+#[must_use]
+pub fn in_scan_box(centre: [i32; 3], radius: i32, at: [i32; 3]) -> bool {
+    let radius = i64::from(radius.max(0));
+    (0..3).all(|axis| (i64::from(at[axis]) - i64::from(centre[axis])).abs() <= radius)
+}
+
+/// Whether a cell can be one row of the scanner's list: inside the box, not the
+/// scanner's own cell, not another storage scanner, and an inventory (its item
+/// capability answers). Upstream's rows are the cells `findInventories` recorded,
+/// which is exactly that test — a cell the scan did not find has no row, so
+/// `getInventoryForBlock` cannot list it.
+///
+/// The star is deliberately absent: `getInventoryForBlock`'s single-row branch has
+/// no `isRoutable` test, so an unstarred row still lists its own contents.
+#[must_use]
+pub fn contents_row(
+    centre: [i32; 3],
+    radius: i32,
+    at: [i32; 3],
+    scanner_there: bool,
+    has_inventory: bool,
+) -> bool {
+    in_scan_box(centre, radius, at) && injectable_at(centre, at, scanner_there) && has_inventory
+}
+
+/// The reply to `/rftoolsstorage contents <pos> <target|all>`: the row's own kinds,
+/// or the list's first "All routable" row (upstream's `(-1, -1, -1)` sentinel,
+/// which lists every starred inventory), in the readout's voice. A row listing is
+/// not a request: the line carries no buffer, because `getInventoryForBlock`
+/// charges nothing.
+#[must_use]
+pub fn contents_line(row: Option<[i32; 3]>, found: &[Found]) -> String {
+    let listed = found_list(found);
+    match row {
+        Some([x, y, z]) => format!("contents {x} {y} {z}: {listed}"),
+        None => format!("contents all: {listed}"),
+    }
+}
+
+/// The refusal a cell that is not a row gets: the GUI can only select an inventory
+/// its list shows.
+#[must_use]
+pub fn contents_refused_line(at: [i32; 3]) -> String {
+    let [x, y, z] = at;
+    format!("{x} {y} {z} is not an inventory in the scan box")
 }
 
 // --- the scanner's request path (slice 7) ---------------------------------
@@ -2199,6 +2258,92 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["minecraft:stone", "minecraft:dirt", "minecraft:sand"],
             "the ascending direction is stable too"
+        );
+    }
+
+    #[test]
+    fn a_contents_row_is_an_inventory_the_scan_lists() {
+        // getInventoryForBlock(cpos) can only name a cell findInventories recorded:
+        // in the box, not the scanner itself, not another scanner, and an inventory.
+        let centre = [16, 102, 10];
+        assert!(
+            contents_row(centre, 2, [18, 102, 12], false, true),
+            "a chest in the box is a row"
+        );
+        assert!(
+            contents_row(centre, 2, [14, 102, 10], false, true),
+            "the box reaches its lower corner"
+        );
+        assert!(
+            !contents_row(centre, 2, [19, 102, 10], false, true),
+            "three blocks away is outside a radius-2 box"
+        );
+        assert!(
+            !contents_row(centre, 2, [18, 105, 10], false, true),
+            "the box is a cube: y is bounded too"
+        );
+        assert!(
+            !contents_row(centre, 2, centre, false, true),
+            "the scanner's own cell is never a row"
+        );
+        assert!(
+            !contents_row(centre, 2, [17, 102, 10], true, true),
+            "another storage scanner is never a row"
+        );
+        assert!(
+            !contents_row(centre, 2, [17, 102, 10], false, false),
+            "a cell with no item capability is not an inventory"
+        );
+        assert!(in_scan_box(centre, 2, [18, 102, 12]));
+        assert!(!in_scan_box(centre, 2, [19, 102, 10]));
+    }
+
+    #[test]
+    fn the_contents_reply_names_the_row_or_the_all_row_and_its_kinds() {
+        let stone = Found {
+            item: "minecraft:stone".to_owned(),
+            count: 128,
+        };
+        assert_eq!(
+            contents_line(Some([16, 102, 12]), std::slice::from_ref(&stone)),
+            "contents 16 102 12: minecraft:stone 128"
+        );
+        assert_eq!(
+            contents_line(
+                None,
+                &[Found {
+                    item: "minecraft:stone".to_owned(),
+                    count: 64,
+                }],
+            ),
+            "contents all: minecraft:stone 64"
+        );
+        assert_eq!(
+            contents_line(Some([18, 102, 10]), &[]),
+            "contents 18 102 10: empty",
+            "a row with nothing in it still names the row"
+        );
+        assert_eq!(
+            contents_line(
+                None,
+                &[
+                    stone,
+                    Found {
+                        item: "minecraft:dirt".to_owned(),
+                        count: 32,
+                    },
+                ],
+            ),
+            "contents all: minecraft:stone 128, minecraft:dirt 32",
+            "several kinds keep the scan's one-entry-a-kind voice"
+        );
+    }
+
+    #[test]
+    fn a_cell_the_scan_did_not_list_is_refused_with_the_box_reason() {
+        assert_eq!(
+            contents_refused_line([19, 102, 10]),
+            "19 102 10 is not an inventory in the scan box"
         );
     }
 }

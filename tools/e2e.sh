@@ -102,6 +102,16 @@
 #      relaunch; a **selected full barrel** refuses without falling through to the
 #      walk (the in-slot keeps its 64, A and B unchanged); and `export <pos> first`
 #      restores the starred walk, which routes the same stack to B (128).
+#  21. **the row contents view (slice 14)**: the list's per-row contents
+#      (`getInventoryForBlock`), as `/rftoolsstorage contents <pos> <target|all>`.
+#      At radius 2, with A (S+2 on x, 64 stone) and B (S+2 on z, 128 stone) both
+#      starred and the buffer at **0**, `contents <pos> B` answers
+#      `minecraft:stone 128` and `contents <pos> A` answers `64` — a row listing is
+#      not a request, so the buffer stays 0; un-starring B leaves the all row with
+#      A's 64 while the single row B still lists its 128 (the star filters the
+#      "All routable" row, not a row); with nothing starred the all row is `empty`;
+#      a cell outside the box, the scanner's own cell and a cell with no inventory
+#      are all refused with `is not an inventory in the scan box`, still free.
 #
 # SELFTEST=1 keeps the scenario and asserts that the tick did NOT push the stone
 # into the chest, so the run MUST fail with a `FAIL:` verdict (the assertion the
@@ -112,8 +122,9 @@
 # SCAN_SELFTEST=1 for the scan filter (the `dirt` query must NOT list the stone)
 # SORT_SELFTEST=1 for the sort (the `Amount-` reply must NOT start with stone),
 # ROUTABLE_SELFTEST=1 for the star list (the un-starred chest must NOT have
-# received the stack), and EXPORT_SELFTEST=1 for the export choice (the selected
-# chest must NOT have received the stack).
+# received the stack), EXPORT_SELFTEST=1 for the export choice (the selected
+# chest must NOT have received the stack), and CONTENTS_SELFTEST=1 for the row
+# view (B's row must NOT have listed 128 stone).
 # COUNTERFACTUAL=1 puts a vanilla barrel where the scanner would be and proves the
 # same commands answer `not a storage scanner` on it. CONTROL_GAME runs the same
 # rig on the Nightly without the package and fails there (`EXIT:1`): the block and
@@ -146,6 +157,7 @@ SCAN_SELFTEST=${SCAN_SELFTEST:-0}
 SORT_SELFTEST=${SORT_SELFTEST:-0}
 ROUTABLE_SELFTEST=${ROUTABLE_SELFTEST:-0}
 EXPORT_SELFTEST=${EXPORT_SELFTEST:-0}
+CONTENTS_SELFTEST=${CONTENTS_SELFTEST:-0}
 
 SCANNER=rftoolsstorage:storage_scanner
 STORAGE=rftoolsstorage:modular_storage
@@ -250,6 +262,18 @@ select_cmd() { # x y z target-x target-y target-z
     local line
     line=$(reply select "$1" "$2" "$3" "$4" "$5" "$6")
     [ -n "$line" ] || fail "the select command at $1,$2,$3 answered nothing: $(ctl messages 6 | jq -c '.chat')"
+    echo "$line"
+}
+contents_cmd() { # x y z target-x target-y target-z
+    local line
+    line=$(reply contents "$1" "$2" "$3" "$4" "$5" "$6")
+    [ -n "$line" ] || fail "the contents command at $1,$2,$3 answered nothing: $(ctl messages 6 | jq -c '.chat')"
+    echo "$line"
+}
+contents_all_cmd() { # x y z
+    local line
+    line=$(reply contents "$1" "$2" "$3" all)
+    [ -n "$line" ] || fail "the contents-all command at $1,$2,$3 answered nothing: $(ctl messages 6 | jq -c '.chat')"
     echo "$line"
 }
 request_cmd() { # x y z item [count]
@@ -1501,6 +1525,100 @@ ctl setblock "$EXPORT_A" "$SY" "$SZ" minecraft:air >/dev/null
 ctl setblock "$SX" "$SY" "$EXPORT_B" minecraft:air >/dev/null
 ctl wait 4
 
+say "THE ROW CONTENTS VIEW: a row lists its own inventory; 'all' lists only the starred rows"
+# `StorageScannerTileEntity.getInventoryForBlock(cpos)`: with a cell it lists that
+# inventory's contents (`addItemsFromInventory`, no star test), and with the list's
+# first "All routable" row — upstream's `(-1, -1, -1)` sentinel — only the starred
+# inventories (`routable.contains`), the `countItems(..., starred = true)` half of
+# the star. A listing is not a request: `getInventoryForBlock` never calls
+# `consumeEnergy`, so the phase runs at buffer 0 and leaves it there.
+CONTENTS_A=$((SX + 2))
+CONTENTS_B=$((SZ + 2))
+for at in "$((SX + 1)):$SY:$SZ" "$((SX + 3)):$SY:$SZ" "$CONTENTS_A:$SY:$SZ" "$SX:$SY:$CONTENTS_B"; do
+    IFS=: read -r cx cy cz <<<"$at"
+    ctl setblock "$cx" "$cy" "$cz" minecraft:air >/dev/null
+done
+ctl setblock "$CONTENTS_A" "$SY" "$SZ" minecraft:chest >/dev/null
+ctl setblock "$SX" "$SY" "$CONTENTS_B" minecraft:chest >/dev/null
+ctl wait 4
+seed_slots "$CONTENTS_A" "$SY" "$SZ" '{Slot: 0b, id: "minecraft:stone", count: 64}'
+seed_slots "$SX" "$SY" "$CONTENTS_B" '{Slot: 0b, id: "minecraft:stone", count: 64}, {Slot: 1b, id: "minecraft:stone", count: 64}'
+line=$(radius_cmd "$SX" "$SY" "$SZ" 2)
+echo "radius: $line"
+seed_slots "$SX" "$SY" "$SZ" ''
+line=$(routable_cmd "$SX" "$SY" "$SZ" "$CONTENTS_A" "$SY" "$SZ" on)
+echo "star A: $line"
+line=$(routable_cmd "$SX" "$SY" "$SZ" "$SX" "$SY" "$CONTENTS_B" on)
+echo "star B: $line"
+ctl command "data merge block $SX $SY $SZ {energy: 0}" >/dev/null
+ctl wait 4
+contents_line_b=$(contents_cmd "$SX" "$SY" "$SZ" "$SX" "$SY" "$CONTENTS_B")
+echo "contents B: $contents_line_b"
+b_total=$(inv_total "$SX" "$SY" "$CONTENTS_B")
+echo "  B holds $b_total stone"
+[ "$contents_line_b" = "$SCANNER: contents $SX $SY $CONTENTS_B: minecraft:stone $b_total" ] \
+    || fail "the row view of B answered '$contents_line_b', expected its $b_total stone"
+[ "$b_total" = 128 ] || fail "B holds $b_total stone, expected 64 + 64"
+
+if [ "$CONTENTS_SELFTEST" = 1 ]; then
+    say "CONTENTS_SELFTEST: assert the row view of B DID NOT list its 128 stone (must fail)"
+    fail "the row view of B answered '$contents_line_b' for the $b_total stone it holds, so this inverted assertion fails as it must"
+fi
+
+contents_line_a=$(contents_cmd "$SX" "$SY" "$SZ" "$CONTENTS_A" "$SY" "$SZ")
+echo "contents A: $contents_line_a"
+a_total=$(inv_total "$CONTENTS_A" "$SY" "$SZ")
+[ "$contents_line_a" = "$SCANNER: contents $CONTENTS_A $SY $SZ: minecraft:stone $a_total" ] \
+    || fail "the row view of A answered '$contents_line_a', expected its $a_total stone"
+[ "$a_total" = 64 ] || fail "A holds $a_total stone, expected 64"
+energy=$(energy_of "$SX" "$SY" "$SZ")
+echo "energy after two row listings: ${energy}/50000"
+[ "$energy" = 0 ] || fail "a row listing was charged (energy $energy, expected 0 — a listing is not a request)"
+
+say "the star filters the all row, not a single row: un-starring B leaves the all row with A's 64"
+line=$(routable_cmd "$SX" "$SY" "$SZ" "$SX" "$SY" "$CONTENTS_B" off)
+echo "un-star B: $line"
+all_line=$(contents_all_cmd "$SX" "$SY" "$SZ")
+echo "contents all (B unstarred): $all_line"
+[ "$all_line" = "$SCANNER: contents all: minecraft:stone 64" ] || fail "the all row answered: $all_line"
+unstarred_row=$(contents_cmd "$SX" "$SY" "$SZ" "$SX" "$SY" "$CONTENTS_B")
+echo "contents B (unstarred): $unstarred_row"
+[ "$unstarred_row" = "$SCANNER: contents $SX $SY $CONTENTS_B: minecraft:stone 128" ] \
+    || fail "the un-starred row B answered '$unstarred_row': a row lists its own inventory whether or not it is starred"
+line=$(routable_cmd "$SX" "$SY" "$SZ" "$CONTENTS_A" "$SY" "$SZ" off)
+echo "un-star A: $line"
+all_line=$(contents_all_cmd "$SX" "$SY" "$SZ")
+echo "contents all (nothing starred): $all_line"
+[ "$all_line" = "$SCANNER: contents all: empty" ] || fail "the all row with nothing starred answered: $all_line"
+line=$(routable_cmd "$SX" "$SY" "$SZ" "$SX" "$SY" "$CONTENTS_B" on)
+echo "star B again: $line"
+all_line=$(contents_all_cmd "$SX" "$SY" "$SZ")
+echo "contents all (B only): $all_line"
+[ "$all_line" = "$SCANNER: contents all: minecraft:stone 128" ] \
+    || fail "the all row with B starred answered: $all_line"
+
+say "a cell the scan did not list is refused: outside the box, the scanner itself, an empty cell"
+line=$(contents_cmd "$SX" "$SY" "$SZ" "$((SX + 3))" "$SY" "$SZ")
+echo "contents at S+3 (outside radius 2): $line"
+[ "$line" = "$SCANNER: $((SX + 3)) $SY $SZ is not an inventory in the scan box" ] \
+    || fail "the outside cell answered: $line"
+line=$(contents_cmd "$SX" "$SY" "$SZ" "$SX" "$SY" "$SZ")
+echo "contents of the scanner itself: $line"
+[ "$line" = "$SCANNER: $SX $SY $SZ is not an inventory in the scan box" ] \
+    || fail "the scanner's own cell answered: $line"
+line=$(contents_cmd "$SX" "$SY" "$SZ" "$((SX + 1))" "$SY" "$SZ")
+echo "contents of an empty cell: $line"
+[ "$line" = "$SCANNER: $((SX + 1)) $SY $SZ is not an inventory in the scan box" ] \
+    || fail "the empty cell answered: $line"
+energy=$(energy_of "$SX" "$SY" "$SZ")
+echo "energy after three refusals: ${energy}/50000"
+[ "$energy" = 0 ] || fail "a refused row listing was charged (energy $energy)"
+# The rig leaves for the loot leg; the saved star (B) is inert once the scanner is
+# broken, and the later legs reseed their own chests.
+ctl setblock "$CONTENTS_A" "$SY" "$SZ" minecraft:air >/dev/null
+ctl setblock "$SX" "$SY" "$CONTENTS_B" minecraft:air >/dev/null
+ctl wait 4
+
 say "the scanner's loot table drops its own item on a survival break"
 BX=$((X + 2))
 BZ=$((Z1 + 5))
@@ -1568,4 +1686,4 @@ echo "give rftoolsbase:machine_frame: $frame"
 echo "$frame" | grep -q 'unknown item' || fail "this build has rftoolsbase:machine_frame, so the recipe is not blocked and must be crafted: $frame"
 
 ctl close >/dev/null 2>&1 || true
-echo "PASS: the storage scanner places and reads back with its facing; a fresh one has no power (no power (0/50000 FE)) and reads nothing; at its default radius 1 it finds nothing two blocks away; /rftoolsstorage radius 2 widens the box and the scan answers minecraft:stone 64 for a chest two blocks away while the chest three away (minecraft:dirt 32) is outside it; radius 3 lists both, one entry a kind; every scan costs rfPerRequest (5,000 -> 4,900 -> 4,800 -> 4,700, printed in the reply); THE SCAN FILTER (the GUI's search box) keeps '@minecraft' listing both kinds, narrows 'dirt' to minecraft:dirt 32 and 'stone' to minecraft:stone 64, answers 'empty' for '@nomatch' with the price still paid (4,600), and leaves the unfiltered scan listing both (4,500) as the differential; THE SORT CHOICE orders the list (Amount- = dirt 64, stone 32, Amount+ = stone 32, dirt 64, Name = dirt 64, stone 32, Mod puts rftoolsstorage:storage_module0 after both minecraft kinds), and the saved AMOUNT_DESCENDING mode orders the list after a relaunch too (stone 64, dirt 32); an emptied buffer refuses with no power and reads nothing, and charging it again makes the scan answer again; scan and radius refuse a chest and the modular storage (not a storage scanner); the radius and the buffer survive a relaunch; THE INJECT TICK pushes 64 stone from the in-slot into the empty chest two blocks away so its Items[0] reads minecraft:stone x64 while the buffer drops by exactly one rfPerInsert (5000 -> 4980), and with the buffer at 0 the next stack stays in the slot and the chest keeps its 64, recharging proving the stall was the power (chest 128); the auto slot routes too (chest 160); items the game puts in the container are routed for one rfPerInsert; a stack nothing accepts is still charged one attempt (20 FE pays one, 19 pays none) and stays in the slot; the walk passes a full barrel for the chest behind it; the tick never writes the out slot; THE REQUEST PATH pulls 32 stone from a chest of 128 into the player's inventory (the reference's straight-to-inventory default), leaving the chest at 96 and the buffer at 4,990 for an explicit count, refuses a kind nothing holds and charges nothing, refuses below the price with the price line (costs 10, have 9), sends a ctl command's 16-stone request straight to the player too, and refuses a request whose out slot holds another kind without pulling or charging; THE INSERT PATH pushes the player's 64 stone into the chest two blocks away so its Items[0] reads minecraft:stone x64 and empties the player's stack for exactly one rfPerInsert (5000 -> 4980), inserts an explicit 10 of 64 for one more rfPerInsert, takes only the 32 a nearly-full barrel has room for and charges NOTHING for the partial insert, moves nothing and charges nothing against a full barrel (the player keeps 64), refuses a box with no routable inventory (there are no routable inventories, no charge) and refuses a chest (not a storage scanner); THE GIVE PATH hands the whole stack (64) straight to the player from a chest of 64, empties the chest and charges the FULL rfPerRequest (5000 -> 4900) with the out slot still holding the request counterfactual's dirt (it has no out slot), hands exactly one item with [single] (chest 3 -> 2, buffer 4900 -> 4800), refuses a kind nothing holds and charges nothing, and refuses below the full price with the price line (costs 100, have 99) without touching the chest, and a give on a chest is refused as not a storage scanner; the loot table drops the scanner on a survival break; the modular storage still answers 0/0 empty no module; a barrel answers not a storage scanner to the same commands; and THE ROUTABLE STAR LIST starts empty (a fresh scanner's tick routes its 64 stone nowhere and still pays one rfPerInsert), routes only the starred chest (B takes 64 while the un-starred A stays empty), still lists the un-starred A's 32 dirt in the scan (the star filters routing, not the list), restores the walk when A is re-starred (A 96), and survives a relaunch (the saved list names A, which then takes another stack, 160); THE EXPORT CHOICE (the GUI's 'Export to current container') sends the in-slot's 64 stone only to the selected inventory (B 64, A 0) for one rfPerInsert, follows the list's row (selecting A makes A 64 while B keeps its 64), saves the choice and the selection with the block so both survive a relaunch, does not fall through to the walk from a selected full barrel (the in-slot keeps its 64 and A and B stay at 64), and 'export first' restores the starred walk, which routes the same stack to B (128)"
+echo "PASS: the storage scanner places and reads back with its facing; a fresh one has no power (no power (0/50000 FE)) and reads nothing; at its default radius 1 it finds nothing two blocks away; /rftoolsstorage radius 2 widens the box and the scan answers minecraft:stone 64 for a chest two blocks away while the chest three away (minecraft:dirt 32) is outside it; radius 3 lists both, one entry a kind; every scan costs rfPerRequest (5,000 -> 4,900 -> 4,800 -> 4,700, printed in the reply); THE SCAN FILTER (the GUI's search box) keeps '@minecraft' listing both kinds, narrows 'dirt' to minecraft:dirt 32 and 'stone' to minecraft:stone 64, answers 'empty' for '@nomatch' with the price still paid (4,600), and leaves the unfiltered scan listing both (4,500) as the differential; THE SORT CHOICE orders the list (Amount- = dirt 64, stone 32, Amount+ = stone 32, dirt 64, Name = dirt 64, stone 32, Mod puts rftoolsstorage:storage_module0 after both minecraft kinds), and the saved AMOUNT_DESCENDING mode orders the list after a relaunch too (stone 64, dirt 32); an emptied buffer refuses with no power and reads nothing, and charging it again makes the scan answer again; scan and radius refuse a chest and the modular storage (not a storage scanner); the radius and the buffer survive a relaunch; THE INJECT TICK pushes 64 stone from the in-slot into the empty chest two blocks away so its Items[0] reads minecraft:stone x64 while the buffer drops by exactly one rfPerInsert (5000 -> 4980), and with the buffer at 0 the next stack stays in the slot and the chest keeps its 64, recharging proving the stall was the power (chest 128); the auto slot routes too (chest 160); items the game puts in the container are routed for one rfPerInsert; a stack nothing accepts is still charged one attempt (20 FE pays one, 19 pays none) and stays in the slot; the walk passes a full barrel for the chest behind it; the tick never writes the out slot; THE REQUEST PATH pulls 32 stone from a chest of 128 into the player's inventory (the reference's straight-to-inventory default), leaving the chest at 96 and the buffer at 4,990 for an explicit count, refuses a kind nothing holds and charges nothing, refuses below the price with the price line (costs 10, have 9), sends a ctl command's 16-stone request straight to the player too, and refuses a request whose out slot holds another kind without pulling or charging; THE INSERT PATH pushes the player's 64 stone into the chest two blocks away so its Items[0] reads minecraft:stone x64 and empties the player's stack for exactly one rfPerInsert (5000 -> 4980), inserts an explicit 10 of 64 for one more rfPerInsert, takes only the 32 a nearly-full barrel has room for and charges NOTHING for the partial insert, moves nothing and charges nothing against a full barrel (the player keeps 64), refuses a box with no routable inventory (there are no routable inventories, no charge) and refuses a chest (not a storage scanner); THE GIVE PATH hands the whole stack (64) straight to the player from a chest of 64, empties the chest and charges the FULL rfPerRequest (5000 -> 4900) with the out slot still holding the request counterfactual's dirt (it has no out slot), hands exactly one item with [single] (chest 3 -> 2, buffer 4900 -> 4800), refuses a kind nothing holds and charges nothing, and refuses below the full price with the price line (costs 100, have 99) without touching the chest, and a give on a chest is refused as not a storage scanner; the loot table drops the scanner on a survival break; the modular storage still answers 0/0 empty no module; a barrel answers not a storage scanner to the same commands; and THE ROUTABLE STAR LIST starts empty (a fresh scanner's tick routes its 64 stone nowhere and still pays one rfPerInsert), routes only the starred chest (B takes 64 while the un-starred A stays empty), still lists the un-starred A's 32 dirt in the scan (the star filters routing, not the list), restores the walk when A is re-starred (A 96), and survives a relaunch (the saved list names A, which then takes another stack, 160); THE EXPORT CHOICE (the GUI's 'Export to current container') sends the in-slot's 64 stone only to the selected inventory (B 64, A 0) for one rfPerInsert, follows the list's row (selecting A makes A 64 while B keeps its 64), saves the choice and the selection with the block so both survive a relaunch, does not fall through to the walk from a selected full barrel (the in-slot keeps its 64 and A and B stay at 64), and 'export first' restores the starred walk, which routes the same stack to B (128); THE ROW CONTENTS VIEW (the GUI list's per-row contents) answers 'contents B' with B's 128 stone and 'contents A' with A's 64 at buffer 0 and leaves the buffer at 0 (a listing is not a request), lists only the starred inventories in 'contents all' (un-starring B leaves A's 64 while B's own row still lists its 128, with nothing starred the all row is 'empty', and starring B alone lists 128), and refuses a cell outside the box, the scanner's own cell and an empty cell with 'is not an inventory in the scan box', also free"

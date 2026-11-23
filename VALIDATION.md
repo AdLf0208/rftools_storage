@@ -2,12 +2,12 @@
 
 Slice 1 (the `modular_storage` block with a tier-1 storage module).
 
-**Version 0.2.13 is the current SDK package (2026-11-23):** one flat `.hmod`, SDK
+**Version 0.2.14 is the current SDK package (2026-11-23):** one flat `.hmod`, SDK
 nightly `0a875da91dbb0fdcb7ba8c42c11341aa229af51a`, mixins
-`e59da9094f0c2fdda6c627fe9eff22dec6a906f0`. **§0l is this slice's evidence (the
-scanner's routable star list) and is where slice 12's in-game legs are**; **§0m is
-slice 13's evidence (the scanner's export choice) and is where this slice's in-game
-legs are**; §0k is slice
+`e59da9094f0c2fdda6c627fe9eff22dec6a906f0`. **§0n is this slice's evidence (the
+scanner list's row contents view) and is where slice 14's in-game legs are**; **§0l is
+slice 12's evidence (the scanner's routable star list)**, **§0m is
+slice 13's (the scanner's export choice)**; §0k is slice
 11's (the scan list's sort choice), §0j is slice 10's
 (the scan's search filter), §0i is
 slice 9's (the scanner's insert-from-screen path), §0h slice 8's (the
@@ -22,6 +22,74 @@ history. The 0.2.x `tools/e2e.sh` runs on a launcher-built game
 Every command below ran through `ports/tools/build-slot.sh` (a lease per step);
 in 0.1.0 compile steps forwarded to the second machine and game legs ran locally
 because the script uses `--offscreen`.
+
+## 0n. The scanner list's row contents view — version 0.2.14 (2026-11-23)
+
+Slice 14: the list's **per-row contents** (`StorageScannerTileEntity.getInventoryForBlock`),
+reached as `/rftoolsstorage contents <pos> <target>` and `/rftoolsstorage contents <pos> all`.
+A cell lists that one inventory's contents — starred or **not**, because the single-row branch has no
+`isRoutable` test; `all` is the list's first **"All routable"** line (upstream's `(-1, -1, -1)`
+sentinel) and lists **only the starred** inventories, the `countItems(…, starred = true)` half of the
+star. A listing is **not a request**: `getInventoryForBlock` never calls `consumeEnergy`, so
+`contents` costs **no FE** and answers at an empty buffer, while `scan` stays the priced request
+substitute (slice 5's deviation 1). The rows are the cells the scan found (in the box, not the
+scanner, an item capability), so an outside cell, the scanner's own cell and an empty cell are
+refused with `… is not an inventory in the scan box`. The saved sort orders the listing; the search
+box stays `scan`'s typed argument. `scan` still lists the whole box (unchanged). Ladder and package
+logs: `ports/_shared/evidence/rftoolsstorage/`; game legs:
+`ports/_shared/evidence/rftoolsstorage-e2e/`.
+
+| Step | Command | Result | Log |
+|---|---|---|---|
+| red proof | `cargo test` with `in_scan_box`/`contents_row` false and `contents_line`/`contents_refused_line` empty | **FAILED. 54 passed; 3 failed**, `TEST_EXIT:101` | `slice14-red.log` |
+| tests | `cargo test` | `running 57 tests` → **57 passed**, 0 failed, `TEST_EXIT:0` (51 runtime + 6 glue) | `sdk-test.log`, `slice14-test.log` |
+| lints | `cargo clippy --all-targets -- -D warnings` | `Finished`, **CLIPPY_EXIT:0**, 0 warnings (the first run flagged `cloned_ref_to_slice_refs` in a new test; fixed with `std::slice::from_ref`) | `slice14-clippy.log` |
+| format | `rustfmt --edition 2024 --check src/{lib,support,runtime}.rs` | `FMT_EXIT:0` after the wrapped `contents_readout` match arm was formatted | `slice14-fmt.log` |
+| SDK gate | `cargo horizon-mod check` | **TREE_CHECK_EXIT:0** — *"… 540 items of the API (5 Part kinds, 2 capabilitys, 149 fields or variants, 18 hooks, 52 hook arguments, 2 macros, 168 methods, 29 traits, 115 types). Made for 0a875da."* | `slice14-tree-check.log` |
+| package | `rm -f Cargo.lock && cargo horizon-mod build`, twice | **101,409 B**, SHA-256 `4fde9c1eff9f97aea14f1324981d3c872e1b8d41d2155117dbe8d8bf22b53463`, **`cmp`-identical** (the first delivered build, 101,395 B / `8d839714…`, was rebuilt after the README's "What is not ported" line was corrected; `verify-sdk-package` had caught it as `differs: README.md`) | `slice14-build-1.log`, `slice14-build-2.log` |
+| package check | `cargo horizon-mod check rftoolsstorage.hmod` | `rftoolsstorage 0.2.14 (native-mod, format native-1/0a875da…/e59da90…, for 26.3)`, **101,409 bytes**, `4fde9c1e…3463`, **FILE_CHECK_EXIT:0** | `slice14-check.log` |
+| entries | `unzip -l rftoolsstorage.hmod` | **67 files**, no `Cargo.lock`; `src/runtime.rs` byte-identical in tree and package (`2badcc21abb7`) | — |
+| fits, the pin | `cargo horizon-mod fits rftoolsstorage.hmod --build 0a875da` | `0a875da  made for`, **FITS_PIN_EXIT:0** | `slice14-fits.log` |
+| fits, another build | `cargo horizon-mod fits rftoolsstorage.hmod --build 0b14f8a` | `0b14f8a  fits`, **FITS_OTHER_EXIT:0** | `slice14-fits.log` |
+| launcher build | `BUILD_LOCAL=1 ports/tools/launcher-game.sh build rftoolsstorage` (the two stale `native-*` tags carrying 0.2.13 removed first) | `Compiling rftoolsstorage (1 of 1)`, tag `native-0a875da-3123db72eda1`, **LAUNCHER_BUILD_EXIT:0** | `slice14-launcher-build.log` |
+| in game | `build-slot.sh run --job e2e-rftoolsstorage --step e2e -- bash ports/rftoolsstorage/tools/e2e.sh` (`CONTROL_GAME=`) | **PASS** + `EXIT:0` | `rftoolsstorage-e2e/e2e-contents.log` |
+| control | the same leg on the Nightly **without** the package | **FAIL** + `EXIT:1` (`{"error":"unknown item rftoolsstorage:storage_scanner"}`) | `e2e-contents-control.log` |
+| selftest (this slice) | `CONTENTS_SELFTEST=1` (asserts the row view of B DID list 128) | **FAIL** + `EXIT:1` — *"the row view of B answered 'rftoolsstorage:storage_scanner: contents 13 102 0: minecraft:stone 128' for the 128 stone it holds …"* | `e2e-contents-selftest.log` |
+| e2e gate | `python3 ports/tools/check-e2e-logs.py rftoolsstorage-e2e --strict` | `logs=39  ok=39  missing-exit=0  bad-exit=0`, exit 0 | — |
+| package gate | `python3 ports/tools/verify-sdk-package.py rftoolsstorage` | `1/1 package(s) verified`, exit 0 | — |
+| recipe types | `python3 ports/tools/check-recipe-types.py rftoolsstorage` | `rftoolsstorage: ok`, exit 0 | — |
+| skills gate | `python3 ports/tools/check-skills.py --notes ports/rftoolsstorage --strict` | PASS | — |
+
+The default leg's contents phase (abridged; the log has every `ctl` reply):
+
+```
+radius: rftoolsstorage:storage_scanner: radius 2
+star A: rftoolsstorage:storage_scanner: routable 15 102 10 on
+star B: rftoolsstorage:storage_scanner: routable 13 102 12 on
+contents B: rftoolsstorage:storage_scanner: contents 13 102 12: minecraft:stone 128
+contents A: rftoolsstorage:storage_scanner: contents 15 102 10: minecraft:stone 64
+energy after two row listings: 0/50000
+un-star B: rftoolsstorage:storage_scanner: routable 13 102 12 off
+contents all (B unstarred): rftoolsstorage:storage_scanner: contents all: minecraft:stone 64
+contents B (unstarred): rftoolsstorage:storage_scanner: contents 13 102 12: minecraft:stone 128
+un-star A: rftoolsstorage:storage_scanner: routable 15 102 10 off
+contents all (nothing starred): rftoolsstorage:storage_scanner: contents all: empty
+star B again: rftoolsstorage:storage_scanner: routable 13 102 12 on
+contents all (B only): rftoolsstorage:storage_scanner: contents all: minecraft:stone 128
+contents at S+3 (outside radius 2): rftoolsstorage:storage_scanner: 16 102 10 is not an inventory in the scan box
+contents of the scanner itself: rftoolsstorage:storage_scanner: 13 102 10 is not an inventory in the scan box
+contents of an empty cell: rftoolsstorage:storage_scanner: 14 102 10 is not an inventory in the scan box
+energy after three refusals: 0/50000
+```
+
+The brief's rig: scanner at S = 13,102,10, radius 2, A at S+2 on **x** holding 64 stone, B at S+2 on
+**z** holding 128 stone, both starred, buffer **0**. The two rows answer differently (128 vs 64), so
+the target selects the inventory; the buffer never moves (0 before and after two listings and three
+refusals), which is the fail-capable half of "a listing is not a request"; un-starring B drops it from
+the all row while **B's own row still lists its 128**, the single-row branch's missing `isRoutable`
+test; with nothing starred the all row is `empty` and starring B alone lists 128; and an outside
+cell, the scanner's own cell and an empty cell are each refused with the same reason.
+`CONTENTS_SELFTEST=1` inverts the first assertion and the run ends `FAIL:` + `EXIT:1`.
 
 ## 0m. The scanner's export choice — version 0.2.13 (2026-11-23)
 
