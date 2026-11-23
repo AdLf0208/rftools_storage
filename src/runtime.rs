@@ -1142,6 +1142,269 @@ pub fn no_routable_line(stored: u32) -> String {
     format!("there are no routable inventories ({stored}/{SCANNER_MAX_ENERGY} FE)")
 }
 
+// --- the crafting grid's pattern and craft-from-storage (slice 15) --------
+
+/// The pattern's cells: upstream's nine ghost inputs
+/// (`CraftingGridInventory.SLOT_GHOSTINPUT + 0..9`), row by row, cell 1 the top
+/// left. The ghost output (`SLOT_GHOSTOUTPUT`) is not stored: it is what the
+/// engine makes of the cells, computed when the pattern is read, as
+/// `GuiCraftingGrid.testRecipe` computes it on the client.
+pub const PATTERN_CELLS: usize = 9;
+
+/// One of the GUI's four craft buttons (`GuiCraftingGrid`: `1`, `4`, `8` and
+/// `*`, the last upstream's `craftItems(player, -1, …)`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Batch {
+    One,
+    Four,
+    Eight,
+    /// The `*` button: a whole stack of results (upstream's `-1`).
+    Stack,
+}
+
+impl Batch {
+    /// The button the command's word names; `None` for anything else.
+    #[must_use]
+    pub fn from_word(word: &str) -> Option<Self> {
+        match word {
+            "1" => Some(Self::One),
+            "4" => Some(Self::Four),
+            "8" => Some(Self::Eight),
+            "stack" => Some(Self::Stack),
+            _ => None,
+        }
+    }
+
+    /// The count the button asks for; `None` is upstream's `-1`, the result's own
+    /// stack size.
+    #[must_use]
+    pub fn wanted(self) -> Option<u32> {
+        match self {
+            Self::One => Some(1),
+            Self::Four => Some(4),
+            Self::Eight => Some(8),
+            Self::Stack => None,
+        }
+    }
+
+    /// The button's face, as the command takes it.
+    #[must_use]
+    pub fn word(self) -> &'static str {
+        match self {
+            Self::One => "1",
+            Self::Four => "4",
+            Self::Eight => "8",
+            Self::Stack => "stack",
+        }
+    }
+}
+
+/// How many times one craft runs (`StorageCraftingTools.craftItems`): `wanted` is
+/// the button's count (`None` the whole result stack), `result_count` what one set
+/// makes and `max_stack` the result item's own stack size. Upstream rounds up to a
+/// whole set and then drops one when the product would not fit one stack.
+pub fn craft_sets(wanted: Option<u32>, result_count: u32, max_stack: u32) -> u32 {
+    if result_count == 0 || max_stack == 0 {
+        return 0;
+    }
+    let mut sets = wanted.unwrap_or(max_stack);
+    let remainder = sets % result_count;
+    sets /= result_count;
+    if remainder != 0 {
+        sets += 1;
+    }
+    if sets.saturating_mul(result_count) > max_stack {
+        sets = sets.saturating_sub(1);
+    }
+    sets
+}
+
+/// What one pattern cell asks for: the cell (1..=9) and how many of its kind the
+/// batch needs (one a set, because a crafting grid's cell is one item a craft).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Need {
+    pub cell: usize,
+    pub kind: Kind,
+    pub count: u32,
+}
+
+/// One stack a craft may take from: a slot of a source. Upstream's
+/// `InventoriesItemSource` walks the player's inventory first and the storage
+/// second, and inside a source in slot order.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Held {
+    pub slot: usize,
+    pub kind: Kind,
+    pub count: u32,
+}
+
+/// One take: which source and slot, and how many.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Draw {
+    pub source: usize,
+    pub slot: usize,
+    pub count: u32,
+}
+
+/// A cell the sources cannot fill, and by how much (`tryRecipe`'s answer).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Short {
+    pub cell: usize,
+    pub kind: Kind,
+    pub short: u32,
+}
+
+/// The plan a batch's needs make over the sources: either every take, or the
+/// cells that are short — and then nothing is taken at all, as upstream undoes
+/// the walk when an ingredient is missing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CraftPlan {
+    Ready(Vec<Draw>),
+    Missing(Vec<Short>),
+}
+
+/// The batch's asks: every filled cell asks for `sets` of its kind.
+#[must_use]
+pub fn pattern_needs(cells: &[Option<Kind>], sets: u32) -> Vec<Need> {
+    cells
+        .iter()
+        .enumerate()
+        .filter_map(|(index, cell)| {
+            cell.as_ref().map(|kind| Need {
+                cell: index + 1,
+                kind: kind.clone(),
+                count: sets,
+            })
+        })
+        .collect()
+}
+
+/// Where the batch's items come from: the sources in upstream's order, each slot
+/// giving what it has. A short cell fails the whole plan, so a craft never takes
+/// half a set.
+#[must_use]
+pub fn craft_plan(needs: &[Need], sources: &[Vec<Held>]) -> CraftPlan {
+    // What each slot still holds, so two cells of one kind cannot spend the same
+    // stack twice (upstream's `findMatchingItems` extracts as it walks).
+    let mut available: Vec<Vec<u32>> = sources
+        .iter()
+        .map(|source| source.iter().map(|held| held.count).collect())
+        .collect();
+    let mut draws: Vec<Draw> = Vec::new();
+    let mut shorts = Vec::new();
+    for need in needs {
+        let mut remaining = need.count;
+        for (index, source) in sources.iter().enumerate() {
+            if remaining == 0 {
+                break;
+            }
+            for (at, held) in source.iter().enumerate() {
+                if remaining == 0 {
+                    break;
+                }
+                if held.kind.key != need.kind.key {
+                    continue;
+                }
+                let left = available[index][at];
+                if left == 0 {
+                    continue;
+                }
+                let take = remaining.min(left);
+                available[index][at] = left - take;
+                remaining -= take;
+                match draws.last_mut() {
+                    Some(last) if last.source == index && last.slot == held.slot => {
+                        last.count += take;
+                    }
+                    _ => draws.push(Draw {
+                        source: index,
+                        slot: held.slot,
+                        count: take,
+                    }),
+                }
+            }
+        }
+        if remaining > 0 {
+            shorts.push(Short {
+                cell: need.cell,
+                kind: need.kind.clone(),
+                short: remaining,
+            });
+        }
+    }
+    if shorts.is_empty() {
+        CraftPlan::Ready(draws)
+    } else {
+        CraftPlan::Missing(shorts)
+    }
+}
+
+/// The `/rftoolsstorage grid <pos>` readback: the cells that hold something, then
+/// what the engine makes of them (upstream's ghost output cell, computed instead
+/// of stored).
+#[must_use]
+pub fn pattern_line(cells: &[Option<Kind>], result: Option<(&Kind, u32)>) -> String {
+    let filled: Vec<String> = cells
+        .iter()
+        .enumerate()
+        .filter_map(|(index, cell)| {
+            cell.as_ref()
+                .map(|kind| format!("{}={}", index + 1, kind.label))
+        })
+        .collect();
+    if filled.is_empty() {
+        return "pattern empty".to_owned();
+    }
+    let cells = filled.join(", ");
+    match result {
+        Some((kind, count)) => format!("pattern {cells} -> {} x{count}", kind.label),
+        None => format!("pattern {cells} -> no recipe"),
+    }
+}
+
+/// The `/rftoolsstorage craft` answer for a batch that was made.
+#[must_use]
+pub fn crafted_line(count: u32, kind: &Kind) -> String {
+    format!("crafted {count} {}", kind.label)
+}
+
+/// What a batch could not find (`tryRecipe`'s per-cell answer), as one line.
+#[must_use]
+pub fn missing_line(shorts: &[Short]) -> String {
+    let listed: Vec<String> = shorts
+        .iter()
+        .map(|short| format!("cell {}: {} {}", short.cell, short.short, short.kind.label))
+        .collect();
+    format!("missing {}", listed.join(", "))
+}
+
+/// A pattern no recipe matches (`getCachedRecipe` empty: the jar's GUI then shows
+/// nothing, and nothing can be crafted).
+#[must_use]
+pub fn no_recipe_line() -> &'static str {
+    "the pattern crafts nothing"
+}
+
+/// A pattern with no cell filled.
+#[must_use]
+pub fn empty_pattern_line() -> &'static str {
+    "the pattern is empty"
+}
+
+/// A batch the game refused to complete (a write or a give the world turned down):
+/// every take is rolled back, so nothing left the sources.
+#[must_use]
+pub fn craft_failed_line() -> &'static str {
+    "the craft could not be completed; nothing was taken"
+}
+
+/// The cells are upstream's ghost ones: they are only editable on a locked storage
+/// (`GhostSlot.mayPlace`/`mayPickup` refuse while unlocked).
+#[must_use]
+pub fn pattern_locked_line() -> &'static str {
+    "lock the storage to change the pattern"
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2344,6 +2607,294 @@ mod tests {
         assert_eq!(
             contents_refused_line([19, 102, 10]),
             "19 102 10 is not an inventory in the scan box"
+        );
+    }
+
+    #[test]
+    fn the_four_craft_buttons_are_the_guis_and_the_count_is_upstreams_maths() {
+        // GuiCraftingGrid: craft1Button/craft4Button/craft8Button/craftSButton.
+        assert_eq!(Batch::from_word("1"), Some(Batch::One));
+        assert_eq!(Batch::from_word("4"), Some(Batch::Four));
+        assert_eq!(Batch::from_word("8"), Some(Batch::Eight));
+        assert_eq!(Batch::from_word("stack"), Some(Batch::Stack));
+        assert_eq!(
+            Batch::from_word("16"),
+            None,
+            "the GUI has four buttons, not a free count"
+        );
+        assert_eq!(
+            Batch::from_word("Stack"),
+            None,
+            "the command's words are exact"
+        );
+        assert_eq!(Batch::from_word(""), None);
+        assert_eq!(Batch::One.word(), "1");
+        assert_eq!(Batch::Four.word(), "4");
+        assert_eq!(Batch::Eight.word(), "8");
+        assert_eq!(Batch::Stack.word(), "stack");
+        assert_eq!(Batch::One.wanted(), Some(1));
+        assert_eq!(
+            Batch::Stack.wanted(),
+            None,
+            "the * button is craftItems' amount -1"
+        );
+
+        // craftItems: n = -1 → the result's max stack size; sets = ceil(n /
+        // resultCount); one set fewer when sets * resultCount would not fit a stack.
+        assert_eq!(
+            craft_sets(Some(1), 4, 64),
+            1,
+            "one craft of a 4-stick recipe is one set"
+        );
+        assert_eq!(craft_sets(Some(4), 4, 64), 1, "four sticks are one set");
+        assert_eq!(craft_sets(Some(8), 4, 64), 2, "eight sticks are two sets");
+        assert_eq!(
+            craft_sets(None, 4, 64),
+            16,
+            "the * button asks for a whole stack: 64 sticks, 16 sets"
+        );
+        assert_eq!(
+            craft_sets(Some(64), 1, 64),
+            64,
+            "a 1-result recipe: 64 sets"
+        );
+        assert_eq!(
+            craft_sets(Some(65), 1, 64),
+            64,
+            "past a stack the product is dropped back to one stack"
+        );
+        assert_eq!(
+            craft_sets(None, 3, 8),
+            2,
+            "a 3-result recipe in an 8 stack: 2"
+        );
+        assert_eq!(
+            craft_sets(None, 1, 16),
+            16,
+            "a 16-stack item's * button is 16 sets"
+        );
+        assert_eq!(craft_sets(Some(0), 4, 64), 0, "no count, nothing to craft");
+        assert_eq!(craft_sets(Some(8), 0, 64), 0, "a recipe with no result");
+        assert_eq!(craft_sets(Some(8), 4, 0), 0, "an item no game stack holds");
+    }
+
+    #[test]
+    fn the_pattern_asks_one_of_each_filled_cell_a_set() {
+        let planks = plain("minecraft:oak_planks");
+        let mut cells: Vec<Option<Kind>> = vec![None; PATTERN_CELLS];
+        cells[0] = Some(planks.clone());
+        cells[3] = Some(planks.clone());
+        let needs = pattern_needs(&cells, 1);
+        assert_eq!(
+            needs,
+            vec![
+                Need {
+                    cell: 1,
+                    kind: planks.clone(),
+                    count: 1
+                },
+                Need {
+                    cell: 4,
+                    kind: planks,
+                    count: 1
+                },
+            ],
+            "the cells are upstream's ghost inputs: cell 1 is the top left"
+        );
+        assert_eq!(
+            pattern_needs(&cells, 16)
+                .iter()
+                .map(|need| need.count)
+                .collect::<Vec<_>>(),
+            [16, 16],
+            "a batch of sixteen sets asks sixteen of every filled cell"
+        );
+        assert!(
+            pattern_needs(&vec![None; PATTERN_CELLS], 1).is_empty(),
+            "an empty pattern asks nothing"
+        );
+    }
+
+    #[test]
+    fn the_sources_are_walked_in_order_and_a_short_cell_fails_the_whole_plan() {
+        let planks = plain("minecraft:oak_planks");
+        let sticks = plain("minecraft:stick");
+        let needs = vec![
+            Need {
+                cell: 1,
+                kind: planks.clone(),
+                count: 2,
+            },
+            Need {
+                cell: 4,
+                kind: planks.clone(),
+                count: 2,
+            },
+        ];
+        // The player's inventory first (upstream's `InvWrapper(player)`), then the
+        // storage: one plank in the player's slot 5, three in the storage's slot 0.
+        let player = vec![Held {
+            slot: 5,
+            kind: planks.clone(),
+            count: 1,
+        }];
+        let storage = vec![
+            Held {
+                slot: 0,
+                kind: sticks,
+                count: 64,
+            },
+            Held {
+                slot: 1,
+                kind: planks.clone(),
+                count: 3,
+            },
+        ];
+        assert_eq!(
+            craft_plan(&needs, &[player.clone(), storage.clone()]),
+            CraftPlan::Ready(vec![
+                Draw {
+                    source: 0,
+                    slot: 5,
+                    count: 1
+                },
+                Draw {
+                    source: 1,
+                    slot: 1,
+                    count: 3
+                },
+            ]),
+            "the player's plank goes first, the storage's three fill the rest"
+        );
+        // A cell short by one fails everything: nothing is taken at all.
+        assert_eq!(
+            craft_plan(
+                &needs,
+                &[
+                    vec![Held {
+                        slot: 5,
+                        kind: planks.clone(),
+                        count: 1
+                    }],
+                    vec![Held {
+                        slot: 1,
+                        kind: planks.clone(),
+                        count: 2
+                    }],
+                ],
+            ),
+            CraftPlan::Missing(vec![Short {
+                cell: 4,
+                kind: planks.clone(),
+                short: 1
+            }]),
+            "a cell one short fails the whole plan, as upstream undoes its walk"
+        );
+        assert_eq!(
+            craft_plan(&needs, &[Vec::new(), Vec::new()]),
+            CraftPlan::Missing(vec![
+                Short {
+                    cell: 1,
+                    kind: planks.clone(),
+                    short: 2
+                },
+                Short {
+                    cell: 4,
+                    kind: planks,
+                    short: 2
+                },
+            ]),
+            "every short cell is named, in cell order"
+        );
+        // Two cells of the same kind take from one slot without doubling it.
+        assert_eq!(
+            craft_plan(
+                &needs,
+                &[vec![Held {
+                    slot: 0,
+                    kind: plain("minecraft:oak_planks"),
+                    count: 3
+                }]],
+            ),
+            CraftPlan::Missing(vec![Short {
+                cell: 4,
+                kind: plain("minecraft:oak_planks"),
+                short: 1
+            }]),
+            "a slot's four planks are not counted twice for two cells"
+        );
+        assert_eq!(
+            craft_plan(
+                &[Need {
+                    cell: 1,
+                    kind: plain("minecraft:oak_planks"),
+                    count: 1
+                }],
+                &[vec![Held {
+                    slot: 0,
+                    kind: plain("minecraft:oak_planks"),
+                    count: 3
+                }]],
+            ),
+            CraftPlan::Ready(vec![Draw {
+                source: 0,
+                slot: 0,
+                count: 1
+            }]),
+            "a slot gives only what the cell asks for"
+        );
+    }
+
+    #[test]
+    fn the_pattern_craft_and_missing_replies_name_what_happened() {
+        let planks = plain("minecraft:oak_planks");
+        let sticks = plain("minecraft:stick");
+        let mut cells: Vec<Option<Kind>> = vec![None; PATTERN_CELLS];
+        cells[0] = Some(planks.clone());
+        cells[3] = Some(planks.clone());
+        assert_eq!(
+            pattern_line(&cells, Some((&sticks, 4))),
+            "pattern 1=minecraft:oak_planks, 4=minecraft:oak_planks -> minecraft:stick x4"
+        );
+        assert_eq!(
+            pattern_line(&cells, None),
+            "pattern 1=minecraft:oak_planks, 4=minecraft:oak_planks -> no recipe"
+        );
+        assert_eq!(
+            pattern_line(&vec![None; PATTERN_CELLS], None),
+            "pattern empty"
+        );
+        assert_eq!(
+            crafted_line(4, &sticks),
+            "crafted 4 minecraft:stick",
+            "the result reaches the player's inventory"
+        );
+        assert_eq!(
+            missing_line(&[
+                Short {
+                    cell: 1,
+                    kind: planks.clone(),
+                    short: 2
+                },
+                Short {
+                    cell: 4,
+                    kind: sticks.clone(),
+                    short: 1
+                },
+            ]),
+            "missing cell 1: 2 minecraft:oak_planks, cell 4: 1 minecraft:stick"
+        );
+        assert_eq!(no_recipe_line(), "the pattern crafts nothing");
+        assert_eq!(empty_pattern_line(), "the pattern is empty");
+        assert_eq!(
+            craft_failed_line(),
+            "the craft could not be completed; nothing was taken",
+            "a refused batch is rolled back, so nothing left the sources"
+        );
+        assert_eq!(
+            pattern_locked_line(),
+            "lock the storage to change the pattern",
+            "upstream's ghost cells refuse a place while the storage is unlocked"
         );
     }
 }

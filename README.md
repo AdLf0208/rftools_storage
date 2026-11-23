@@ -65,6 +65,19 @@ jar's `getInventoryForBlock` never spends the buffer); a cell the scan did not f
 outside the box, the scanner itself, another scanner or an empty cell — is refused
 with `… is not an inventory in the scan box`.
 
+**The storage's crafting grid.** The jar's side panel (`CraftingGridInventory`,
+`GuiCraftingGrid`) is a nine-cell recipe **memory** — its ghost cells hold items and
+never take them — plus four craft buttons (`1`, `4`, `8`, `*`) that craft out of the
+player's inventory and then the **locked** storage's contents, handing the result
+straight to the player. The pin has no ghost slot kind (a mod menu declares slots,
+data slots and take-only `results`, and nothing tells a mod that a result was
+taken), so the memory is the block's saved `grid` key and the buttons are
+`/rftoolsstorage craft <x> <y> <z> <1|4|8|stack>`;
+`/rftoolsstorage grid <x> <y> <z>` reads the pattern and what the recipe table makes
+of it, `grid … <cell 1..9> <item>` fills a cell (a cell is only editable while the
+storage is locked, as the jar's ghost cells are) and `grid … clear` empties them. A
+batch the sources cannot cover takes nothing and answers what is missing per cell.
+
 ## Commands
 
 | Command | What it does |
@@ -82,6 +95,10 @@ with `… is not an inventory in the scan box`.
 | `/rftoolsstorage request <x> <y> <z> <item> [n]` | pulls a kind out of the scanned inventories into the player (a tenth price for an explicit count) |
 | `/rftoolsstorage give <x> <y> <z> <item> [single]` | hands a whole stack (or one item with `single`) straight to the player for the full price; no out slot |
 | `/rftoolsstorage insert <x> <y> <z> <item> [n]` | pushes the player's stack (or `n` of it) into the scanned inventories; one `rfPerInsert`, charged only when the stack emptied |
+| `/rftoolsstorage grid <x> <y> <z>` | the storage's crafting pattern and what the recipe table makes of it |
+| `/rftoolsstorage grid <x> <y> <z> <cell 1..9> <item>` | fills a pattern cell (the jar's ghost cells; locked storage only; `minecraft:air` empties one) |
+| `/rftoolsstorage grid <x> <y> <z> clear` | empties the whole pattern |
+| `/rftoolsstorage craft <x> <y> <z> <1\|4\|8\|stack>` | the GUI's four craft buttons: crafts the pattern out of the player's inventory and then the locked storage, handing the result over |
 
 They need an operator or a player within 8 blocks of the block.
 
@@ -96,7 +113,10 @@ no-player fallback, the XNet access settings (per-path input/output permissions)
 caller; its behaviour is carried as `/rftoolsstorage give`),
 the scanner's remote/tablet variant, the claimed-land check
 (the pin has no claim API), storage tiers 2-4, the remote module and block, the
-type/filter/dump/control modules, the tablet, the crafting grid, the comparator
+type/filter/dump/control modules, the tablet, the crafting grid's **six saved
+recipes** and its visual ghost panel (the pattern and the four craft buttons are
+carried; the pin has no ghost slot kind, so there is no panel to show it in), the
+comparator
 output, the compat layers (JEI, TOP, XNet, RFToolsUtility), the `list`/`restore`
 commands and the config. The fill-level overlay (`amount`, `type`) is declared and
 carried but never written — exactly as in 1.21.1, where `getRenderLevel()` is a
@@ -113,7 +133,7 @@ the old `.hnmod` pin (`1d63e0a5…` / `5a64af93…`) is retired with the format.
 
 ```sh
 cd ports/rftoolsstorage
-cargo test                                    # the pure rules: 48 runtime tests + 6 glue tests (54)
+cargo test                                    # the pure rules: 55 runtime tests + 7 glue tests (62)
 cargo clippy --all-targets -- -D warnings
 rustfmt --edition 2024 --check src/lib.rs src/support.rs src/runtime.rs
 cargo horizon-mod check                       # the SDK gate: format, manifest, code, API usage
@@ -132,23 +152,23 @@ then `GAME=<that horizon-client> tools/e2e.sh`. The scenario has its
 counterfactual (`COUNTERFACTUAL=1`, a vanilla barrel) and its selftest
 (`SELFTEST=1`, `REQUEST_SELFTEST=1`, `GIVE_SELFTEST=1`, `INSERT_SELFTEST=1`,
 `SCAN_SELFTEST=1`, `SORT_SELFTEST=1`, `ROUTABLE_SELFTEST=1`,
-`EXPORT_SELFTEST=1` and `CONTENTS_SELFTEST=1`, must fail).
+`EXPORT_SELFTEST=1`, `CONTENTS_SELFTEST=1` and `CRAFT_SELFTEST=1`, must fail).
 
 Evidence and the exact commands: [`VALIDATION.md`](VALIDATION.md).
 
 ## Layout
 
 ```
-horizon-mod.toml        the only manifest: id, version 0.2.14, api "0.2", side "both",
+horizon-mod.toml        the only manifest: id, version 0.2.15, api "0.2", side "both",
                         capabilities, [native] game/horizon/mixins
 Cargo.toml              one crate; horizon-mod-api from .horizon/sdk
 src/lib.rs              the one #[mod_api::horizon_mod] impl Hooks (register, right_click_block,
                         block_drops, register_commands, run_mod_command, player_container_open)
-src/runtime.rs          the pure rules (the storage's, the menu's, the carried payload's and
-                        the scanner's, with their tests)
+src/runtime.rs          the pure rules (the storage's, the menu's, the carried payload's, the
+                        scanner's and the crafting pattern's, with their tests)
 src/support.rs          the game glue: the block-entity Parts, the container, the menu, the
                         click, the carried payload and the commands (readout, scan, contents,
-                        radius, sort, routable, export, select, request, give, insert)
+                        radius, sort, routable, export, select, request, give, insert, grid, craft)
 assets/rftoolsstorage/  blockstates, models, textures and lang, carried from the jar
 data/rftoolsstorage/    the block and item declarations, the creative tab, loot tables, recipes, tags
 data/minecraft/         the pickaxe/iron-tool tags the blocks join

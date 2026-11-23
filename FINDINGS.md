@@ -162,9 +162,11 @@ The modules are `stacksTo(1)` items.
   functional yet".
 - **Storage tiers 2-4** (`storage_module1..3`), the **remote** module and block,
   the **type modules** (`generic`/`oredict`), the **filter module**, the **dump
-  module**, the **storage control module**, the **tablet**, the **crafting
-  grid**, the JEI/TOP/XNet/RFToolsUtility compat, the two commands
-  (`/rftoolsstorage list|restore`) and the config.
+  module**, the **storage control module**, the **tablet**, the JEI/TOP/XNet/
+  RFToolsUtility compat, the two commands (`/rftoolsstorage list|restore`) and the
+  config. (The **crafting grid** is no longer a gap as a whole: slice 15 carries
+  its pattern and its four craft buttons; the six saved recipes and the visual
+  ghost panel stay out — `notes.md`, slice 15.)
 - The GUI (search/sort/compact/cycle, the padlock button) — the pin has no
   windowed click path in a headless harness, so this slice's player surface is
   right-click, see `notes.md`.

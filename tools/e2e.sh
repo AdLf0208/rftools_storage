@@ -113,6 +113,29 @@
 #      a cell outside the box, the scanner's own cell and a cell with no inventory
 #      are all refused with `is not an inventory in the scan box`, still free.
 #
+#  22. **the crafting grid (slice 15)**: the jar's ghost pattern (`CraftingGridInventory`:
+#      nine memory cells and a derived output) and its four craft buttons
+#      (`StorageCraftingTools.craftItems`), carried as `/rftoolsstorage grid` and
+#      `/rftoolsstorage craft`. A fresh block's pattern is empty and a craft refuses;
+#      a cobblestone cell matches no recipe (and takes nothing) while one plank is the
+#      shapeless oak button and two planks in the stick shape are `minecraft:stick x4`
+#      — the game's own table, not a hardcoded recipe — and the block's saved `grid`
+#      key holds the cells; `craft 1` makes 4 sticks out of the storage's planks for
+#      **one** set and takes exactly one plank a cell (8 -> 6), `craft 4` is one set
+#      (4 -> 2) and `craft 8` two (2 -> 0, 16 sticks); an empty storage answers
+#      `missing cell 1: 16 …, cell 4: 16 …` and takes nothing, and `craft stack` takes
+#      16 planks a cell for 64 sticks; the **player's inventory is the first source**
+#      (upstream's `InvWrapper` order): 2 planks of the player's go before the
+#      storage's 8, which stays at 8; an **unlocked** storage hands nothing out
+#      (`GlobalStorageItemWrapper.extractItem`), so the same craft answers `missing 1`
+#      a cell and the storage keeps its planks, and a cell write is refused with
+#      `lock the storage to change the pattern` (the jar's ghost cells); the pattern
+#      is the block's saved `grid` key, so it survives a relaunch and crafts again;
+#      `grid <pos> clear` empties it; a barrel answers `not a modular storage`.
+#
+# The newly-ported phase's inverted run is **CRAFT_SELFTEST=1**: it asserts the craft
+# did NOT make the sticks (the run MUST end `FAIL:` + `EXIT:1`).
+#
 # SELFTEST=1 keeps the scenario and asserts that the tick did NOT push the stone
 # into the chest, so the run MUST fail with a `FAIL:` verdict (the assertion the
 # slice rests on is proved able to fail). REQUEST_SELFTEST=1 does the same for the
@@ -158,6 +181,7 @@ SORT_SELFTEST=${SORT_SELFTEST:-0}
 ROUTABLE_SELFTEST=${ROUTABLE_SELFTEST:-0}
 EXPORT_SELFTEST=${EXPORT_SELFTEST:-0}
 CONTENTS_SELFTEST=${CONTENTS_SELFTEST:-0}
+CRAFT_SELFTEST=${CRAFT_SELFTEST:-0}
 
 SCANNER=rftoolsstorage:storage_scanner
 STORAGE=rftoolsstorage:modular_storage
@@ -307,6 +331,51 @@ insert_cmd() { # x y z item [count]
     echo "$line"
 }
 energy_of() { data_block "$1" "$2" "$3" energy; }
+grid_cmd() { # x y z — the pattern readback
+    local line
+    line=$(reply grid "$1" "$2" "$3")
+    [ -n "$line" ] || fail "the grid readback at $1,$2,$3 answered nothing: $(ctl messages 6 | jq -c '.chat')"
+    echo "$line"
+}
+grid_set() { # x y z cell item
+    local line
+    line=$(reply grid "$1" "$2" "$3" "$4" "$5")
+    [ -n "$line" ] || fail "grid $4 $5 answered nothing: $(ctl messages 6 | jq -c '.chat')"
+    echo "$line"
+}
+grid_clear() { # x y z
+    local line
+    line=$(reply grid "$1" "$2" "$3" clear)
+    [ -n "$line" ] || fail "grid clear answered nothing: $(ctl messages 6 | jq -c '.chat')"
+    echo "$line"
+}
+craft_cmd() { # x y z 1|4|8|stack
+    local line
+    line=$(reply craft "$1" "$2" "$3" "$4")
+    [ -n "$line" ] || fail "craft $4 answered nothing: $(ctl messages 6 | jq -c '.chat')"
+    echo "$line"
+}
+# A storage seeded for the crafting-grid legs: `count` oak planks in its first
+# storage slot and a tier-1 module in the card slot (100), locked (so it hands
+# items out, as upstream's wrapper does only while locked).
+seed_crafting_storage() { # x y z planks [locked]
+    local items
+    items="{Slot: 0b, id: \"minecraft:oak_planks\", count: $4}"
+    if [ "${5:-1}" = 1 ]; then
+        items="$items, {Slot: 100b, id: \"rftoolsstorage:storage_module0\", count: 1}"
+    fi
+    ctl command "data merge block $1 $2 $3 {Items: [$items], locked: ${5:-1}b}" >/dev/null
+    ctl wait 4 >/dev/null
+}
+# The planks in the crafting rig's storage slot 0. `Items` is a *list*, so
+# `Items[0]` stops being slot 0 the moment a slot empties (the module's entry moves
+# to the front): read the entry that names `Slot: 0b`.
+planks_at() { # x y z
+    local line n
+    line=$(data_reply "$1" "$2" "$3" Items)
+    n=$(printf '%s' "$line" | sed -n 's/.*{count: \([0-9]*\), Slot: 0b, id: "minecraft:oak_planks"}.*/\1/p')
+    echo "${n:-0}"
+}
 
 # --- the inject tick (slice 6) --------------------------------------------
 # A /data get whose path may not exist: `/data get block … Items[0].count` on an
@@ -1619,6 +1688,165 @@ ctl setblock "$CONTENTS_A" "$SY" "$SZ" minecraft:air >/dev/null
 ctl setblock "$SX" "$SY" "$CONTENTS_B" minecraft:air >/dev/null
 ctl wait 4
 
+say "THE CRAFTING GRID: the pattern's nine cells and the four craft buttons, out of the storage's own contents"
+# Upstream's ghost panel: the nine cells are a recipe memory (CraftingGridInventory's
+# slot limit is 0), and the four buttons (1/4/8/*) craft out of the player's
+# inventory and then the (locked) storage. The pin has no ghost slot kind, so the
+# memory is the block's saved `grid` key and the buttons are `/rftoolsstorage craft`.
+CGX=$((X - 3))
+CGZ=$((Z1 + 6))
+ctl close >/dev/null 2>&1 || true
+ctl command "clear @a" >/dev/null
+ctl setblock "$CGX" "$((Y - 1))" "$CGZ" minecraft:stone >/dev/null
+ctl give "$STORAGE" 1 >/dev/null || fail "cannot give a modular storage for the crafting rig"
+ctl wait 6
+ctl select 1 >/dev/null || true
+ctl wait 6
+place_held "$CGX" "$Y" "$CGZ" "$STORAGE"
+seed_crafting_storage "$CGX" "$Y" "$CGZ" 8
+line=$(reply info "$CGX" "$Y" "$CGZ")
+echo "the crafting rig's storage: $line"
+echo "$line" | grep -q "^$STORAGE: 8/6400 minecraft:oak_planks locked$" \
+    || fail "the crafting rig's storage reads: $line"
+
+line=$(grid_cmd "$CGX" "$Y" "$CGZ")
+echo "pattern (fresh block): $line"
+[ "$line" = "$STORAGE: pattern empty" ] || fail "a fresh pattern read: $line"
+line=$(craft_cmd "$CGX" "$Y" "$CGZ" 1)
+echo "craft with an empty pattern: $line"
+[ "$line" = "$STORAGE: the pattern is empty" ] || fail "an empty pattern answered: $line"
+[ "$(count_item minecraft:stick)" = 0 ] || fail "an empty pattern made sticks"
+
+say "a cell of cobblestone is no recipe; one plank is the shapeless button — the game's own table matches"
+line=$(grid_set "$CGX" "$Y" "$CGZ" 1 minecraft:cobblestone)
+echo "grid 1 cobblestone: $line"
+[ "$line" = "$STORAGE: pattern 1=minecraft:cobblestone -> no recipe" ] || fail "a cobblestone cell read: $line"
+line=$(craft_cmd "$CGX" "$Y" "$CGZ" 1)
+echo "craft with no recipe: $line"
+[ "$line" = "$STORAGE: the pattern crafts nothing" ] || fail "a pattern no recipe matches crafted: $line"
+[ "$(planks_at "$CGX" "$Y" "$CGZ")" = 8 ] || fail "a pattern no recipe matches took planks"
+line=$(grid_set "$CGX" "$Y" "$CGZ" 1 minecraft:oak_planks)
+echo "grid 1 oak_planks: $line"
+[ "$line" = "$STORAGE: pattern 1=minecraft:oak_planks -> minecraft:oak_button x1" ] \
+    || fail "one plank is the shapeless button recipe, and the readback answered: $line"
+
+say "the stick recipe's shape (cells 1 and 4) makes 4 sticks; the pattern is the saved grid key"
+line=$(grid_set "$CGX" "$Y" "$CGZ" 4 minecraft:oak_planks)
+echo "grid 4 oak_planks: $line"
+[ "$line" = "$STORAGE: pattern 1=minecraft:oak_planks, 4=minecraft:oak_planks -> minecraft:stick x4" ] \
+    || fail "the stick pattern read: $line"
+saved=$(data_block "$CGX" "$Y" "$CGZ" grid)
+echo "saved grid key: $saved"
+case "$saved" in
+    *minecraft:oak_planks*) ;;
+    *) fail "the pattern is not in the block's saved grid key: $saved" ;;
+esac
+line=$(craft_cmd "$CGX" "$Y" "$CGZ" 1)
+echo "craft 1: $line"
+[ "$line" = "$STORAGE: crafted 4 minecraft:stick" ] || fail "the craft answered: $line"
+sticks=$(count_item minecraft:stick)
+planks=$(planks_at "$CGX" "$Y" "$CGZ")
+echo "after craft 1: sticks $sticks, storage planks $planks"
+[ "$sticks" = 4 ] || fail "the player holds $sticks sticks, expected 4"
+[ "$planks" = 6 ] || fail "the storage holds $planks planks, expected 6 (two consumed)"
+
+if [ "$CRAFT_SELFTEST" = 1 ]; then
+    say "CRAFT_SELFTEST: assert the craft did NOT make the sticks (must fail)"
+    fail "the craft made 4 minecraft:stick from the planks in the pattern's cells 1 and 4 (sticks 0 -> $sticks) and the storage fell to $planks planks, so this inverted assertion fails as it must"
+fi
+
+say "the batch buttons: 4 is one set, 8 is two, '*' is a whole stack of results"
+line=$(craft_cmd "$CGX" "$Y" "$CGZ" 4)
+echo "craft 4: $line"
+[ "$line" = "$STORAGE: crafted 4 minecraft:stick" ] || fail "craft 4 answered: $line"
+[ "$(planks_at "$CGX" "$Y" "$CGZ")" = 4 ] || fail "craft 4 did not take one plank per cell"
+line=$(craft_cmd "$CGX" "$Y" "$CGZ" 8)
+echo "craft 8: $line"
+[ "$line" = "$STORAGE: crafted 8 minecraft:stick" ] || fail "craft 8 answered: $line"
+[ "$(planks_at "$CGX" "$Y" "$CGZ")" = 0 ] || fail "craft 8 did not take two planks per cell"
+[ "$(count_item minecraft:stick)" = 16 ] || fail "the player holds $(count_item minecraft:stick) sticks, expected 16"
+
+say "an empty storage answers what is missing per cell, and takes nothing"
+line=$(craft_cmd "$CGX" "$Y" "$CGZ" stack)
+echo "craft stack with nothing to pull: $line"
+[ "$line" = "$STORAGE: missing cell 1: 16 minecraft:oak_planks, cell 4: 16 minecraft:oak_planks" ] \
+    || fail "the missing report answered: $line"
+[ "$(count_item minecraft:stick)" = 16 ] || fail "a refused batch still made sticks"
+seed_crafting_storage "$CGX" "$Y" "$CGZ" 32
+line=$(craft_cmd "$CGX" "$Y" "$CGZ" stack)
+echo "craft stack from 32 planks: $line"
+[ "$line" = "$STORAGE: crafted 64 minecraft:stick" ] || fail "craft stack answered: $line"
+[ "$(planks_at "$CGX" "$Y" "$CGZ")" = 0 ] || fail "craft stack did not take 16 planks per cell (32)"
+[ "$(count_item minecraft:stick)" = 80 ] || fail "the player holds $(count_item minecraft:stick) sticks, expected 80"
+
+say "the player's inventory is the first source (upstream's InvWrapper order), the storage the second"
+seed_crafting_storage "$CGX" "$Y" "$CGZ" 8
+ctl give minecraft:oak_planks 2 >/dev/null || fail "cannot give the player planks"
+ctl wait 8
+held=$(count_item minecraft:oak_planks)
+echo "the player holds $held planks, the storage 8"
+[ "$held" = 2 ] || fail "the player holds $held planks, expected 2"
+line=$(craft_cmd "$CGX" "$Y" "$CGZ" 1)
+echo "craft 1: $line"
+[ "$line" = "$STORAGE: crafted 4 minecraft:stick" ] || fail "the craft answered: $line"
+held=$(count_item minecraft:oak_planks)
+planks=$(planks_at "$CGX" "$Y" "$CGZ")
+echo "after the craft: the player holds $held planks, the storage $planks"
+[ "$held" = 0 ] || fail "the craft did not take the player's planks first ($held left)"
+[ "$planks" = 8 ] || fail "the craft reached into the storage while the player had the planks ($planks)"
+
+say "an unlocked storage hands nothing out: only the player's inventory is a source"
+line=$(reply lock "$CGX" "$Y" "$CGZ")
+echo "unlock: $line"
+[ "$line" = "$STORAGE: unlocked" ] || fail "the unlock answered: $line"
+line=$(craft_cmd "$CGX" "$Y" "$CGZ" 1)
+echo "craft on an unlocked storage: $line"
+[ "$line" = "$STORAGE: missing cell 1: 1 minecraft:oak_planks, cell 4: 1 minecraft:oak_planks" ] \
+    || fail "an unlocked storage fed the craft: $line"
+[ "$(planks_at "$CGX" "$Y" "$CGZ")" = 8 ] || fail "the unlocked storage lost planks"
+
+say "the pattern's cells are the ghost ones: nothing is written while the storage is unlocked"
+line=$(grid_set "$CGX" "$Y" "$CGZ" 2 minecraft:oak_planks)
+echo "grid 2 while unlocked: $line"
+[ "$line" = "$STORAGE: lock the storage to change the pattern" ] || fail "an unlocked pattern took a cell: $line"
+line=$(reply lock "$CGX" "$Y" "$CGZ")
+echo "lock again: $line"
+[ "$line" = "$STORAGE: locked" ] || fail "the lock answered: $line"
+line=$(grid_cmd "$CGX" "$Y" "$CGZ")
+echo "pattern after the refused write: $line"
+[ "$line" = "$STORAGE: pattern 1=minecraft:oak_planks, 4=minecraft:oak_planks -> minecraft:stick x4" ] \
+    || fail "the refused write changed the pattern: $line"
+
+say "the pattern is saved with the block: it survives a relaunch and still crafts"
+ctl quit >/dev/null 2>&1 || true
+sleep 5
+rm -f "$SOCK"
+launch "$GAME"
+ctl wait 20 >/dev/null
+line=$(grid_cmd "$CGX" "$Y" "$CGZ")
+echo "pattern after the relaunch: $line"
+[ "$line" = "$STORAGE: pattern 1=minecraft:oak_planks, 4=minecraft:oak_planks -> minecraft:stick x4" ] \
+    || fail "the relaunch lost the pattern: $line"
+seed_crafting_storage "$CGX" "$Y" "$CGZ" 2
+line=$(craft_cmd "$CGX" "$Y" "$CGZ" 1)
+echo "craft after the relaunch: $line"
+[ "$line" = "$STORAGE: crafted 4 minecraft:stick" ] || fail "the craft after the relaunch answered: $line"
+[ "$(count_item minecraft:stick)" = 88 ] || fail "the player holds $(count_item minecraft:stick) sticks, expected 88"
+
+say "the pattern's cells clear, and a cleared pattern crafts nothing"
+line=$(grid_clear "$CGX" "$Y" "$CGZ")
+echo "grid clear: $line"
+[ "$line" = "$STORAGE: pattern empty" ] || fail "grid clear answered: $line"
+line=$(craft_cmd "$CGX" "$Y" "$CGZ" 1)
+echo "craft after the clear: $line"
+[ "$line" = "$STORAGE: the pattern is empty" ] || fail "a cleared pattern crafted: $line"
+barrel=$((CGZ + 2))
+ctl setblock "$CGX" "$Y" "$barrel" minecraft:barrel >/dev/null
+ctl wait 4
+line=$(craft_cmd "$CGX" "$Y" "$barrel" 1)
+echo "craft on a barrel (not a modular storage): $line"
+[ "$line" = "minecraft:barrel: not a modular storage" ] || fail "a barrel answered: $line"
+
 say "the scanner's loot table drops its own item on a survival break"
 BX=$((X + 2))
 BZ=$((Z1 + 5))
@@ -1686,4 +1914,4 @@ echo "give rftoolsbase:machine_frame: $frame"
 echo "$frame" | grep -q 'unknown item' || fail "this build has rftoolsbase:machine_frame, so the recipe is not blocked and must be crafted: $frame"
 
 ctl close >/dev/null 2>&1 || true
-echo "PASS: the storage scanner places and reads back with its facing; a fresh one has no power (no power (0/50000 FE)) and reads nothing; at its default radius 1 it finds nothing two blocks away; /rftoolsstorage radius 2 widens the box and the scan answers minecraft:stone 64 for a chest two blocks away while the chest three away (minecraft:dirt 32) is outside it; radius 3 lists both, one entry a kind; every scan costs rfPerRequest (5,000 -> 4,900 -> 4,800 -> 4,700, printed in the reply); THE SCAN FILTER (the GUI's search box) keeps '@minecraft' listing both kinds, narrows 'dirt' to minecraft:dirt 32 and 'stone' to minecraft:stone 64, answers 'empty' for '@nomatch' with the price still paid (4,600), and leaves the unfiltered scan listing both (4,500) as the differential; THE SORT CHOICE orders the list (Amount- = dirt 64, stone 32, Amount+ = stone 32, dirt 64, Name = dirt 64, stone 32, Mod puts rftoolsstorage:storage_module0 after both minecraft kinds), and the saved AMOUNT_DESCENDING mode orders the list after a relaunch too (stone 64, dirt 32); an emptied buffer refuses with no power and reads nothing, and charging it again makes the scan answer again; scan and radius refuse a chest and the modular storage (not a storage scanner); the radius and the buffer survive a relaunch; THE INJECT TICK pushes 64 stone from the in-slot into the empty chest two blocks away so its Items[0] reads minecraft:stone x64 while the buffer drops by exactly one rfPerInsert (5000 -> 4980), and with the buffer at 0 the next stack stays in the slot and the chest keeps its 64, recharging proving the stall was the power (chest 128); the auto slot routes too (chest 160); items the game puts in the container are routed for one rfPerInsert; a stack nothing accepts is still charged one attempt (20 FE pays one, 19 pays none) and stays in the slot; the walk passes a full barrel for the chest behind it; the tick never writes the out slot; THE REQUEST PATH pulls 32 stone from a chest of 128 into the player's inventory (the reference's straight-to-inventory default), leaving the chest at 96 and the buffer at 4,990 for an explicit count, refuses a kind nothing holds and charges nothing, refuses below the price with the price line (costs 10, have 9), sends a ctl command's 16-stone request straight to the player too, and refuses a request whose out slot holds another kind without pulling or charging; THE INSERT PATH pushes the player's 64 stone into the chest two blocks away so its Items[0] reads minecraft:stone x64 and empties the player's stack for exactly one rfPerInsert (5000 -> 4980), inserts an explicit 10 of 64 for one more rfPerInsert, takes only the 32 a nearly-full barrel has room for and charges NOTHING for the partial insert, moves nothing and charges nothing against a full barrel (the player keeps 64), refuses a box with no routable inventory (there are no routable inventories, no charge) and refuses a chest (not a storage scanner); THE GIVE PATH hands the whole stack (64) straight to the player from a chest of 64, empties the chest and charges the FULL rfPerRequest (5000 -> 4900) with the out slot still holding the request counterfactual's dirt (it has no out slot), hands exactly one item with [single] (chest 3 -> 2, buffer 4900 -> 4800), refuses a kind nothing holds and charges nothing, and refuses below the full price with the price line (costs 100, have 99) without touching the chest, and a give on a chest is refused as not a storage scanner; the loot table drops the scanner on a survival break; the modular storage still answers 0/0 empty no module; a barrel answers not a storage scanner to the same commands; and THE ROUTABLE STAR LIST starts empty (a fresh scanner's tick routes its 64 stone nowhere and still pays one rfPerInsert), routes only the starred chest (B takes 64 while the un-starred A stays empty), still lists the un-starred A's 32 dirt in the scan (the star filters routing, not the list), restores the walk when A is re-starred (A 96), and survives a relaunch (the saved list names A, which then takes another stack, 160); THE EXPORT CHOICE (the GUI's 'Export to current container') sends the in-slot's 64 stone only to the selected inventory (B 64, A 0) for one rfPerInsert, follows the list's row (selecting A makes A 64 while B keeps its 64), saves the choice and the selection with the block so both survive a relaunch, does not fall through to the walk from a selected full barrel (the in-slot keeps its 64 and A and B stay at 64), and 'export first' restores the starred walk, which routes the same stack to B (128); THE ROW CONTENTS VIEW (the GUI list's per-row contents) answers 'contents B' with B's 128 stone and 'contents A' with A's 64 at buffer 0 and leaves the buffer at 0 (a listing is not a request), lists only the starred inventories in 'contents all' (un-starring B leaves A's 64 while B's own row still lists its 128, with nothing starred the all row is 'empty', and starring B alone lists 128), and refuses a cell outside the box, the scanner's own cell and an empty cell with 'is not an inventory in the scan box', also free"
+echo "PASS: the storage scanner places and reads back with its facing; a fresh one has no power (no power (0/50000 FE)) and reads nothing; at its default radius 1 it finds nothing two blocks away; /rftoolsstorage radius 2 widens the box and the scan answers minecraft:stone 64 for a chest two blocks away while the chest three away (minecraft:dirt 32) is outside it; radius 3 lists both, one entry a kind; every scan costs rfPerRequest (5,000 -> 4,900 -> 4,800 -> 4,700, printed in the reply); THE SCAN FILTER (the GUI's search box) keeps '@minecraft' listing both kinds, narrows 'dirt' to minecraft:dirt 32 and 'stone' to minecraft:stone 64, answers 'empty' for '@nomatch' with the price still paid (4,600), and leaves the unfiltered scan listing both (4,500) as the differential; THE SORT CHOICE orders the list (Amount- = dirt 64, stone 32, Amount+ = stone 32, dirt 64, Name = dirt 64, stone 32, Mod puts rftoolsstorage:storage_module0 after both minecraft kinds), and the saved AMOUNT_DESCENDING mode orders the list after a relaunch too (stone 64, dirt 32); an emptied buffer refuses with no power and reads nothing, and charging it again makes the scan answer again; scan and radius refuse a chest and the modular storage (not a storage scanner); the radius and the buffer survive a relaunch; THE INJECT TICK pushes 64 stone from the in-slot into the empty chest two blocks away so its Items[0] reads minecraft:stone x64 while the buffer drops by exactly one rfPerInsert (5000 -> 4980), and with the buffer at 0 the next stack stays in the slot and the chest keeps its 64, recharging proving the stall was the power (chest 128); the auto slot routes too (chest 160); items the game puts in the container are routed for one rfPerInsert; a stack nothing accepts is still charged one attempt (20 FE pays one, 19 pays none) and stays in the slot; the walk passes a full barrel for the chest behind it; the tick never writes the out slot; THE REQUEST PATH pulls 32 stone from a chest of 128 into the player's inventory (the reference's straight-to-inventory default), leaving the chest at 96 and the buffer at 4,990 for an explicit count, refuses a kind nothing holds and charges nothing, refuses below the price with the price line (costs 10, have 9), sends a ctl command's 16-stone request straight to the player too, and refuses a request whose out slot holds another kind without pulling or charging; THE INSERT PATH pushes the player's 64 stone into the chest two blocks away so its Items[0] reads minecraft:stone x64 and empties the player's stack for exactly one rfPerInsert (5000 -> 4980), inserts an explicit 10 of 64 for one more rfPerInsert, takes only the 32 a nearly-full barrel has room for and charges NOTHING for the partial insert, moves nothing and charges nothing against a full barrel (the player keeps 64), refuses a box with no routable inventory (there are no routable inventories, no charge) and refuses a chest (not a storage scanner); THE GIVE PATH hands the whole stack (64) straight to the player from a chest of 64, empties the chest and charges the FULL rfPerRequest (5000 -> 4900) with the out slot still holding the request counterfactual's dirt (it has no out slot), hands exactly one item with [single] (chest 3 -> 2, buffer 4900 -> 4800), refuses a kind nothing holds and charges nothing, and refuses below the full price with the price line (costs 100, have 99) without touching the chest, and a give on a chest is refused as not a storage scanner; the loot table drops the scanner on a survival break; the modular storage still answers 0/0 empty no module; a barrel answers not a storage scanner to the same commands; and THE ROUTABLE STAR LIST starts empty (a fresh scanner's tick routes its 64 stone nowhere and still pays one rfPerInsert), routes only the starred chest (B takes 64 while the un-starred A stays empty), still lists the un-starred A's 32 dirt in the scan (the star filters routing, not the list), restores the walk when A is re-starred (A 96), and survives a relaunch (the saved list names A, which then takes another stack, 160); THE EXPORT CHOICE (the GUI's 'Export to current container') sends the in-slot's 64 stone only to the selected inventory (B 64, A 0) for one rfPerInsert, follows the list's row (selecting A makes A 64 while B keeps its 64), saves the choice and the selection with the block so both survive a relaunch, does not fall through to the walk from a selected full barrel (the in-slot keeps its 64 and A and B stay at 64), and 'export first' restores the starred walk, which routes the same stack to B (128); THE ROW CONTENTS VIEW (the GUI list's per-row contents) answers 'contents B' with B's 128 stone and 'contents A' with A's 64 at buffer 0 and leaves the buffer at 0 (a listing is not a request), lists only the starred inventories in 'contents all' (un-starring B leaves A's 64 while B's own row still lists its 128, with nothing starred the all row is 'empty', and starring B alone lists 128), and refuses a cell outside the box, the scanner's own cell and an empty cell with 'is not an inventory in the scan box', also free; THE CRAFTING GRID (the jar's ghost pattern and its four craft buttons, carried as the grid and craft commands) reads a fresh block's pattern as empty and refuses a craft, matches the game's own recipe table (a cobblestone cell is no recipe and takes nothing, one plank is the shapeless oak button, two planks in the stick shape are minecraft:stick x4 and the saved grid key holds the two cells), crafts 4 sticks out of the storage for one set and takes exactly one plank a cell (8 -> 6, player 0 -> 4), takes one set for 4 (4 planks) and two for 8 (0 planks, 16 sticks), answers 'missing cell 1: 16 minecraft:oak_planks, cell 4: 16 minecraft:oak_planks' on an empty storage without taking anything and then crafts a whole stack (64 sticks) from 32 planks, takes the player's 2 planks before the storage's 8 (upstream's first-source order) and leaves the storage at 8, refuses an unlocked storage (missing 1 a cell, the storage keeps its 8) and refuses a cell write while unlocked ('lock the storage to change the pattern'), keeps the pattern and crafts again after a relaunch (4 more sticks), and clears with grid clear (the pattern is empty again)"

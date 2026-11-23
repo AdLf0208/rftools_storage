@@ -30,25 +30,27 @@ use mod_api::{
     ITEMS, Identifier, InteractionResult, ItemKey, ItemPart, ItemResource, ItemStack, LevelHost,
     LevelRef, LevelSide, MenuButtonEvent, MenuContainer, MenuPart, MenuSlotRulesEvent,
     ModContainer, OnBlockPlacedByEvent, OnDestroyedByPlayerEvent, PlayerContainerOpenEvent,
-    PlayerRef, RegisterCommandsEvent, Registrar, RegistrationContext, RightClickBlockEvent,
-    RunModCommandEvent, Screen, ScreenClickEvent, ScreenDrawEvent, ScreenEvent, ServerHost, Tag,
-    Text, Transaction,
+    PlayerRef, RecipeInput, RecipeMatch, RegisterCommandsEvent, Registrar, RegistrationContext,
+    RightClickBlockEvent, RunModCommandEvent, Screen, ScreenClickEvent, ScreenDrawEvent,
+    ScreenEvent, ServerHost, Tag, Text, Transaction,
 };
 
 use crate::runtime::{
-    ExportMode, ExportRoute, Found, GiveAmount, InjectSlot, InsertCharge, Kind, LEVEL_ADMINS,
-    LockPress, RequestCharge, SCANNER_AUTO_SLOT, SCANNER_IN_SLOT, SCANNER_MAX_ENERGY,
-    SCANNER_OUT_SLOT, SCANNER_RECEIVE_PER_TICK, SCANNER_RF_PER_INSERT, SCANNER_SLOTS, SLOT_LIMIT,
-    STORAGE_SCANNER, Slot, SortingMode, Storage, card_accepts, carried_slot_in, clamp_radius,
-    contents_line, contents_refused_line, contents_row, export_line, export_route, gave_line,
-    give_amount, give_nothing_line, give_price, inject_plan, injectable_at, insert_amount,
-    insert_charge, insert_line, insert_nothing_line, insert_partial_line, insert_price,
-    is_routable, is_storage_scanner, lock_press, matches_search, may_inspect, merge_counts,
-    module_id, module_tier, no_power_line, no_routable_line, out_slot_room, request_amount,
-    request_charge, request_line, request_no_power_line, request_nothing_line,
-    request_out_slot_line, request_price, restored_count, routable_line, routing_target, scan_line,
-    scan_positions, scanner_radius, search_name, search_namespace, selection_line, slot_accepts,
-    sort_found, spend_power, star,
+    Batch, CraftPlan, ExportMode, ExportRoute, Found, GiveAmount, Held, InjectSlot, InsertCharge,
+    Kind, LEVEL_ADMINS, LockPress, PATTERN_CELLS, RequestCharge, SCANNER_AUTO_SLOT,
+    SCANNER_IN_SLOT, SCANNER_MAX_ENERGY, SCANNER_OUT_SLOT, SCANNER_RECEIVE_PER_TICK,
+    SCANNER_RF_PER_INSERT, SCANNER_SLOTS, SLOT_LIMIT, STORAGE_SCANNER, Slot, SortingMode, Storage,
+    card_accepts, carried_slot_in, clamp_radius, contents_line, contents_refused_line,
+    contents_row, craft_failed_line, craft_plan, craft_sets, crafted_line, empty_pattern_line,
+    export_line, export_route, gave_line, give_amount, give_nothing_line, give_price, inject_plan,
+    injectable_at, insert_amount, insert_charge, insert_line, insert_nothing_line,
+    insert_partial_line, insert_price, is_modular_storage, is_routable, is_storage_scanner,
+    lock_press, matches_search, may_inspect, merge_counts, missing_line, module_id, module_tier,
+    no_power_line, no_recipe_line, no_routable_line, out_slot_room, pattern_line,
+    pattern_locked_line, pattern_needs, request_amount, request_charge, request_line,
+    request_no_power_line, request_nothing_line, request_out_slot_line, request_price,
+    restored_count, routable_line, routing_target, scan_line, scan_positions, scanner_radius,
+    search_name, search_namespace, selection_line, slot_accepts, sort_found, spend_power, star,
 };
 
 /// The block this slice implements, exactly as the content declares it.
@@ -657,7 +659,10 @@ pub(crate) fn carried_payload(saved: &Compound, type_id: &str) -> Option<Compoun
         return None;
     }
     let mut payload = saved.clone();
-    for key in ["Items", "id", "x", "y", "z"] {
+    // `grid` (the crafting pattern) stays behind: upstream's break carries the lock
+    // and the module (`collectImplicitComponents`) and no pattern, so a broken
+    // storage keeps nothing on the item that its Java counterpart would.
+    for key in ["Items", "id", "x", "y", "z", "grid"] {
         payload.remove(&key.into());
     }
     payload.insert("id".into(), Tag::String(type_id.into()));
@@ -2337,6 +2342,290 @@ fn select_readout(host: &mut dyn ServerHost, pos: [i32; 3], target: [i32; 3]) ->
     format!("{block}: {}", selection_line(target))
 }
 
+// --- the crafting grid's pattern and craft-from-storage (slice 15) --------
+
+/// The crafting grid's pattern: upstream's `grid` key on the block entity, nine
+/// stacks — its ghost inputs, cell 1 the top left. The ghost output
+/// (`CraftingGridInventory.SLOT_GHOSTOUTPUT`) is **not** saved: it is what the
+/// engine makes of the cells, computed on every read, as `GuiCraftingGrid
+/// .testRecipe` computes it on the client.
+const KEY_PATTERN: &str = "grid";
+
+/// The pattern as the block holds it: cell 1 first, `None` an empty cell. An item
+/// this game does not know reads as empty (`ItemStack.fromNbt`'s own answer).
+fn saved_pattern(host: &dyn Host, data: Option<&Compound>) -> Vec<Option<ItemStack>> {
+    let mut cells = vec![None; PATTERN_CELLS];
+    let Some(Tag::List(entries)) = field(data, KEY_PATTERN) else {
+        return cells;
+    };
+    for (index, entry) in entries.iter().take(PATTERN_CELLS).enumerate() {
+        if let Tag::Compound(entry) = entry {
+            cells[index] = ItemStack::from_nbt(host, entry);
+        }
+    }
+    cells
+}
+
+/// The saved list of the pattern's cells: one item compound a filled cell, an
+/// empty compound an empty one (upstream's `ItemStack.saveOptional`).
+fn pattern_tag(host: &dyn Host, cells: &[Option<ItemStack>]) -> Tag {
+    let entries = cells
+        .iter()
+        .map(
+            |cell| match cell.as_ref().and_then(|stack| stack.to_nbt(host)) {
+                Some(entry) => Tag::Compound(entry),
+                None => Tag::Compound(Compound::new()),
+            },
+        )
+        .collect();
+    Tag::List(entries)
+}
+
+/// The engine's answer for a pattern: `LevelRef::recipe_for` over a 3 x 3 crafting
+/// input, each filled cell one item (a cell names a kind; the count is the set).
+fn match_pattern(
+    host: &dyn Host,
+    level: LevelRef,
+    cells: &[Option<ItemStack>],
+) -> Option<RecipeMatch> {
+    let slots: Vec<Option<ItemStack>> = cells
+        .iter()
+        .map(|cell| {
+            cell.as_ref().and_then(|stack| {
+                let mut one = stack.clone();
+                one.set_count(1).ok()?;
+                Some(one)
+            })
+        })
+        .collect();
+    let input = RecipeInput::Crafting {
+        width: 3,
+        height: 3,
+        slots,
+    };
+    let kind = Identifier::parse("minecraft:crafting").ok()?;
+    level.recipe_for(host, &kind, &input).ok().flatten()
+}
+
+/// What the pattern makes, as the identity a readout shows and the count one set
+/// yields. `None` when no recipe matches (the jar's empty `getCachedRecipe`).
+fn pattern_result(host: &dyn Host, cells: &[Option<ItemStack>]) -> Option<(Kind, u32)> {
+    let level = host.level(host.dimension())?;
+    let matched = match_pattern(host, level, cells)?;
+    Some((kind_of(host, &matched.output), matched.output.count()))
+}
+
+/// `/rftoolsstorage grid <pos>`: the pattern cells that hold something, then what
+/// the engine makes of them — upstream's ghost panel, computed instead of drawn.
+fn pattern_readout(host: &mut dyn ServerHost, pos: [i32; 3]) -> String {
+    let block = block_id_at(&*host, pos);
+    if !is_modular_storage(&block) {
+        return format!("{block}: not a modular storage");
+    }
+    let Some(entity) = entity_at(&*host, pos) else {
+        return format!("{block}: not a modular storage");
+    };
+    let data = entity.data(&*host);
+    let cells = saved_pattern(&*host, data.as_ref());
+    format!("{block}: {}", pattern_line_of(&*host, &cells))
+}
+
+/// The readback of a pattern from its cells: the cells that hold something, then
+/// the result the engine makes of them (upstream's ghost output).
+fn pattern_line_of(host: &dyn Host, cells: &[Option<ItemStack>]) -> String {
+    let kinds: Vec<Option<Kind>> = cells
+        .iter()
+        .map(|cell| cell.as_ref().map(|stack| kind_of(host, stack)))
+        .collect();
+    match pattern_result(host, cells) {
+        Some((kind, count)) => pattern_line(&kinds, Some((&kind, count))),
+        None => pattern_line(&kinds, None),
+    }
+}
+
+/// Writes a pattern change: upstream's ghost cells only answer while the storage is
+/// **locked** (`GhostSlot.mayPlace`/`mayPickup` refuse otherwise), so an unlocked
+/// storage refuses and nothing is written. Answers the readback.
+fn pattern_edit(
+    host: &mut dyn ServerHost,
+    pos: [i32; 3],
+    change: impl FnOnce(&mut [Option<ItemStack>]),
+) -> String {
+    let block = block_id_at(&*host, pos);
+    if !is_modular_storage(&block) {
+        return format!("{block}: not a modular storage");
+    }
+    let Some(entity) = entity_at(&*host, pos) else {
+        return format!("{block}: not a modular storage");
+    };
+    // A 0.2.2 block's module moves into the card slot first, so the lock it reads
+    // is the one the menu shows.
+    adopt_legacy_module(host, entity);
+    let data = entity.data(&*host);
+    let module = module_at(&*host, entity);
+    if !read_storage(&*host, data.as_ref(), &[], module.as_ref()).locked {
+        return format!("{block}: {}", pattern_locked_line());
+    }
+    let mut cells = saved_pattern(&*host, data.as_ref());
+    change(&mut cells);
+    let mut patch = Compound::new();
+    patch.insert(KEY_PATTERN.into(), pattern_tag(&*host, &cells));
+    let _ = entity.merge_data(host, patch);
+    format!("{block}: {}", pattern_line_of(&*host, &cells))
+}
+
+/// The player's inventory as a craft's **first** source: upstream's
+/// `new InvWrapper(player.getInventory())`. The four armour slots (36..39) and the
+/// body/saddle slots are left out: its wrapper would take a player's boots off to
+/// craft, which is not a behaviour to carry (notes.md, deviation 14).
+fn player_source(host: &dyn Host, player: PlayerRef) -> Vec<Held> {
+    let Some(slots) = player.inventory_slots(host) else {
+        return Vec::new();
+    };
+    slots
+        .into_iter()
+        .filter(|(slot, _)| *slot <= 35 || *slot == 40)
+        .filter(|(_, stack)| stack.count() > 0)
+        .map(|(slot, stack)| Held {
+            slot: usize::try_from(slot).unwrap_or(usize::MAX),
+            kind: kind_of(host, &stack),
+            count: stack.count(),
+        })
+        .collect()
+}
+
+/// The storage's hundred slots as a craft's **second** source — only ever asked of
+/// a locked storage, as upstream's `GlobalStorageItemWrapper.extractItem` returns
+/// nothing while unlocked.
+fn storage_source(host: &dyn Host, entity: BlockEntityRef) -> Vec<Held> {
+    read_slots(host, entity)
+        .into_iter()
+        .enumerate()
+        .filter_map(|(slot, stack)| {
+            let stack = stack?;
+            (stack.count() > 0).then(|| Held {
+                slot,
+                kind: kind_of(host, &stack),
+                count: stack.count(),
+            })
+        })
+        .collect()
+}
+
+/// `/rftoolsstorage craft <pos> <1|4|8|stack>`: the GUI side panel's craft buttons
+/// (`StorageCraftingTools.craftItems`). The batch is pulled out of the player's
+/// inventory and then out of the storage's hundred slots (a **locked** storage
+/// only), and the result — plus the recipe's remainders, one a set — goes straight
+/// to the player, as `player.getInventory().add` does. A cell the sources cannot
+/// fill fails the whole batch and nothing is taken, as upstream undoes its walk.
+fn craft_readout(
+    host: &mut dyn ServerHost,
+    source: &CommandSource,
+    pos: [i32; 3],
+    batch: Batch,
+) -> String {
+    let block = block_id_at(&*host, pos);
+    if !is_modular_storage(&block) {
+        return format!("{block}: not a modular storage");
+    }
+    let CommandSource::Player { player, .. } = source else {
+        return format!(
+            "{block}: a craft hands its result to the player; there is no console source"
+        );
+    };
+    let player = *player;
+    let Some(entity) = entity_at(&*host, pos) else {
+        return format!("{block}: not a modular storage");
+    };
+    adopt_legacy_module(host, entity);
+    adopt_carried(host, pos);
+    let data = entity.data(&*host);
+    let cells = saved_pattern(&*host, data.as_ref());
+    if cells.iter().all(Option::is_none) {
+        return format!("{block}: {}", empty_pattern_line());
+    }
+    let Some(level) = host.level(host.dimension()) else {
+        return format!("{block}: {}", no_recipe_line());
+    };
+    let Some(matched) = match_pattern(&*host, level, &cells) else {
+        return format!("{block}: {}", no_recipe_line());
+    };
+    let result = kind_of(&*host, &matched.output);
+    let max_stack = max_stack_of(&*host, &matched.output);
+    let sets = craft_sets(batch.wanted(), matched.output.count(), max_stack);
+    if sets == 0 {
+        return format!("{block}: {}", no_recipe_line());
+    }
+    let total = sets.saturating_mul(matched.output.count());
+    let mut given = matched.output.clone();
+    if given.set_count(total).is_err() {
+        return format!("{block}: {}", no_recipe_line());
+    }
+    let kinds: Vec<Option<Kind>> = cells
+        .iter()
+        .map(|cell| cell.as_ref().map(|stack| kind_of(&*host, stack)))
+        .collect();
+    let needs = pattern_needs(&kinds, sets);
+    let mut sources: Vec<Vec<Held>> = vec![player_source(&*host, player)];
+    let module = module_at(&*host, entity);
+    if read_storage(&*host, data.as_ref(), &[], module.as_ref()).locked {
+        sources.push(storage_source(&*host, entity));
+    }
+    let draws = match craft_plan(&needs, &sources) {
+        CraftPlan::Ready(draws) => draws,
+        CraftPlan::Missing(shorts) => return format!("{block}: {}", missing_line(&shorts)),
+    };
+    let held = player.inventory_slots(&*host).unwrap_or_default();
+    let stored = read_slots(&*host, entity);
+    let remainders: Vec<ItemStack> = matched.remainders.iter().flatten().cloned().collect();
+    let crafted = host
+        .transaction(|host, tx| -> Result<(), ()> {
+            for draw in &draws {
+                if draw.source == 0 {
+                    let slot = u32::try_from(draw.slot).map_err(|_| ())?;
+                    let Some((_, stack)) = held.iter().find(|(at, _)| *at == slot) else {
+                        return Err(());
+                    };
+                    player
+                        .set_inventory_slot(host, slot, rest_of(stack, draw.count))
+                        .map_err(|_| ())?;
+                } else {
+                    let Some(stack) = stored.get(draw.slot).and_then(Option::as_ref) else {
+                        return Err(());
+                    };
+                    let slot = u32::try_from(draw.slot).map_err(|_| ())?;
+                    entity
+                        .set_item_slot(host, tx, slot, rest_of(stack, draw.count))
+                        .map_err(|_| ())?;
+                }
+            }
+            player.give_stack(host, given.clone()).map_err(|_| ())?;
+            for _ in 0..sets {
+                for remainder in &remainders {
+                    player.give_stack(host, remainder.clone()).map_err(|_| ())?;
+                }
+            }
+            Ok(())
+        })
+        .is_ok();
+    if !crafted {
+        return format!("{block}: {}", craft_failed_line());
+    }
+    let _ = entity.set_changed(host);
+    format!("{block}: {}", crafted_line(total, &result))
+}
+
+/// What a slot keeps after `take` of its `stack`: the remainder, or an empty slot.
+fn rest_of(stack: &ItemStack, take: u32) -> Option<ItemStack> {
+    let left = stack.count().saturating_sub(take);
+    if left == 0 {
+        return None;
+    }
+    let mut rest = stack.clone();
+    rest.set_count(left).ok()?;
+    Some(rest)
+}
+
 /// The level that is ticking: a block entity's tick runs with its own level in
 /// place, which is not necessarily the dimension a command would act in.
 fn ticking_level(host: &dyn ServerHost) -> Option<LevelRef> {
@@ -2533,6 +2822,18 @@ pub(crate) fn on_register_commands(event: &mut RegisterCommandsEvent<'_>) {
     event.commands.push(Command::new(
         "rftoolsstorage insert <pos:block_pos> <item:item> [count:integer]",
     ));
+    event
+        .commands
+        .push(Command::new("rftoolsstorage grid <pos:block_pos>"));
+    event
+        .commands
+        .push(Command::new("rftoolsstorage grid <pos:block_pos> clear"));
+    event.commands.push(Command::new(
+        "rftoolsstorage grid <pos:block_pos> <cell:integer> <item:item>",
+    ));
+    event.commands.push(Command::new(
+        "rftoolsstorage craft <pos:block_pos> <amount:word>",
+    ));
 }
 
 /// The `/rftoolsstorage` commands' bodies (`run_mod_command`).
@@ -2552,7 +2853,7 @@ pub(crate) fn on_run_mod_command(
     let Some(CommandArgumentValue::BlockPos(pos)) = event.command.argument("pos") else {
         feedback(
             host,
-            "usage: /rftoolsstorage info|lock|scan|contents|radius|sort|routable|export|select|request|give|insert <x> <y> <z> …",
+            "usage: /rftoolsstorage info|lock|scan|contents|radius|sort|routable|export|select|request|give|insert|grid|craft <x> <y> <z> …",
         );
         return Flow::Cancel;
     };
@@ -2706,6 +3007,70 @@ pub(crate) fn on_run_mod_command(
             };
             insert_readout(host, event.source, pos, requested, explicit)
         }
+        "grid" => {
+            // The GUI's ghost crafting cells, as a saved pattern: `/grid <pos>`
+            // reads it back, `/grid <pos> clear` empties all nine, and
+            // `/grid <pos> <cell> <item>` puts one item in a cell (or takes it out
+            // with `minecraft:air`).
+            match event.command.argument("cell") {
+                Some(CommandArgumentValue::Integer(cell)) => {
+                    let Some(item) = item_argument!(event.command.argument("item")) else {
+                        feedback(
+                            host,
+                            "usage: /rftoolsstorage grid <x> <y> <z> <cell 1..9> <item>",
+                        );
+                        return Flow::Cancel;
+                    };
+                    let filled = item.item().id(&*host) != "minecraft:air" && item.count() > 0;
+                    let cell = usize::try_from(*cell)
+                        .ok()
+                        .filter(|cell| (1..=PATTERN_CELLS).contains(cell));
+                    let Some(cell) = cell else {
+                        feedback(
+                            host,
+                            &format!(
+                                "the pattern has cells 1 to {PATTERN_CELLS} (cell 1 is the top left)"
+                            ),
+                        );
+                        return Flow::Cancel;
+                    };
+                    let mut one = item.clone();
+                    let _ = one.set_count(1);
+                    pattern_edit(host, pos, |cells| {
+                        cells[cell - 1] = filled.then_some(one);
+                    })
+                }
+                Some(_) => {
+                    feedback(host, "usage: /rftoolsstorage grid <x> <y> <z> [clear]");
+                    return Flow::Cancel;
+                }
+                None if event.command.literals.iter().any(|word| word == "clear") => {
+                    pattern_edit(host, pos, |cells| {
+                        for cell in cells.iter_mut() {
+                            *cell = None;
+                        }
+                    })
+                }
+                None => pattern_readout(host, pos),
+            }
+        }
+        "craft" => {
+            let Some(CommandArgumentValue::String(word)) = event.command.argument("amount") else {
+                feedback(
+                    host,
+                    "usage: /rftoolsstorage craft <x> <y> <z> <1|4|8|stack>",
+                );
+                return Flow::Cancel;
+            };
+            let Some(batch) = Batch::from_word(word) else {
+                feedback(
+                    host,
+                    "usage: /rftoolsstorage craft <x> <y> <z> <1|4|8|stack>",
+                );
+                return Flow::Cancel;
+            };
+            craft_readout(host, event.source, pos, batch)
+        }
         "radius" => {
             let Some(CommandArgumentValue::Integer(wanted)) = event.command.argument("radius")
             else {
@@ -2842,6 +3207,39 @@ mod tests {
             panic!("the payload lost the carried contents");
         };
         assert_eq!(entries.len(), 2, "the contents and the card slot's module");
+    }
+
+    #[test]
+    fn a_broken_storages_item_does_not_carry_the_crafting_pattern() {
+        // Upstream's break carries the lock and the cards (`collectImplicitComponents`),
+        // never the crafting grid: the pattern is the block entity's, not the item's.
+        let saved = Compound::from_iter([
+            ("locked".into(), Tag::Byte(1)),
+            (
+                KEY_PATTERN.into(),
+                Tag::List(vec![Tag::Compound(Compound::new())]),
+            ),
+            (
+                KEY_CARRIED.into(),
+                Tag::List(vec![carried_entry(0, "minecraft:stone", 64)]),
+            ),
+        ]);
+        let patch = carried_payload(&saved, BE_TYPE).expect("a carried break travels");
+        let Some(Tag::Compound(payload)) = field(Some(&patch), BLOCK_ENTITY_DATA) else {
+            panic!("the patch holds no {BLOCK_ENTITY_DATA}");
+        };
+        assert!(
+            field(Some(payload), KEY_PATTERN).is_none(),
+            "the crafting pattern does not ride the block's item"
+        );
+        assert!(
+            matches!(field(Some(payload), "locked"), Some(Tag::Byte(1))),
+            "the lock still travels"
+        );
+        assert!(
+            field(Some(payload), KEY_CARRIED).is_some(),
+            "the contents still travel"
+        );
     }
 
     #[test]

@@ -1,6 +1,6 @@
 id = "rftoolsstorage"
 name = "RFTools Storage"
-version = "0.2.14"
+version = "0.2.15"
 description = """RFTools Storage for Horizon: the modular storage block and the storage scanner. A
 storage module in the storage's card slot sets its capacity (tier 1: 100 slots, one item kind a slot,
 64 a slot), and the block stores nothing until it is locked. A right click opens the storage's own
@@ -32,6 +32,12 @@ contents <pos> <target|all> is the list's row contents view: a cell lists that o
 contents, starred or not, while `all` is the list's "All routable" line and lists only the starred
 inventories; a listing is not a request, so neither costs FE, and a cell the scan did not find is
 refused. /rftoolsstorage
+craft <pos> <1|4|8|stack> is the storage's own **crafting grid**: a saved nine-cell pattern
+(the jar's ghost cells, which this build cannot show as slots) matched by the game's recipe
+table, crafted out of the player's inventory and then the locked storage's contents, a set a
+button press (/rftoolsstorage grid <pos> reads the pattern and what it makes,
+/rftoolsstorage grid <pos> <cell> <item> puts an item in a cell and
+/rftoolsstorage grid <pos> clear empties them). /rftoolsstorage
 info|lock
 remain the storage's readout and the operator's lock; every command needs an operator or a player
 within 8 blocks."""

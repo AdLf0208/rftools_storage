@@ -13,7 +13,7 @@ differences, are in [`FINDINGS.md`](FINDINGS.md).
 publishing (ARCHITECTURE.md §8); the port carries the upstream MIT notice in
 [`LICENSE`](LICENSE) and its provenance in [`LICENSE-NOTICE.md`](LICENSE-NOTICE.md).
 
-**Format: the SDK package (2026-11-18), version 0.2.14.** One flat `.hmod` —
+**Format: the SDK package (2026-11-18), version 0.2.15.** One flat `.hmod` —
 `horizon-mod.toml` + `Cargo.toml` + `src/` + `assets/` + `data/` — built by the
 launcher against SDK nightly **`0a875da91dbb0fdcb7ba8c42c11341aa229af51a`** with
 horizon-mixins **`e59da9094f0c2fdda6c627fe9eff22dec6a906f0`** (see
@@ -30,7 +30,8 @@ horizon-mixins **`e59da9094f0c2fdda6c627fe9eff22dec6a906f0`** (see
 [`## Slice 11`](#slice-11--the-scanner-lists-sort-choice-version-0211),
 [`## Slice 12`](#slice-12--the-scanners-routable-star-list-version-0212),
 [`## Slice 13`](#slice-13--the-scanners-export-choice-version-0213),
-[`## Slice 14`](#slice-14--the-lists-row-contents-view-version-0214)).
+[`## Slice 14`](#slice-14--the-lists-row-contents-view-version-0214),
+[`## Slice 15`](#slice-15--the-crafting-grids-pattern-and-craft-from-storage-version-0215)).
 The retired `.hnmod` container pinned Horizon `1d63e0a5…` / mixins `5a64af93…`;
 `src/runtime.rs` was byte-identical to the retired
 `mixins/rftoolsstorage/runtime.rs` until the 2026-11-18 review fixes gave it the
@@ -74,7 +75,11 @@ so a relaunch does not silently change where items go) and slice 14 (the scanner
 list's **row contents view**: `/rftoolsstorage contents <pos> <target|all>` lists
 one row's inventory — starred or not — while `all`, the list's first "All routable"
 line, lists only the **starred** inventories, and neither costs FE because a
-listing is not a request) are implemented and
+listing is not a request) and slice 15 (the storage's **crafting grid**: the jar's
+nine-cell ghost pattern as the block's saved `grid` key (`/rftoolsstorage grid`),
+matched by the game's recipe table and crafted out of the player's inventory and then
+the locked storage by the GUI's four buttons (`/rftoolsstorage craft <1|4|8|stack>`))
+are implemented and
 verified in a launcher-built game at the pin (the legs are listed per slice
 below; `ports/_shared/evidence/rftoolsstorage-e2e/`). The gap list below is the
 rest of the mod.
@@ -207,6 +212,29 @@ rest of the mod.
     (slice 14, `/rftoolsstorage contents <pos> <target|all>`); what `scan` still does
     is list the whole box, slice 5's deviation 1, and it stays that way so the priced
     readout and the free row view are two different surfaces.
+12. **The crafting pattern is a saved key and a command, not a visible ghost panel**
+    (slice 15). The pin has no ghost slot kind — a mod menu declares slots, data slots
+    and take-only `results`, `ModContainer` has no slot kinds, `menu_slot_rules` only
+    answers `may_place`/`max_stack` on a **real** backing slot, and a mod's
+    `screen_draw` sees only `data: &[i32]` — so the jar's nine memory cells and its
+    output cell have no on-screen form. They are the block's saved `grid` list
+    (upstream's own key), read and written by `/rftoolsstorage grid`, with the output
+    derived through `LevelRef::recipe_for`; the four buttons are
+    `/rftoolsstorage craft <1|4|8|stack>`. The mechanic is upstream's; the surface is
+    this port's command convention, as every scanner GUI control is.
+13. **A pattern cell is paid with its own stack, not the recipe's tag** (slice 15).
+    A cell names an item (and its components) and a batch needs `sets` of exactly that
+    stack, so a pattern of `oak_planks` cannot be paid with `birch_planks` although the
+    stick recipe's `#planks` ingredient would accept them. Upstream tests the
+    ingredient; `RecipeMatch` carries the output and the remainders, not the per-cell
+    ingredients, so the tag path would need a second `recipes_of_type` pass. The
+    exact-item rule is what the player sees in the memory, and it is recorded rather
+    than guessed at.
+14. **The player's inventory is a source without its armour slots** (slice 15).
+    Upstream's `new InvWrapper(player.getInventory())` walks all 41 slots, so its craft
+    can take a player's boots off; this port's source is the main inventory (0–35) and
+    the off hand (40). A library default, not a defect the jar means, so it is recorded
+    rather than "fixed" in the jar's terms.
 
 ## Upstream defects fixed
 
@@ -245,7 +273,13 @@ None. The two candidates were checked and left alone, on purpose:
   remote module (`storage_module6`, "DO NOT USE" in the jar's lang) and the
   remote storage block.
 - The type modules (`generic`/`oredict`), the filter module, the dump module, the
-  storage control module, the tablet, and the crafting grid.
+  storage control module, and the tablet. (The **crafting grid** is slice 15: its
+  nine-cell pattern, its readback and the four craft buttons are carried as `grid`
+  and `craft`; what stays out is the jar's **six saved recipes** —
+  `CraftingGrid`'s `store`/`select` list, memory with no consumer here — and the
+  visual ghost panel, which the pin cannot express: no ghost slot kind exists, so
+  there is no slot an item could be *shown* in without being stored. See slice 15's
+  dev. 1.)
 - The GUI's **list controls** (compact, cycle, visible-size; its search is
   slice 10 and its sort is slice 11, both carried) and the **two card slots beside the module's** (the type module is `@todo 1.14` upstream,
   and the filter slot takes RFToolsBase's `FilterModuleItem`, which this port does
@@ -267,10 +301,10 @@ retired helper files and their mapping are in
 | Hook (SDK 0.2) | What it does |
 |---|---|
 | `register` → `Registrar` | declares the block-entity type `rftoolsstorage:storage_block_entity` over the block, attaches its `BlockEntityPart`, declares the menu's `MenuPart`, and declares the block's container (100 slots, every face, inputs and outputs) with its menu; **also** the scanner's type `rftoolsstorage:storage_scanner_block_entity` with its Part and `block_energy` (50,000 FE, 500 a move, no external drain) |
-| `BlockEntityPart::block_entity` | gives `rftoolsstorage:modular_storage` a block entity with empty saved data (the module tier and the lock live in its compound; `Items` are the container's), and `rftoolsstorage:storage_scanner` one whose compound holds `energy`, `radius`, the list's `sortMode` and the `routable` star list (slice 12: one `{c: [I; x, y, z]}` compound a starred cell, upstream's shape; the key is absent until the first star) |
+| `BlockEntityPart::block_entity` | gives `rftoolsstorage:modular_storage` a block entity with empty saved data (the module tier and the lock live in its compound; `Items` are the container's), and `rftoolsstorage:storage_scanner` one whose compound holds `energy`, `radius`, the list's `sortMode` and the `routable` star list (slice 12: one `{c: [I; x, y, z]}` compound a starred cell, upstream's shape; the key is absent until the first star); the storage's compound also carries the crafting pattern under `grid` (slice 15: nine stacks, cell 1 the top left, the output not saved) |
 | `right_click_block` (cancel) | install / insert / seal / withdraw, and the action-bar readout |
-| `register_commands` | `/rftoolsstorage info <pos>`, `lock <pos>`, `scan <pos> [query]`, `contents <pos> <target>` and `contents <pos> all` (two usages: a row's cell, and the list's "All routable" line as a literal), `radius <pos> <radius>`, `sort <pos> <mode>`, `routable <pos> <target> <on\|off>` (`block_pos`, `block_pos`, `word`), `export <pos> <current\|first>` (`block_pos`, `word`), `select <pos> <target>` (`block_pos`, `block_pos`), `request <pos> <item> [<count>]` (`block_pos`, `item`, `integer`), `give <pos> <item> [single]` (`block_pos`, `item`, `word`) and `insert <pos> <item> [<count>]` (`block_pos`, `item`, `integer`) |
-| `run_mod_command` | their answers (the scan costs `rfPerRequest`; its optional `query` is the GUI list's search box — every word a case-insensitive name contains or `@modid` a namespace prefix, `getMatcher`; the radius is the GUI slider's 1..20; the request prices an explicit count at a tenth of `rfPerRequest`, checks the out slot and the buffer, pulls from the scanned inventories and gives the stack to the player, or leaves it in the out slot when there is no player; the give prices one item or a stack at the whole `rfPerRequest`, has **no** out slot, and pulls straight into the player in one transaction; the insert pushes the player's stack out, pricing the walk at one `rfPerInsert` and charging it **only when the stack emptied**; `routable` is the GUI's per-inventory star, saved under upstream's `routable` key — it starts empty, and only a starred cell is routed into; `contents` is the list's row contents view, `getInventoryForBlock`'s single-row branch for a cell and its `(-1, -1, -1)` "All routable" branch for `all` — the starred rows — over the saved sort, and **free**: a listing is not a request, so it never reads or spends the buffer) |
+| `register_commands` | `/rftoolsstorage info <pos>`, `lock <pos>`, `scan <pos> [query]`, `contents <pos> <target>` and `contents <pos> all` (two usages: a row's cell, and the list's "All routable" line as a literal), `radius <pos> <radius>`, `sort <pos> <mode>`, `routable <pos> <target> <on\|off>` (`block_pos`, `block_pos`, `word`), `export <pos> <current\|first>` (`block_pos`, `word`), `select <pos> <target>` (`block_pos`, `block_pos`), `request <pos> <item> [<count>]` (`block_pos`, `item`, `integer`), `give <pos> <item> [single]` (`block_pos`, `item`, `word`) `insert <pos> <item> [<count>]` (`block_pos`, `item`, `integer`), `grid <pos>` / `grid <pos> clear` / `grid <pos> <cell> <item>` (three usages: the readback, the literal `clear`, and `integer` + `item`) and `craft <pos> <1\|4\|8\|stack>` (`block_pos`, `word`) |
+| `run_mod_command` | their answers (the scan costs `rfPerRequest`; its optional `query` is the GUI list's search box — every word a case-insensitive name contains or `@modid` a namespace prefix, `getMatcher`; the radius is the GUI slider's 1..20; the request prices an explicit count at a tenth of `rfPerRequest`, checks the out slot and the buffer, pulls from the scanned inventories and gives the stack to the player, or leaves it in the out slot when there is no player; the give prices one item or a stack at the whole `rfPerRequest`, has **no** out slot, and pulls straight into the player in one transaction; the insert pushes the player's stack out, pricing the walk at one `rfPerInsert` and charging it **only when the stack emptied**; `routable` is the GUI's per-inventory star, saved under upstream's `routable` key — it starts empty, and only a starred cell is routed into; `contents` is the list's row contents view, `getInventoryForBlock`'s single-row branch for a cell and its `(-1, -1, -1)` "All routable" branch for `all` — the starred rows — over the saved sort, and **free**: a listing is not a request, so it never reads or spends the buffer; `grid` is the jar's ghost crafting pattern, saved under upstream's `grid` key and read back with the result `LevelRef::recipe_for` makes of it, its cells only writable while locked; `craft` is `StorageCraftingTools.craftItems` — the batch's count maths, the engine's recipe match, the player's inventory then the locked storage as sources (`InventoriesItemSource`'s order), every take and the give in one transaction, and a short cell refusing the whole batch with what is missing) |
 | `block_entity_ticks` / `block_entity_tick` (BlockEntityPart) | the scanner ticks: the GUI input, then the automation input, each an `rfPerInsert` attempt into the **starred** scanned inventories (slice 6; the star filter is slice 12; the GUI slot's **export choice** is slice 13 — `current` sends it only into the selected inventory and does not fall through, `first` is the walk) |
 | `Registrar::block_container` | the scanner's three slots (`SLOT_IN` 0, `SLOT_OUT` 1, `SLOT_IN_AUTO` 2): automation inserts into the auto slot only, every slot extractable, no menu |
 | `screen` / `screen_draw` / `screen_click` (BlockEntityPart, API 19/20) | the menu's 366 x 210 layout, the title, the inventory label and the padlock; a press on the padlock's rectangle answers button 0 |
@@ -355,6 +389,21 @@ Slice 13: `StorageScannerTileEntity.java` again (`exportC`'s field and accessors
 and `modules/scanner/tools/InventoryAccessSettings.java` (the XNet tests, read to confirm
 they are true without XNet). Read from the raw URLs into `/tmp/opencode` and deleted
 after the findings were recorded.
+Slice 15: `modules/modularstorage/blocks/ModularStorageContainer.java` (the
+`.box(ghost(), CONTAINER_GRID, …)` / `.range(ghostOut(), …)` declaration and the
+ghost slots' locked-only `mayPickup`/`mayPlace`/`set`), `craftinggrid/CraftingGridInventory.java`
+(ten stacks, the slot limit 0 and `isItemValid` false), `craftinggrid/CraftingGrid.java`
+(the `grid` + six recipes NBT shape, `selectRecipe`), `craftinggrid/GuiCraftingGrid.java`
+(the side panel: the `1`/`4`/`8`/`*` buttons, Store and the recipe list, the client-side
+`testRecipe`), `craftinggrid/StorageCraftingTools.java` (`craftItems`' count maths,
+`testAndConsumeCraftingItems`, `findMatchingItems`/`undo`, `tryRecipe`'s missing report),
+`craftinggrid/{IItemSource,InventoriesItemSource}.java` (the ordered, per-slot source),
+`craftinggrid/RFCraftingRecipe.java` (`getCachedRecipe` → `RecipeManager.getRecipeFor`)
+and `modules/modularstorage/blocks/ModularStorageTileEntity.java` (`craft()`'s
+`InventoriesItemSource().add(new InvWrapper(player.getInventory())).add(items.get())`,
+`saveAdditional`/`loadAdditional`'s `grid`, `collectImplicitComponents`' lock + cards).
+Read from the repository's raw URLs into `/tmp/opencode/rfsg` and deleted after the
+findings were recorded.
 
 ## Migration to the SDK format — version 0.2.0
 
@@ -2638,6 +2687,166 @@ refused with the same reason. `CONTENTS_SELFTEST=1` inverts the first assertion 
    rebuild (101,409 B) and the three legs again on the delivered file, which is what the logs above
    are. Edit docs **before** the final build, every time.
 
+## Slice 15 — the crafting grid's pattern and craft-from-storage (version 0.2.15)
+
+The gap line this slice closes, verbatim from [`## Gaps`](#gaps-the-rest-of-the-mod):
+
+> The type modules (`generic`/`oredict`), the filter module, the dump module, the storage control
+> module, the tablet, and **the crafting grid**.
+
+**The risk the brief named was settled before any code: upstream's cells are ghost slots.** The jar's
+`ModularStorageContainer` declares `.box(ghost(), CONTAINER_GRID, SLOT_GHOSTINPUT, …, 3, 3)` and
+`.range(ghostOut(), CONTAINER_GRID, SLOT_GHOSTOUTPUT, …, 1, 18)` over `CraftingGridInventory`, whose
+`getSlotLimit()` is **0** and `isItemValid` is **false** — the nine cells and the output are a recipe
+**memory**, never storage. Measured at the pin:
+
+| surface | what it offers | ghost? |
+|---|---|---|
+| `data/<id>/horizon/menu/<name>.json` (`docs/mods.md` §Menu types) | `slots` (1..256), `data_slots`, `results` (take-only) | **no slot kinds at all** |
+| `ModContainer` (`item/containers.rs:209`) | `slots`, `faces`, `inputs`, `outputs`, `menu` | no |
+| `menu_slot_rules` (`MenuSlotRulesEvent`) | `may_place`/`max_stack` on a **real** backing slot; `container` is a *key* (`MenuContainer::{Main, Grid, Result, Player}`), and the engine's `SlotView::may_pickup` is not a mod answer | no |
+| a take from a mod-menu slot | `menu_clicked` is **server menus** (`native_open_menu`) and fires only when **nothing moved**; `menu_quick_move` is shift-click routing | **no post-take hook** |
+| `screen_draw` (`ScreenDrawEvent`) | a full `DrawContext`, but `data: &[i32]` is the only state | item state cannot be drawn |
+
+So a "real grid whose result slot consumes the grid when taken" is not expressible either: nothing
+tells the mod the result left the slot, so consumption would have to be inferred by polling the block
+entity — an invented mechanic with a dupe window. **The slice carries upstream's actual mechanic**: a
+saved nine-cell **pattern** plus the GUI's four craft buttons (`1`, `4`, `8`, `*`), over the surface
+this port already uses for GUI controls the pin's fixed screen cannot express (slices 10–14 carried the
+scanner's search, sort, star, export, select and row view that way). Nothing is faked and nothing is
+invented: the cells are still a memory, and the craft still pulls out of the player's inventory and
+then the locked storage.
+
+### What it does
+
+- **The pattern.** The block entity's saved compound keeps upstream's `grid` key: nine stacks, cell 1
+  the top left (its `SLOT_GHOSTINPUT + 0..9`). The ghost output is **not** saved — it is what the
+  engine makes of the cells, computed on every read, as `GuiCraftingGrid.testRecipe` computes it on the
+  client.
+- **`/rftoolsstorage grid <pos>`** — the readback: `pattern 1=minecraft:oak_planks,
+  4=minecraft:oak_planks -> minecraft:stick x4`, or `-> no recipe`, or `pattern empty`. Free: a
+  listing is not a craft.
+- **`/rftoolsstorage grid <pos> <cell 1..9> <item>`** — fills one cell (one item, as a ghost cell
+  holds one); `minecraft:air` empties it. **`grid <pos> clear`** empties all nine. Only a **locked**
+  storage answers (`GhostSlot.mayPlace`/`mayPickup` refuse while unlocked) and an unlocked one says
+  `lock the storage to change the pattern`.
+- **`/rftoolsstorage craft <pos> <1|4|8|stack>`** — `StorageCraftingTools.craftItems`: the pattern is
+  matched through `LevelRef::recipe_for(RecipeInput::Crafting { 3 x 3 })`, the count maths is upstream's (`-1` = a whole stack of results, whole sets, one fewer when the product would not
+  fit), the ingredients come from the **player's main inventory and off hand first, then the locked
+  storage's hundred slots** (`InventoriesItemSource`'s order; `GlobalStorageItemWrapper.extractItem`
+  hands nothing out unlocked), every take and the give run in **one transaction**, the result and the
+  recipe's remainders (one a set) go straight to the player, and a cell the sources cannot fill fails
+  the whole batch — nothing is taken — with `missing cell 1: 16 minecraft:oak_planks, cell 4: 16 …`.
+- **A broken block does not carry the pattern** (upstream's break carries the lock and the cards, not
+  the grid): `carried_payload` strips the `grid` key beside `Items`.
+
+### Red → green (the rules)
+
+The rules were written first and stubbed (`craft_sets` → 0, `pattern_needs` → `[]`, `craft_plan` →
+`Missing([])`, every line `""`), and the suite was run **before** implementing them
+(`ports/_shared/evidence/rftoolsstorage/slice15-red.log`, `TEST_EXIT:101`):
+
+```
+thread 'runtime::tests::the_four_craft_buttons_are_the_guis_and_the_count_is_upstreams_maths' panicked at src/runtime.rs:2540:9:
+assertion `left == right` failed: one craft of a 4-stick recipe is one set
+  left: 0
+ right: 1
+...
+thread 'runtime::tests::the_sources_are_walked_in_order_and_a_short_cell_fails_the_whole_plan' panicked at src/runtime.rs:2641:9:
+assertion `left == right` failed: the player's plank goes first, the storage's three fill the rest
+  left: Missing([])
+ right: Ready([Draw { source: 0, slot: 5, count: 1 }, Draw { source: 1, slot: 1, count: 3 }])
+...
+test result: FAILED. 57 passed; 4 failed; 0 ignored; 0 measured; 0 filtered out
+```
+
+Implemented, then **62 passed, 0 failed** (`sdk-test.log`): the runtime's 55 (51 + the four new:
+`the_four_craft_buttons_are_the_guis_and_the_count_is_upstreams_maths`,
+`the_pattern_asks_one_of_each_filled_cell_a_set`,
+`the_sources_are_walked_in_order_and_a_short_cell_fails_the_whole_plan`,
+`the_pattern_craft_and_missing_replies_name_what_happened`) and the glue's 7 (the payload test
+plus `a_broken_storages_item_does_not_carry_the_crafting_pattern`).
+
+### In game (`ports/_shared/evidence/rftoolsstorage-e2e/`)
+
+| Leg | Log | Verdict |
+|---|---|---|
+| default, the launcher-built package | `e2e-crafting.log` | **PASS** + `EXIT:0` |
+| control (the same Nightly without the package) | `e2e-crafting-control.log` | **FAIL** + `EXIT:1` — `{"error":"unknown item rftoolsstorage:storage_scanner"}` |
+| `CRAFT_SELFTEST=1` (asserts the craft did *not* make the sticks) | `e2e-crafting-selftest.log` | **FAIL** + `EXIT:1` — *"the craft made 4 minecraft:stick from the planks in the pattern's cells 1 and 4 (sticks 0 -> 4) and the storage fell to 6 planks …"* |
+
+What the phase asserts, in order (every number before and after): a freshly seeded storage reads
+`8/6400 minecraft:oak_planks locked`; its **pattern is empty** and a craft answers `the pattern is
+empty`; a **cobblestone cell matches no recipe** (`-> no recipe`) and a craft answers `the pattern
+crafts nothing` without taking a plank — the differential that the table does the matching; the same
+cell with **one oak plank** is the **shapeless** oak button (`-> minecraft:oak_button x1`, so the
+engine's matcher is doing this, not a hardcoded recipe); cells 1 and 4 with planks are
+`-> minecraft:stick x4` and the block's saved **`grid`** key reads
+`[{count: 1, id: "minecraft:oak_planks"}, {}, {}, {count: 1, id: "minecraft:oak_planks"}, …]`;
+**`craft 1`** answers `crafted 4 minecraft:stick`, the player holds 4 and the storage fell 8 → 6 (one
+plank a cell); **`craft 4`** is one set (4 → 2 planks, 8 sticks) and **`craft 8`** two (2 → 0, 16
+sticks); an empty storage answers `missing cell 1: 16 minecraft:oak_planks, cell 4: 16
+minecraft:oak_planks` and takes nothing, and `craft stack` from 32 planks crafts **64** sticks; **the
+player's inventory is the first source** — 2 planks of the player's go first and the storage stays at
+8; an **unlocked** storage hands nothing out (the same craft answers `missing cell 1: 1 …` and the
+storage keeps its 8) and a cell write is refused with `lock the storage to change the pattern`, which
+leaves the pattern as it was; the pattern **survives a relaunch** and crafts again (4 more sticks,
+84 → 88); `grid … clear` empties it and a craft says `the pattern is empty` again; and a **barrel**
+answers `not a modular storage`.
+
+### Coverage (the families this slice changes)
+
+| Family | State |
+|---|---|
+| the crafting pattern: nine cells, the saved `grid` key, the readback and the derived result | **tested** — the readback at every stage and the `data get … grid` list (`e2e-crafting.log`); `pattern_line`/`pattern_needs` |
+| the recipe match through the engine (`LevelRef::recipe_for`) | **tested** — a shaped recipe (`minecraft:stick x4`), a shapeless one (`minecraft:oak_button x1`) and no recipe (`cobblestone`) (`e2e-crafting.log`) |
+| the four craft buttons and their count maths | **tested** — `1`/`4`/`8`/`stack` (4, 4, 8, 64 sticks) and the planks each took (`e2e-crafting.log`); `craft_sets` |
+| the sources: the player's inventory first, then the locked storage | **tested** — the player's 2 planks go before the storage's 8, which stays at 8; an unlocked storage is inert (`e2e-crafting.log`); `craft_plan` |
+| the missing report per cell, and that a short cell takes nothing | **tested** — `missing cell 1: 16 …, cell 4: 16 …` with the storage untouched (`e2e-crafting.log`); `craft_plan`'s `Missing` |
+| the remainders (a crafting remainder reaches the player, one a set) | **unit-tested** by the plan and the give loop; the rig's recipes have no remainder |
+| the pattern's cells refuse a write while unlocked, and the pattern survives a relaunch | **tested** — the refusal line and the unchanged readback; the pattern after quit + re-entry (`e2e-crafting.log`) |
+| the pattern does not ride a broken block's item | **unit-tested** — `carried_payload` strips `grid` (`a_broken_storages_item_does_not_carry_the_crafting_pattern`) |
+| the six saved recipes (`CraftingGrid`'s `store`/`select` list) and the visual ghost panel | **not ported** — the six slots are the GUI list's memory (a `block_entity_data`-shaped list with no consumer here), and the panel needs ghost slots, which the pin has none of |
+
+### Deviations this slice adds
+
+1. **(deviation 12) The pattern is a saved key and a command, not a visible ghost panel.** The pin
+   has no ghost slot kind (the measurement above), so the jar's nine cells and its output cell have no
+   on-screen form: the cells are the block's saved `grid` list, read and written by
+   `/rftoolsstorage grid`, and the output is derived on read. The mechanic — a remembered pattern
+   crafted out of the storage by four buttons — is upstream's; the *surface* is this port's command
+   convention, as every scanner GUI control already is.
+2. **(deviation 13) The ingredients are matched by the cell's own stack, not the recipe's tag.** The
+   pattern cell
+   names an item (and its components); a batch needs `sets` of exactly that stack, so a pattern of
+   `oak_planks` cannot be paid with `birch_planks` even though the stick recipe's `#planks` tag would
+   accept them. Upstream tests the recipe's `Ingredient`; the port tests the cell's stack, which is
+   what the player sees in the memory. (`RecipeMatch` carries the output and the remainders, not the
+   per-cell ingredients, so the tag path would need a second `recipes_of_type` pass; the exact-item
+   rule is recorded rather than guessed at.)
+3. **(deviation 14) The player's source is the main inventory and the off hand, not the armour.**
+   Upstream's
+   `new InvWrapper(player.getInventory())` walks all 41 slots, so a craft could take a player's boots
+   off; the port's source is slots 0–35 and 40. That is not a defect worth fixing upstream (its own
+   wrapper is a library default), so it is recorded, not "fixed" in the jar's terms.
+
+### Traps this slice paid for
+
+1. **`Items` is a list, not an array indexed by slot.** `data get block … Items[0].count` reads the
+   list's **first entry**, which stops being slot 0 the moment a slot empties (the module's
+   `Slot: 100b` entry moves to the front). The first e2e run read a cleared slot as `1` and failed on
+   a correct craft; the fix is to grep the entry that names `Slot: 0b`. The runtime was right all
+   along — a probe that printed `Items` proved it.
+2. **One plank is a real recipe.** The first design used "one plank in a cell" as its *no recipe*
+   differential; vanilla's shapeless button recipe matches it. `minecraft:cobblestone` alone is what
+   matches nothing — and the button turned out to be the better evidence (a shapeless recipe matched
+   from a pattern proves the engine's table is doing the work).
+3. **A `Missing` per cell names the cell.** Two cells of one kind short by one each would otherwise
+   print the same words twice; the line carries `cell N`, which is also what the jar's GUI highlights.
+4. **Backticks in the PASS line are command substitution.** A PASS line quoting `grid` and `craft`
+   in backticks ran `grid` as a command, printed `command not found` into the log and silently
+   dropped the words. The PASS line is plain text now, and the log is checked for that string.
+
 ## Verification
 
 Skills: superpowers/using-superpowers, brainstorming, writing-plans, test-driven-development, systematic-debugging, verification-before-completion; BeautifulRust/rust-best-practices
@@ -2645,6 +2854,29 @@ Skills: superpowers/using-superpowers, brainstorming, writing-plans, test-driven
 Full evidence in [`VALIDATION.md`](VALIDATION.md); the e2e logs are in
 `ports/_shared/evidence/rftoolsstorage-e2e/` (the game legs) and
 `ports/_shared/evidence/rftoolsstorage/` (the ladder, package and fits).
+
+**0.2.15 — the crafting grid's pattern and craft-from-storage (2026-11-23, pin `0a875da`)**
+
+| Step | Command | Result |
+|---|---|---|
+| Red proof | `cargo test` with `craft_sets`/`pattern_needs`/`craft_plan`/the five lines stubbed | **FAILED. 57 passed; 4 failed**, `TEST_EXIT:101` (`slice15-red.log`); quoted above |
+| Runtime + glue tests | `cargo test` | **62 passed**, 0 failed (`sdk-test.log`, `slice15-test.log`, `TEST_EXIT:0`) — 55 runtime + 7 glue |
+| Lints | `cargo clippy --all-targets -- -D warnings` | `CLIPPY_EXIT:0`, 0 warnings (`slice15-clippy.log`) |
+| Formatting | `rustfmt --edition 2024 --check src/{lib,support,runtime}.rs` | `FMT_EXIT:0` (`slice15-fmt.log`; the first check listed the wrapped test asserts, formatted, then re-run green) |
+| SDK gate | `cargo horizon-mod check` | `TREE_CHECK_EXIT:0` — *"…uses 550 items of the API (5 Part kinds, 2 capabilitys, 154 fields or variants, 18 hooks, 52 hook arguments, 2 macros, 170 methods, 29 traits, 118 types). Made for 0a875da."* (`slice15-tree-check.log`) |
+| Package | `rm -f Cargo.lock && cargo horizon-mod build`, twice | **110,241 B**, SHA-256 `ce7599e3f3c73f1f48b064d81b17427ee3131a25bb4f0679b93991fc1befc4ad`, **`cmp`-identical** (`slice15-build-1.log`, `slice15-build-2.log`); the README and the manifest's description were edited *before* this build, and the gate says `package matches the tree`; a last `rustfmt` pass over `missing_line` changed only its layout, so the delivered file is the rebuild from the formatted tree, with the ladder and all three legs re-run on it |
+| Package check | `cargo horizon-mod check rftoolsstorage.hmod` | `rftoolsstorage 0.2.15 (native-mod, format native-1/0a875da…/e59da90…, for 26.3)`, **110,241 bytes**, `ce7599e3…c4ad`, `FILE_CHECK_EXIT:0` (`slice15-check.log`) |
+| Entries | `unzip -l rftoolsstorage.hmod` | **67 files**, no `Cargo.lock`; `src/runtime.rs` byte-identical in tree and package (`8fae404dd866`) |
+| fits, the pin | `cargo horizon-mod fits rftoolsstorage.hmod --build 0a875da` | `0a875da  made for`, **FITS_PIN_EXIT:0** (`slice15-fits.log`) |
+| fits, another build | `cargo horizon-mod fits rftoolsstorage.hmod --build 0b14f8a` | `0b14f8a  fits`, **FITS_OTHER_EXIT:0** (`slice15-fits.log`) |
+| launcher build | `BUILD_LOCAL=1 ports/tools/launcher-game.sh build rftoolsstorage` (no stale `native-*` tag carried this mod) | `Compiling rftoolsstorage (1 of 1)`, tag `native-0a875da-c98622f9c9b7`, **LAUNCHER_BUILD_EXIT:0** (`slice15-launcher-build.log`) |
+| in game | `build-slot.sh run --job W1-rftoolsstorage --step e2e -- bash ports/rftoolsstorage/tools/e2e.sh` (`CONTROL_GAME=`) | **PASS** + `EXIT:0` (`rftoolsstorage-e2e/e2e-crafting.log`) |
+| control | the same leg on the Nightly **without** the package | **FAIL** + `EXIT:1` (`{"error":"unknown item rftoolsstorage:storage_scanner"}`, `e2e-crafting-control.log`) |
+| selftest (this slice) | `CRAFT_SELFTEST=1` (asserts the craft DID make the sticks) | **FAIL** + `EXIT:1` — *"the craft made 4 minecraft:stick from the planks in the pattern's cells 1 and 4 (sticks 0 -> 4) and the storage fell to 6 planks, so this inverted assertion fails as it must"* (`e2e-crafting-selftest.log`) |
+| e2e gate | `python3 ports/tools/check-e2e-logs.py rftoolsstorage-e2e --strict` | `logs=42  ok=42  missing-exit=0  bad-exit=0`, exit 0 |
+| package gate | `python3 ports/tools/verify-sdk-package.py rftoolsstorage` | `1/1 package(s) verified`, exit 0 (all nine checks `ok`, `package matches the tree` included) |
+| recipe types | `python3 ports/tools/check-recipe-types.py rftoolsstorage` | `rftoolsstorage: ok`, exit 0 |
+| skills gate | `python3 ports/tools/check-skills.py --notes ports/rftoolsstorage --strict` | PASS |
 
 **0.2.14 — the list's row contents view (2026-11-23, pin `0a875da`)**
 

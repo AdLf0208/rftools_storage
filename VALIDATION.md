@@ -2,10 +2,11 @@
 
 Slice 1 (the `modular_storage` block with a tier-1 storage module).
 
-**Version 0.2.14 is the current SDK package (2026-11-23):** one flat `.hmod`, SDK
+**Version 0.2.15 is the current SDK package (2026-11-23):** one flat `.hmod`, SDK
 nightly `0a875da91dbb0fdcb7ba8c42c11341aa229af51a`, mixins
-`e59da9094f0c2fdda6c627fe9eff22dec6a906f0`. **§0n is this slice's evidence (the
-scanner list's row contents view) and is where slice 14's in-game legs are**; **§0l is
+`e59da9094f0c2fdda6c627fe9eff22dec6a906f0`. **§0o is this slice's evidence (the
+crafting grid's pattern and craft-from-storage) and is where slice 15's in-game legs are**; **§0n is
+slice 14's evidence (the scanner list's row contents view)**, **§0l is
 slice 12's evidence (the scanner's routable star list)**, **§0m is
 slice 13's (the scanner's export choice)**; §0k is slice
 11's (the scan list's sort choice), §0j is slice 10's
@@ -22,6 +23,88 @@ history. The 0.2.x `tools/e2e.sh` runs on a launcher-built game
 Every command below ran through `ports/tools/build-slot.sh` (a lease per step);
 in 0.1.0 compile steps forwarded to the second machine and game legs ran locally
 because the script uses `--offscreen`.
+
+## 0o. The crafting grid's pattern and craft-from-storage — version 0.2.15 (2026-11-23)
+
+Slice 15: the jar's **crafting grid** (`CraftingGridInventory` + `StorageCraftingTools`), whose nine
+cells and output are **ghost** slots (a recipe memory: `getSlotLimit()` is 0). Measured at the pin:
+there is **no ghost slot kind** (a mod menu declares `slots`/`data_slots`/`results`; `ModContainer`
+has `slots`/`faces`/`inputs`/`outputs`/`menu`; `menu_slot_rules` answers only `may_place`/`max_stack`
+on a real backing slot) and a mod menu has **no post-take hook** (`menu_clicked` is server menus and
+fires only when nothing moved), so a real grid whose result slot consumes the grid cannot be
+expressed. The slice carries the jar's own mechanic over the port's command surface (as slices
+10–14 carry the scanner's GUI controls): the pattern is the block's saved `grid` key, read by
+`/rftoolsstorage grid <pos>` (with the result `LevelRef::recipe_for` makes of it) and written cell by
+cell (`grid <pos> <cell> <item>`, `grid <pos> clear`) — **locked storage only**, as the ghost cells
+are — and the four craft buttons are `/rftoolsstorage craft <pos> <1|4|8|stack>`
+(`StorageCraftingTools.craftItems`): upstream's count maths, the pattern matched by the game's own
+recipe table, the ingredients taken from the **player's inventory first and then the locked
+storage's** hundred slots (`InventoriesItemSource`'s order), every take and the give in one
+transaction, the result (and the recipe's remainders, one a set) handed straight to the player, and a
+cell the sources cannot fill failing the whole batch with `missing cell 1: …`. The slice plan, with
+the ghost-slot measurement and the upstream reading, is
+`ports/_shared/evidence/rftoolsstorage/SLICE-15-PLAN.md`. Ladder and package logs:
+`ports/_shared/evidence/rftoolsstorage/`; game legs:
+`ports/_shared/evidence/rftoolsstorage-e2e/`.
+
+| Step | Command | Result | Log |
+|---|---|---|---|
+| red proof | `cargo test` with `craft_sets` 0, `pattern_needs` empty, `craft_plan` `Missing([])` and the five lines `""` | **FAILED. 57 passed; 4 failed**, `TEST_EXIT:101` | `slice15-red.log` |
+| tests | `cargo test` | `running 62 tests` → **62 passed**, 0 failed, `TEST_EXIT:0` (55 runtime + 7 glue) | `sdk-test.log`, `slice15-test.log` |
+| lints | `cargo clippy --all-targets -- -D warnings` | `Finished`, **CLIPPY_EXIT:0**, 0 warnings | `slice15-clippy.log` |
+| format | `rustfmt --edition 2024 --check src/{lib,support,runtime}.rs` | `FMT_EXIT:0` after the wrapped test asserts and imports were formatted | `slice15-fmt.log` |
+| SDK gate | `cargo horizon-mod check` | **TREE_CHECK_EXIT:0** — *"… 550 items of the API (5 Part kinds, 2 capabilitys, 154 fields or variants, 18 hooks, 52 hook arguments, 2 macros, 170 methods, 29 traits, 118 types). Made for 0a875da."* | `slice15-tree-check.log` |
+| package | `rm -f Cargo.lock && cargo horizon-mod build`, twice | **110,241 B**, SHA-256 `ce7599e3f3c73f1f48b064d81b17427ee3131a25bb4f0679b93991fc1befc4ad`, **`cmp`-identical** (the README and the manifest description were edited before this build; the gate reads `package matches the tree`; a last `rustfmt` pass changed only `missing_line`'s layout, and the delivered file is the rebuild from that tree, with the ladder and all three legs re-run) | `slice15-build-1.log`, `slice15-build-2.log` |
+| package check | `cargo horizon-mod check rftoolsstorage.hmod` | `rftoolsstorage 0.2.15 (native-mod, format native-1/0a875da…/e59da90…, for 26.3)`, **110,241 bytes**, `ce7599e3…c4ad`, **FILE_CHECK_EXIT:0** | `slice15-check.log` |
+| entries | `unzip -l rftoolsstorage.hmod` | **67 files**, no `Cargo.lock`; `src/runtime.rs` byte-identical in tree and package (`8fae404dd866`) | — |
+| fits, the pin | `cargo horizon-mod fits rftoolsstorage.hmod --build 0a875da` | `0a875da  made for`, **FITS_PIN_EXIT:0** | `slice15-fits.log` |
+| fits, another build | `cargo horizon-mod fits rftoolsstorage.hmod --build 0b14f8a` | `0b14f8a  fits`, **FITS_OTHER_EXIT:0** | `slice15-fits.log` |
+| launcher build | `BUILD_LOCAL=1 ports/tools/launcher-game.sh build rftoolsstorage` (no stale `native-*` tag carried this mod) | `Compiling rftoolsstorage (1 of 1)`, tag `native-0a875da-c98622f9c9b7`, **LAUNCHER_BUILD_EXIT:0** | `slice15-launcher-build.log` |
+| in game | `build-slot.sh run --job W1-rftoolsstorage --port ports/rftoolsstorage --step e2e -- bash ports/rftoolsstorage/tools/e2e.sh` (`CONTROL_GAME=`) | **PASS** + `EXIT:0` | `rftoolsstorage-e2e/e2e-crafting.log` |
+| control | the same leg on the Nightly **without** the package | **FAIL** + `EXIT:1` (`{"error":"unknown item rftoolsstorage:storage_scanner"}`) | `e2e-crafting-control.log` |
+| selftest (this slice) | `CRAFT_SELFTEST=1` (asserts the craft DID make the sticks) | **FAIL** + `EXIT:1` — *"the craft made 4 minecraft:stick from the planks in the pattern's cells 1 and 4 (sticks 0 -> 4) and the storage fell to 6 planks …"* | `e2e-crafting-selftest.log` |
+| e2e gate | `python3 ports/tools/check-e2e-logs.py rftoolsstorage-e2e --strict` | `logs=42  ok=42  missing-exit=0  bad-exit=0`, exit 0 | — |
+| package gate | `python3 ports/tools/verify-sdk-package.py rftoolsstorage` | `1/1 package(s) verified`, exit 0 (the nine checks, `package matches the tree` included) | — |
+| recipe types | `python3 ports/tools/check-recipe-types.py rftoolsstorage` | `rftoolsstorage: ok`, exit 0 | — |
+| skills gate | `python3 ports/tools/check-skills.py --notes ports/rftoolsstorage --strict` | PASS | — |
+
+The default leg's crafting phase (abridged; the log has every `ctl` reply):
+
+```
+the crafting rig's storage: rftoolsstorage:modular_storage: 8/6400 minecraft:oak_planks locked
+pattern (fresh block): rftoolsstorage:modular_storage: pattern empty
+craft with an empty pattern: rftoolsstorage:modular_storage: the pattern is empty
+grid 1 cobblestone: rftoolsstorage:modular_storage: pattern 1=minecraft:cobblestone -> no recipe
+craft with no recipe: rftoolsstorage:modular_storage: the pattern crafts nothing
+grid 1 oak_planks: rftoolsstorage:modular_storage: pattern 1=minecraft:oak_planks -> minecraft:oak_button x1
+grid 4 oak_planks: rftoolsstorage:modular_storage: pattern 1=minecraft:oak_planks, 4=minecraft:oak_planks -> minecraft:stick x4
+saved grid key: [{count: 1, id: "minecraft:oak_planks"}, {}, {}, {count: 1, id: "minecraft:oak_planks"}, {}, {}, {}, {}, {}]
+craft 1: rftoolsstorage:modular_storage: crafted 4 minecraft:stick
+after craft 1: sticks 4, storage planks 6
+craft 4: rftoolsstorage:modular_storage: crafted 4 minecraft:stick
+craft 8: rftoolsstorage:modular_storage: crafted 8 minecraft:stick
+craft stack with nothing to pull: rftoolsstorage:modular_storage: missing cell 1: 16 minecraft:oak_planks, cell 4: 16 minecraft:oak_planks
+craft stack from 32 planks: rftoolsstorage:modular_storage: crafted 64 minecraft:stick
+the player holds 2 planks, the storage 8
+craft 1: rftoolsstorage:modular_storage: crafted 4 minecraft:stick
+after the craft: the player holds 0 planks, the storage 8
+unlock: rftoolsstorage:modular_storage: unlocked
+craft on an unlocked storage: rftoolsstorage:modular_storage: missing cell 1: 1 minecraft:oak_planks, cell 4: 1 minecraft:oak_planks
+grid 2 while unlocked: rftoolsstorage:modular_storage: lock the storage to change the pattern
+lock again: rftoolsstorage:modular_storage: locked
+pattern after the refused write: rftoolsstorage:modular_storage: pattern 1=minecraft:oak_planks, 4=minecraft:oak_planks -> minecraft:stick x4
+pattern after the relaunch: rftoolsstorage:modular_storage: pattern 1=minecraft:oak_planks, 4=minecraft:oak_planks -> minecraft:stick x4
+craft after the relaunch: rftoolsstorage:modular_storage: crafted 4 minecraft:stick
+grid clear: rftoolsstorage:modular_storage: pattern empty
+craft after the clear: rftoolsstorage:modular_storage: the pattern is empty
+craft on a barrel (not a modular storage): minecraft:barrel: not a modular storage
+```
+
+The phase's rig: a fresh modular storage seeded through `/data merge block` with eight oak planks in
+storage slot 0, a `storage_module0` in the card slot (100) and `locked: 1b`; the player's inventory
+cleared. The player's planks go before the storage's (upstream's first source), the storage is inert
+unlocked, the pattern survives a relaunch and a `clear`, and a barrel is refused. `CRAFT_SELFTEST=1`
+inverts the first craft's assertion and the run ends `FAIL:` + `EXIT:1`.
 
 ## 0n. The scanner list's row contents view — version 0.2.14 (2026-11-23)
 
