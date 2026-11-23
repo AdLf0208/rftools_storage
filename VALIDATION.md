@@ -2,10 +2,11 @@
 
 Slice 1 (the `modular_storage` block with a tier-1 storage module).
 
-**Version 0.2.15 is the current SDK package (2026-11-23):** one flat `.hmod`, SDK
+**Version 0.2.16 is the current SDK package (2026-11-23):** one flat `.hmod`, SDK
 nightly `0a875da91dbb0fdcb7ba8c42c11341aa229af51a`, mixins
-`e59da9094f0c2fdda6c627fe9eff22dec6a906f0`. **§0o is this slice's evidence (the
-crafting grid's pattern and craft-from-storage) and is where slice 15's in-game legs are**; **§0n is
+`e59da9094f0c2fdda6c627fe9eff22dec6a906f0`. **§0p is this slice's evidence (the
+reviewer's blocked access finding) and is where slice 16's in-game legs are**; **§0o is slice 15's
+(the crafting grid's pattern and craft-from-storage)**; **§0n is
 slice 14's evidence (the scanner list's row contents view)**, **§0l is
 slice 12's evidence (the scanner's routable star list)**, **§0m is
 slice 13's (the scanner's export choice)**; §0k is slice
@@ -23,6 +24,79 @@ history. The 0.2.x `tools/e2e.sh` runs on a launcher-built game
 Every command below ran through `ports/tools/build-slot.sh` (a lease per step);
 in 0.1.0 compile steps forwarded to the second machine and game legs ran locally
 because the script uses `--offscreen`.
+
+## 0p. The access fix — version 0.2.16 (2026-11-23)
+
+Slice 16 is the registry reviewer's **blocked finding** (harmful code): the packaged `src/support.rs`
+of 0.2.6–0.2.12 let the storage scanner **read, pull from and push into another player's inventory
+without authorization**, and a delivery that failed could lose the items while still charging the FE.
+The cited line in the published 0.2.12 archive is inside `on_run_mod_command` (the dispatcher that
+takes a player-chosen `pos`); the code it describes is the walks' use of a neighbour's `ITEMS`
+capability (`scan_found`/`cell_entries`, `pull_request`/`pull_to_player`,
+`insert_to_inventories`/`inject_stack`), gated only by "within 8 blocks of the scanner" — while the box
+reaches 20 blocks.
+
+Fixed with what the pin exposes (measured in `ports/_shared/sdk/0a875da/api-source`):
+
+- **the scanner's owner**: the placer's UUID saved as `owner` at `on_block_placed_by`; only the owner
+  or an operator drives it in its level, and a scanner with no owner (`setblock`, a piston, a
+  pre-0.2.16 block) keeps the reach rule (`runtime::scanner_open`);
+- **the target**: every cell a walk touches must pass `Player.mayUseItemAt` for the caller and must
+  carry no vanilla `Lock` (`BlockEntityRef::lock` — the engine's own per-container rule; it opens only
+  for a matching item in hand, and a scanner presents none), `runtime::target_open`;
+- **atomic delivery**: `runtime::Delivery` makes the request's price a function of what was
+  **delivered**, and the pull, the give and the out-slot write run in **one** transaction, so a
+  refused delivery keeps every item and leaves the buffer untouched.
+
+No claim/ownership **query** exists at the pin (`can_entity_destroy` is a cancellable hook) and vanilla
+containers have no owner, so the owner + `mayUseItemAt` + vanilla lock are the only authorization
+primitives available; `can_unlock` (whether a held item matches a lock) is not exposed either, so a
+locked container is closed to the scanner even for its key holder (recorded as deviation 18). The
+0.2.13, 0.2.14 and 0.2.15 archives have the same pattern (the same helpers, `may_touch` as the only
+gate); only 0.2.16 fixes it, and 0.2.6–0.2.12 stay removed from the entry at the reviewer's request.
+
+| Step | Command | Result | Log |
+|---|---|---|---|
+| red proof (rules) | `cargo test` with `target_open` → `true`, `scanner_open` → the reach rule and `request_charge` ignoring `Delivery` | **FAILED. 62 passed; 3 failed**, `TEST_EXIT:101` | `slice16-red.log` |
+| red proof (in game) | the `ACCESS` phase on the **0.2.15** game | **FAIL** + `EXIT:1` — *"the scan listed the locked chest's dirt: … minecraft:dirt 32, minecraft:stone 64 …"* | `rftoolsstorage-e2e/e2e-access-red.log` |
+| tests | `cargo test` | `running 66 tests` → **66 passed**, 0 failed (58 runtime + 8 glue) | `sdk-test.log`, `slice16-test.log` |
+| lints | `cargo clippy --all-targets -- -D warnings` | **CLIPPY_EXIT:0**, 0 warnings | `slice16-clippy.log` |
+| format | `rustfmt --edition 2024 --check src/{lib,support,runtime}.rs` | **FMT_EXIT:0** | `slice16-fmt.log` |
+| SDK gate | `cargo horizon-mod check` | **TREE_CHECK_EXIT:0** — *"… uses 562 items of the API (… 174 methods, 29 traits, 120 types). Made for 0a875da."* | `slice16-tree-check.log` |
+| package | `rm -f Cargo.lock && cargo horizon-mod build`, twice | **115,966 B**, SHA-256 `68620ecd44b0b2a5422db08185daa6898bb2eeb534dc47fd44ad7656e1427f16`, **`cmp`-identical**; the README and the manifest were edited before the build | `slice16-build-1.log`, `slice16-build-2.log` |
+| package check | `cargo horizon-mod check rftoolsstorage.hmod` | `rftoolsstorage 0.2.16 (native-mod, format native-1/0a875da…/e59da90…, for 26.3)`, **115,966 bytes**, `68620ecd…7f16`, **FILE_CHECK_EXIT:0** | `slice16-check.log` |
+| entries | `unzip -l rftoolsstorage.hmod` | **67 files**, no `Cargo.lock`; `src/runtime.rs` byte-identical (`d04480ab0847`) | — |
+| fits, the pin | `cargo horizon-mod fits rftoolsstorage.hmod --build 0a875da` | `0a875da  made for`, **FITS_PIN_EXIT:0** | `slice16-fits.log` |
+| fits, another build | `cargo horizon-mod fits … --build 0b14f8a` | `0b14f8a  fits`, **FITS_OTHER_EXIT:0** (after the local `Driver::Command` variant became `Caller` — the variant name false-failed `fits`, notes.md trap 5) | `slice16-fits.log` |
+| launcher build | `BUILD_LOCAL=1 ports/tools/launcher-game.sh build rftoolsstorage` | `Compiling rftoolsstorage (1 of 1)`, tag `native-0a875da-3034e5efc5e3`, exit 0 | `slice16-launcher-build.log` |
+| in game | `build-slot.sh run --job W1-rftoolsstorage --port ports/rftoolsstorage --step e2e -- bash ports/rftoolsstorage/tools/e2e.sh` (`CONTROL_GAME=`) | **PASS** + `EXIT:0` | `rftoolsstorage-e2e/e2e-access.log` |
+| control | the same leg on the Nightly **without** the package | **FAIL** + `EXIT:1` (`{"error":"unknown item rftoolsstorage:storage_scanner"}`) | `e2e-access-control.log` |
+| selftest (this slice) | `ACCESS_SELFTEST=1` (asserts the scan DID list the locked chest's dirt) | **FAIL** + `EXIT:1` — *"the scan listed the open chest's stone and NOT the locked chest's 32 dirt …"* | `e2e-access-selftest.log` |
+| e2e gate | `python3 ports/tools/check-e2e-logs.py rftoolsstorage-e2e --strict` | `logs=46  ok=46  missing-exit=0  bad-exit=0`, exit 0 | — |
+| package gate | `python3 ports/tools/verify-sdk-package.py rftoolsstorage` | `1/1 package(s) verified`, exit 0 (`package matches the tree`, `66 passed`) | — |
+| recipe types | `python3 ports/tools/check-recipe-types.py rftoolsstorage` | `rftoolsstorage: ok`, exit 0 | — |
+| skills gate | `python3 ports/tools/check-skills.py --notes ports/rftoolsstorage --strict` | PASS | — |
+
+The ACCESS phase's transcript (abridged; the log has every `ctl` reply):
+
+```
+the locked chest's saved lock: {items: "minecraft:dirt"}
+scan: rftoolsstorage:storage_scanner: minecraft:stone 64 (4900/50000 FE)          <- the locked chest's 32 dirt is hidden
+contents locked: rftoolsstorage:storage_scanner: 16 102 -11 is not an inventory in the scan box
+contents open: rftoolsstorage:storage_scanner: contents 14 102 -9: minecraft:stone 64
+request dirt (only in the locked chest): … nothing to pull for minecraft:dirt (4900/50000 FE)
+give dirt: … nothing to give for minecraft:dirt (4900/50000 FE)
+insert: rftoolsstorage:storage_scanner: inserted 64 minecraft:stone (4880/50000 FE)   <- the open chest 64 -> 128, the locked one stays 32
+routable off (locked): … 16 102 -11 is not an inventory in the scan box
+select (locked): … 16 102 -11 is not an inventory in the scan box
+scan as an adventure player: rftoolsstorage:storage_scanner: empty (4780/50000 FE)     <- mayUseItemAt refuses every cell
+scan again as a creative player (the differential): … minecraft:stone 128 (4680/50000 FE)
+scan after the unlock: … minecraft:dirt 32, minecraft:stone 128 (4580/50000 FE)       <- the lock, not a mood, hid it
+```
+
+The scanner-owner half is **unit-tested only** (`the_scanner_belongs_to_whoever_placed_it`): the
+harness plays one player and that player is the single-player host, an operator, so no in-game leg can
+produce a non-operator caller (notes.md, Slice 16 trap 3).
 
 ## 0o. The crafting grid's pattern and craft-from-storage — version 0.2.15 (2026-11-23)
 

@@ -405,6 +405,45 @@ pub fn may_inspect(op: bool, same_level: bool, distance: f64) -> bool {
     op || (same_level && distance <= INSPECT_RANGE)
 }
 
+/// Whether a caller may drive the **scanner** at a position: an operator, or the
+/// player who **placed** it, in its level. A scanner whose owner is not recorded —
+/// placed by `setblock`, a piston or a dispenser, or crafted before 0.2.16 — keeps
+/// the reach rule every block had ([`may_inspect`]), so a machine nobody owns is
+/// still usable by whoever stands beside it.
+///
+/// Upstream has no owner field: it leaves "may this player use this machine" to
+/// claim mods (`scannerNoRestrictions`, slice 5's `blocked(no permission query)`).
+/// With no claim query at the pin, the placer's identity is the only recorded
+/// authority a block can carry, and a scanner reaches up to 20 blocks in every
+/// direction — further than its driver can walk, which is the finding's route.
+#[must_use]
+pub fn scanner_open(
+    op: bool,
+    owner: Option<u128>,
+    caller: Option<u128>,
+    same_level: bool,
+    distance: f64,
+) -> bool {
+    match owner {
+        Some(owner) => op || (same_level && caller == Some(owner)),
+        None => may_inspect(op, same_level, distance),
+    }
+}
+
+/// Whether the walks may use the container at a scanned cell: the caller must be
+/// allowed to **act** there (`Player.mayUseItemAt`, the engine's own use rule) and
+/// the container must carry no vanilla **lock** (`LockCode`: a container that only
+/// opens for a matching item in hand, `BaseContainerBlockEntity.canOpen`). The
+/// scanner can present no key, so a locked container is closed to it — the one
+/// per-container authorization vanilla has (a chest has no owner to compare).
+///
+/// `may_act` is the caller's answer for that cell; the block's own tick has no
+/// player and passes `true`, so only a lock can refuse it.
+#[must_use]
+pub fn target_open(may_act: bool, locked: bool) -> bool {
+    may_act && !locked
+}
+
 // --- the storage scanner (slice 5) ----------------------------------------
 
 /// The block the scanner slice implements: `rftoolsstorage:storage_scanner`.
@@ -987,25 +1026,41 @@ pub fn out_slot_room(out: Option<(bool, u32)>, max_stack: u32) -> Option<u32> {
     }
 }
 
+/// Whether what a walk pulled reached its destination. A refused delivery is
+/// undone by the walk's own transaction — the inventories get the items back —
+/// so it is never charged either: upstream spends the price after the give
+/// (`consumeEnergy(rfPerRequest)`), never before it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Delivery {
+    /// The stack reached the player's inventory, or the out slot.
+    Delivered,
+    /// The destination refused it and the walk's transaction put it back.
+    Refused,
+}
+
 /// What a request did with the buffer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RequestCharge {
     /// The buffer is below the price: nothing is pulled and nothing is spent.
     NoPower,
-    /// Nothing was pulled: a request charges only when something came out.
+    /// Nothing was pulled or the delivery was refused: a request charges only
+    /// for what it delivered.
     Nothing,
     /// The buffer after a paid request.
     Paid(u32),
 }
 
 /// The request's charge rule: the buffer must cover the price before the walk
-/// (`if (getStoredPower() < rf) return;`), and a walk that pulled nothing
-/// charges nothing (`if (todo[0] == finalAmount) return;` before `consumeEnergy`).
-pub fn request_charge(stored: u32, price: u32, pulled: u32) -> RequestCharge {
+/// (`if (getStoredPower() < rf) return;`), a walk that pulled nothing charges
+/// nothing (`if (todo[0] == finalAmount) return;` before `consumeEnergy`), and a
+/// delivery the destination refused leaves the items — and so the buffer —
+/// where they were. This is the finding's second half: a failed delivery costs
+/// nothing and takes nothing.
+pub fn request_charge(stored: u32, price: u32, pulled: u32, delivery: Delivery) -> RequestCharge {
     if stored < price {
         return RequestCharge::NoPower;
     }
-    if pulled == 0 {
+    if pulled == 0 || delivery == Delivery::Refused {
         return RequestCharge::Nothing;
     }
     RequestCharge::Paid(stored - price)
@@ -1655,6 +1710,38 @@ mod tests {
     }
 
     #[test]
+    fn the_scanner_belongs_to_whoever_placed_it() {
+        // The stored owner decides: an operator drives any scanner, the placer
+        // drives theirs anywhere in the level, nobody else — and a scanner with no
+        // recorded owner (setblock, a piston, a pre-0.2.16 block) keeps the reach
+        // rule, so an unowned machine is not sealed to everyone.
+        assert!(
+            scanner_open(true, Some(7), Some(8), true, 1.0),
+            "an operator drives another player's scanner"
+        );
+        assert!(
+            scanner_open(false, Some(7), Some(7), true, 40.0),
+            "the placer drives theirs from across the level"
+        );
+        assert!(
+            !scanner_open(false, Some(7), Some(8), true, 1.0),
+            "another player standing beside it may not"
+        );
+        assert!(
+            !scanner_open(false, Some(7), Some(7), false, 1.0),
+            "not from another level either"
+        );
+        assert!(
+            scanner_open(false, None, Some(8), true, 5.0),
+            "an unowned scanner keeps the reach rule"
+        );
+        assert!(
+            !scanner_open(false, None, Some(8), true, 9.0),
+            "and 8 blocks is still the limit"
+        );
+    }
+
+    #[test]
     fn a_carried_slot_comes_back_clamped_and_only_where_the_block_has_one() {
         // A break moves the container's stacks aside and the item carries them;
         // placing it back writes them into the block's own slots, the card slot
@@ -2022,19 +2109,22 @@ mod tests {
 
     #[test]
     fn a_request_charges_only_what_it_pulled_and_only_with_the_power_to_pay() {
-        assert_eq!(request_charge(5_000, 10, 32), RequestCharge::Paid(4_990));
         assert_eq!(
-            request_charge(9, 10, 32),
+            request_charge(5_000, 10, 32, Delivery::Delivered),
+            RequestCharge::Paid(4_990)
+        );
+        assert_eq!(
+            request_charge(9, 10, 32, Delivery::Delivered),
             RequestCharge::NoPower,
             "one short of the price is no request"
         );
         assert_eq!(
-            request_charge(5_000, 10, 0),
+            request_charge(5_000, 10, 0, Delivery::Delivered),
             RequestCharge::Nothing,
             "nothing pulled, nothing charged"
         );
         assert_eq!(
-            request_charge(10, 10, 1),
+            request_charge(10, 10, 1, Delivery::Delivered),
             RequestCharge::Paid(0),
             "the last ten buy a request"
         );
@@ -2053,6 +2143,54 @@ mod tests {
         assert_eq!(
             request_out_slot_line(5_000, "minecraft:dirt"),
             "the out slot holds minecraft:dirt; request refused (5000/50000 FE)"
+        );
+    }
+
+    #[test]
+    fn a_delivery_that_failed_costs_nothing_and_takes_nothing() {
+        // The find: a failed delivery left the items pulled out of the chest and
+        // the price paid. The walk's transaction puts the items back, and the price
+        // is computed from what was delivered, so a refused give or a refused
+        // out-slot write costs nothing.
+        assert_eq!(
+            request_charge(5_000, 10, 32, Delivery::Refused),
+            RequestCharge::Nothing,
+            "a refused delivery is never paid for"
+        );
+        assert_eq!(
+            request_charge(5_000, 10, 32, Delivery::Delivered),
+            RequestCharge::Paid(4_990),
+            "what reached the player is paid for"
+        );
+        assert_eq!(
+            request_charge(9, 10, 32, Delivery::Refused),
+            RequestCharge::NoPower,
+            "the buffer is still checked before the walk"
+        );
+    }
+
+    #[test]
+    fn a_scanned_cell_must_be_one_the_caller_may_act_at_and_must_be_unlocked() {
+        // Two separate refusals: a caller the engine's own `mayUseItemAt` refuses
+        // at that cell (a spectator, an adventure player without a matching
+        // `can_place_on`), and a container carrying the vanilla `Lock`, which
+        // opens only for a matching item in hand and can present no key to a
+        // scanner. Everything else is a cell the walk may use.
+        assert!(
+            target_open(true, false),
+            "an allowed, unlocked inventory is a target"
+        );
+        assert!(
+            !target_open(true, true),
+            "a locked container is closed to the scanner"
+        );
+        assert!(
+            !target_open(false, false),
+            "a caller who may not act at the cell is refused"
+        );
+        assert!(
+            !target_open(false, true),
+            "both refusals at once are no target"
         );
     }
 
@@ -2084,12 +2222,12 @@ mod tests {
             "never past SLOT_LIMIT"
         );
         assert_eq!(
-            request_charge(5_000, give_price(), 64),
+            request_charge(5_000, give_price(), 64, Delivery::Delivered),
             RequestCharge::Paid(4_900),
             "a give of 64 off 5,000 leaves 4,900"
         );
         assert_eq!(
-            request_charge(99, give_price(), 64),
+            request_charge(99, give_price(), 64, Delivery::Delivered),
             RequestCharge::NoPower,
             "the price is checked before anything is pulled"
         );

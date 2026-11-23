@@ -146,8 +146,9 @@
 # SORT_SELFTEST=1 for the sort (the `Amount-` reply must NOT start with stone),
 # ROUTABLE_SELFTEST=1 for the star list (the un-starred chest must NOT have
 # received the stack), EXPORT_SELFTEST=1 for the export choice (the selected
-# chest must NOT have received the stack), and CONTENTS_SELFTEST=1 for the row
-# view (B's row must NOT have listed 128 stone).
+# chest must NOT have received the stack), CONTENTS_SELFTEST=1 for the row
+# view (B's row must NOT have listed 128 stone), and ACCESS_SELFTEST=1 for the
+# access rule (the locked chest MUST have taken the stack: the run MUST fail).
 # COUNTERFACTUAL=1 puts a vanilla barrel where the scanner would be and proves the
 # same commands answer `not a storage scanner` on it. CONTROL_GAME runs the same
 # rig on the Nightly without the package and fails there (`EXIT:1`): the block and
@@ -182,6 +183,7 @@ ROUTABLE_SELFTEST=${ROUTABLE_SELFTEST:-0}
 EXPORT_SELFTEST=${EXPORT_SELFTEST:-0}
 CONTENTS_SELFTEST=${CONTENTS_SELFTEST:-0}
 CRAFT_SELFTEST=${CRAFT_SELFTEST:-0}
+ACCESS_SELFTEST=${ACCESS_SELFTEST:-0}
 
 SCANNER=rftoolsstorage:storage_scanner
 STORAGE=rftoolsstorage:modular_storage
@@ -1847,6 +1849,142 @@ line=$(craft_cmd "$CGX" "$Y" "$barrel" 1)
 echo "craft on a barrel (not a modular storage): $line"
 [ "$line" = "minecraft:barrel: not a modular storage" ] || fail "a barrel answered: $line"
 
+say "ACCESS (slice 16): a container the caller may not use is neither read nor routed into"
+# The finding: the scanner's box reaches 20 blocks, so "the caller may touch the
+# scanner" is not an authorization for the cell it reaches. The engine's own
+# per-container rule is the vanilla `lock` (`LockCode`): a container that opens
+# only for a matching item in hand. The scanner can present no key, so a locked
+# cell is skipped by every walk (the star list, the readouts, the pull and the
+# push) and the tick. The rig: a starred dungeon chest (32 dirt) that is locked
+# after the star, beside a starred open chest (64 stone). x-major walk order puts
+# the locked chest first, so a walk that ignored the lock would fill it.
+AX=$((X - 6))
+AY=$Y
+AZ=$((Z1 - 7))
+LOCKED_X=$((AX + 2))
+OPEN_Z=$((AZ + 2))
+ctl command "clear @a" >/dev/null
+ctl setblock "$AX" "$((AY - 1))" "$AZ" minecraft:stone >/dev/null
+ctl give "$SCANNER" 1 >/dev/null || fail "cannot give a scanner for the access leg"
+ctl wait 6
+place_held "$AX" "$AY" "$AZ" "$SCANNER"
+[ "$(block_name "$AX" "$AY" "$AZ")" = "$SCANNER" ] || fail "the access rig's scanner is $(block_name "$AX" "$AY" "$AZ")"
+line=$(radius_cmd "$AX" "$AY" "$AZ" 2)
+echo "access rig radius: $line"
+fill_chest "$LOCKED_X" "$AY" "$AZ" minecraft:dirt 32
+fill_chest "$AX" "$AY" "$OPEN_Z" minecraft:stone 64
+line=$(routable_cmd "$AX" "$AY" "$AZ" "$LOCKED_X" "$AY" "$AZ" on)
+echo "star the future locked chest: $line"
+[ "$line" = "$SCANNER: routable $LOCKED_X $AY $AZ on" ] || fail "the star answered: $line"
+line=$(routable_cmd "$AX" "$AY" "$AZ" "$AX" "$AY" "$OPEN_Z" on)
+echo "star the open chest: $line"
+[ "$line" = "$SCANNER: routable $AX $AY $OPEN_Z on" ] || fail "the star answered: $line"
+# The saved star stays; the lock arrives afterwards, as another mod's or a
+# player's sealed container would.
+ctl command "data merge block $LOCKED_X $AY $AZ {lock: {items: \"minecraft:dirt\"}}" >/dev/null
+ctl wait 4
+locked_read=$(data_block "$LOCKED_X" "$AY" "$AZ" lock)
+echo "the locked chest's saved lock: $locked_read"
+case "$locked_read" in
+    *items*|*minecraft:dirt*) ;;
+    *) fail "the chest took no lock: '$locked_read'" ;;
+esac
+set_energy "$AX" "$AY" "$AZ" 5000
+
+say "the scan does not list a cell the caller may not use (the locked chest's 32 dirt stays hidden)"
+line=$(scan "$AX" "$AY" "$AZ")
+buffer=$(energy_of "$AX" "$AY" "$AZ")
+echo "scan: $line; buffer now $buffer"
+case "$line" in
+    *minecraft:dirt*) fail "the scan listed the locked chest's dirt: $line" ;;
+    *) ;;
+esac
+echo "$line" | grep -q "minecraft:stone 64" || fail "the scan lost the open chest: $line"
+
+if [ "$ACCESS_SELFTEST" = 1 ]; then
+    say "ACCESS_SELFTEST: assert the scan DID list the locked chest's dirt (must fail)"
+    fail "the scan listed the open chest's stone and NOT the locked chest's 32 dirt ($line), so this inverted assertion fails as it must"
+fi
+
+say "the locked cell's row is refused with the same generic line, and the open one lists"
+line=$(contents_cmd "$AX" "$AY" "$AZ" "$LOCKED_X" "$AY" "$AZ")
+echo "contents locked: $line"
+[ "$line" = "$SCANNER: $LOCKED_X $AY $AZ is not an inventory in the scan box" ] \
+    || fail "the locked chest's row answered: $line"
+line=$(contents_cmd "$AX" "$AY" "$AZ" "$AX" "$AY" "$OPEN_Z")
+echo "contents open: $line"
+[ "$line" = "$SCANNER: contents $AX $AY $OPEN_Z: minecraft:stone 64" ] \
+    || fail "the open chest's row answered: $line"
+line=$(contents_all_cmd "$AX" "$AY" "$AZ")
+echo "contents all: $line"
+case "$line" in
+    *minecraft:dirt*) fail "the all row listed the locked chest: $line" ;;
+    *) ;;
+esac
+
+say "a request or a give for a kind only the locked chest holds pulls nothing and charges nothing"
+before=$(energy_of "$AX" "$AY" "$AZ")
+line=$(request_cmd "$AX" "$AY" "$AZ" minecraft:dirt 32)
+echo "request dirt (only in the locked chest): $line"
+[ "$line" = "$SCANNER: nothing to pull for minecraft:dirt ($before/$MAX_FE FE)" ] || fail "the request answered: $line"
+[ "$(inv_total "$LOCKED_X" "$AY" "$AZ")" = 32 ] || fail "the locked chest lost dirt"
+[ "$(energy_of "$AX" "$AY" "$AZ")" = "$before" ] || fail "a refused delivery charged the buffer"
+line=$(give_cmd "$AX" "$AY" "$AZ" minecraft:dirt)
+echo "give dirt: $line"
+[ "$line" = "$SCANNER: nothing to give for minecraft:dirt ($before/$MAX_FE FE)" ] || fail "the give answered: $line"
+[ "$(inv_total "$LOCKED_X" "$AY" "$AZ")" = 32 ] || fail "the give took the locked chest's dirt"
+
+say "an insert skips the locked cell, fills the open one, and charges exactly one rfPerInsert"
+ctl give minecraft:stone 64 >/dev/null || fail "cannot give the player stone"
+ctl wait 8
+line=$(insert_cmd "$AX" "$AY" "$AZ" minecraft:stone)
+echo "insert: $line"
+[ "$line" = "$SCANNER: inserted 64 minecraft:stone ($((before - 20))/$MAX_FE FE)" ] || fail "the insert answered: $line"
+[ "$(inv_total "$LOCKED_X" "$AY" "$AZ")" = 32 ] || fail "the walk pushed stone into the locked chest"
+[ "$(inv_total "$AX" "$AY" "$OPEN_Z")" = 128 ] || fail "the open chest did not take the stack ($(inv_total "$AX" "$AY" "$OPEN_Z"))"
+
+
+say "a star on a locked cell is refused, so the list cannot be pointed at it"
+after=$(energy_of "$AX" "$AY" "$AZ")
+line=$(routable_cmd "$AX" "$AY" "$AZ" "$LOCKED_X" "$AY" "$AZ" off)
+echo "routable off (locked): $line"
+[ "$line" = "$SCANNER: $LOCKED_X $AY $AZ is not an inventory in the scan box" ] || fail "the locked cell took a star change: $line"
+line=$(select_cmd "$AX" "$AY" "$AZ" "$LOCKED_X" "$AY" "$AZ")
+echo "select (locked): $line"
+[ "$line" = "$SCANNER: $LOCKED_X $AY $AZ is not an inventory in the scan box" ] || fail "the locked cell took the selection: $line"
+
+say "the engine's own action permission decides too: an adventure caller may not use the box"
+ctl command "gamemode adventure" >/dev/null
+ctl wait 20
+line=$(scan "$AX" "$AY" "$AZ")
+echo "scan as an adventure player: $line"
+case "$line" in
+    *empty*) ;;
+    *) fail "an adventure caller read the box: $line" ;;
+esac
+line=$(contents_cmd "$AX" "$AY" "$AZ" "$AX" "$AY" "$OPEN_Z")
+echo "contents as an adventure player: $line"
+[ "$line" = "$SCANNER: $AX $AY $OPEN_Z is not an inventory in the scan box" ] \
+    || fail "an adventure caller listed the open chest: $line"
+ctl command "gamemode creative" >/dev/null
+ctl wait 20
+line=$(scan "$AX" "$AY" "$AZ")
+echo "scan again as a creative player (the differential): $line"
+echo "$line" | grep -q "minecraft:stone 128" || fail "the creative scan did not list the chest: $line"
+case "$line" in
+    *minecraft:dirt*) fail "the creative scan read the locked chest: $line" ;;
+    *) ;;
+esac
+
+say "the lock is what refused the cell: unlocked, the same scan lists it (the differential)"
+ctl command "data remove block $LOCKED_X $AY $AZ lock" >/dev/null
+ctl wait 6
+line=$(scan "$AX" "$AY" "$AZ")
+echo "scan after the unlock: $line"
+echo "$line" | grep -q "minecraft:dirt 32" || fail "the unlocked chest's dirt is still not listed: $line"
+echo "$line" | grep -q "minecraft:stone 128" || fail "the unlocked scan lost the open chest: $line"
+echo "buffer after the access leg: $after"
+
 say "the scanner's loot table drops its own item on a survival break"
 BX=$((X + 2))
 BZ=$((Z1 + 5))
@@ -1914,4 +2052,4 @@ echo "give rftoolsbase:machine_frame: $frame"
 echo "$frame" | grep -q 'unknown item' || fail "this build has rftoolsbase:machine_frame, so the recipe is not blocked and must be crafted: $frame"
 
 ctl close >/dev/null 2>&1 || true
-echo "PASS: the storage scanner places and reads back with its facing; a fresh one has no power (no power (0/50000 FE)) and reads nothing; at its default radius 1 it finds nothing two blocks away; /rftoolsstorage radius 2 widens the box and the scan answers minecraft:stone 64 for a chest two blocks away while the chest three away (minecraft:dirt 32) is outside it; radius 3 lists both, one entry a kind; every scan costs rfPerRequest (5,000 -> 4,900 -> 4,800 -> 4,700, printed in the reply); THE SCAN FILTER (the GUI's search box) keeps '@minecraft' listing both kinds, narrows 'dirt' to minecraft:dirt 32 and 'stone' to minecraft:stone 64, answers 'empty' for '@nomatch' with the price still paid (4,600), and leaves the unfiltered scan listing both (4,500) as the differential; THE SORT CHOICE orders the list (Amount- = dirt 64, stone 32, Amount+ = stone 32, dirt 64, Name = dirt 64, stone 32, Mod puts rftoolsstorage:storage_module0 after both minecraft kinds), and the saved AMOUNT_DESCENDING mode orders the list after a relaunch too (stone 64, dirt 32); an emptied buffer refuses with no power and reads nothing, and charging it again makes the scan answer again; scan and radius refuse a chest and the modular storage (not a storage scanner); the radius and the buffer survive a relaunch; THE INJECT TICK pushes 64 stone from the in-slot into the empty chest two blocks away so its Items[0] reads minecraft:stone x64 while the buffer drops by exactly one rfPerInsert (5000 -> 4980), and with the buffer at 0 the next stack stays in the slot and the chest keeps its 64, recharging proving the stall was the power (chest 128); the auto slot routes too (chest 160); items the game puts in the container are routed for one rfPerInsert; a stack nothing accepts is still charged one attempt (20 FE pays one, 19 pays none) and stays in the slot; the walk passes a full barrel for the chest behind it; the tick never writes the out slot; THE REQUEST PATH pulls 32 stone from a chest of 128 into the player's inventory (the reference's straight-to-inventory default), leaving the chest at 96 and the buffer at 4,990 for an explicit count, refuses a kind nothing holds and charges nothing, refuses below the price with the price line (costs 10, have 9), sends a ctl command's 16-stone request straight to the player too, and refuses a request whose out slot holds another kind without pulling or charging; THE INSERT PATH pushes the player's 64 stone into the chest two blocks away so its Items[0] reads minecraft:stone x64 and empties the player's stack for exactly one rfPerInsert (5000 -> 4980), inserts an explicit 10 of 64 for one more rfPerInsert, takes only the 32 a nearly-full barrel has room for and charges NOTHING for the partial insert, moves nothing and charges nothing against a full barrel (the player keeps 64), refuses a box with no routable inventory (there are no routable inventories, no charge) and refuses a chest (not a storage scanner); THE GIVE PATH hands the whole stack (64) straight to the player from a chest of 64, empties the chest and charges the FULL rfPerRequest (5000 -> 4900) with the out slot still holding the request counterfactual's dirt (it has no out slot), hands exactly one item with [single] (chest 3 -> 2, buffer 4900 -> 4800), refuses a kind nothing holds and charges nothing, and refuses below the full price with the price line (costs 100, have 99) without touching the chest, and a give on a chest is refused as not a storage scanner; the loot table drops the scanner on a survival break; the modular storage still answers 0/0 empty no module; a barrel answers not a storage scanner to the same commands; and THE ROUTABLE STAR LIST starts empty (a fresh scanner's tick routes its 64 stone nowhere and still pays one rfPerInsert), routes only the starred chest (B takes 64 while the un-starred A stays empty), still lists the un-starred A's 32 dirt in the scan (the star filters routing, not the list), restores the walk when A is re-starred (A 96), and survives a relaunch (the saved list names A, which then takes another stack, 160); THE EXPORT CHOICE (the GUI's 'Export to current container') sends the in-slot's 64 stone only to the selected inventory (B 64, A 0) for one rfPerInsert, follows the list's row (selecting A makes A 64 while B keeps its 64), saves the choice and the selection with the block so both survive a relaunch, does not fall through to the walk from a selected full barrel (the in-slot keeps its 64 and A and B stay at 64), and 'export first' restores the starred walk, which routes the same stack to B (128); THE ROW CONTENTS VIEW (the GUI list's per-row contents) answers 'contents B' with B's 128 stone and 'contents A' with A's 64 at buffer 0 and leaves the buffer at 0 (a listing is not a request), lists only the starred inventories in 'contents all' (un-starring B leaves A's 64 while B's own row still lists its 128, with nothing starred the all row is 'empty', and starring B alone lists 128), and refuses a cell outside the box, the scanner's own cell and an empty cell with 'is not an inventory in the scan box', also free; THE CRAFTING GRID (the jar's ghost pattern and its four craft buttons, carried as the grid and craft commands) reads a fresh block's pattern as empty and refuses a craft, matches the game's own recipe table (a cobblestone cell is no recipe and takes nothing, one plank is the shapeless oak button, two planks in the stick shape are minecraft:stick x4 and the saved grid key holds the two cells), crafts 4 sticks out of the storage for one set and takes exactly one plank a cell (8 -> 6, player 0 -> 4), takes one set for 4 (4 planks) and two for 8 (0 planks, 16 sticks), answers 'missing cell 1: 16 minecraft:oak_planks, cell 4: 16 minecraft:oak_planks' on an empty storage without taking anything and then crafts a whole stack (64 sticks) from 32 planks, takes the player's 2 planks before the storage's 8 (upstream's first-source order) and leaves the storage at 8, refuses an unlocked storage (missing 1 a cell, the storage keeps its 8) and refuses a cell write while unlocked ('lock the storage to change the pattern'), keeps the pattern and crafts again after a relaunch (4 more sticks), and clears with grid clear (the pattern is empty again)"
+echo "PASS: the storage scanner places and reads back with its facing; a fresh one has no power (no power (0/50000 FE)) and reads nothing; at its default radius 1 it finds nothing two blocks away; /rftoolsstorage radius 2 widens the box and the scan answers minecraft:stone 64 for a chest two blocks away while the chest three away (minecraft:dirt 32) is outside it; radius 3 lists both, one entry a kind; every scan costs rfPerRequest (5,000 -> 4,900 -> 4,800 -> 4,700, printed in the reply); THE SCAN FILTER (the GUI's search box) keeps '@minecraft' listing both kinds, narrows 'dirt' to minecraft:dirt 32 and 'stone' to minecraft:stone 64, answers 'empty' for '@nomatch' with the price still paid (4,600), and leaves the unfiltered scan listing both (4,500) as the differential; THE SORT CHOICE orders the list (Amount- = dirt 64, stone 32, Amount+ = stone 32, dirt 64, Name = dirt 64, stone 32, Mod puts rftoolsstorage:storage_module0 after both minecraft kinds), and the saved AMOUNT_DESCENDING mode orders the list after a relaunch too (stone 64, dirt 32); an emptied buffer refuses with no power and reads nothing, and charging it again makes the scan answer again; scan and radius refuse a chest and the modular storage (not a storage scanner); the radius and the buffer survive a relaunch; THE INJECT TICK pushes 64 stone from the in-slot into the empty chest two blocks away so its Items[0] reads minecraft:stone x64 while the buffer drops by exactly one rfPerInsert (5000 -> 4980), and with the buffer at 0 the next stack stays in the slot and the chest keeps its 64, recharging proving the stall was the power (chest 128); the auto slot routes too (chest 160); items the game puts in the container are routed for one rfPerInsert; a stack nothing accepts is still charged one attempt (20 FE pays one, 19 pays none) and stays in the slot; the walk passes a full barrel for the chest behind it; the tick never writes the out slot; THE REQUEST PATH pulls 32 stone from a chest of 128 into the player's inventory (the reference's straight-to-inventory default), leaving the chest at 96 and the buffer at 4,990 for an explicit count, refuses a kind nothing holds and charges nothing, refuses below the price with the price line (costs 10, have 9), sends a ctl command's 16-stone request straight to the player too, and refuses a request whose out slot holds another kind without pulling or charging; THE INSERT PATH pushes the player's 64 stone into the chest two blocks away so its Items[0] reads minecraft:stone x64 and empties the player's stack for exactly one rfPerInsert (5000 -> 4980), inserts an explicit 10 of 64 for one more rfPerInsert, takes only the 32 a nearly-full barrel has room for and charges NOTHING for the partial insert, moves nothing and charges nothing against a full barrel (the player keeps 64), refuses a box with no routable inventory (there are no routable inventories, no charge) and refuses a chest (not a storage scanner); THE GIVE PATH hands the whole stack (64) straight to the player from a chest of 64, empties the chest and charges the FULL rfPerRequest (5000 -> 4900) with the out slot still holding the request counterfactual's dirt (it has no out slot), hands exactly one item with [single] (chest 3 -> 2, buffer 4900 -> 4800), refuses a kind nothing holds and charges nothing, and refuses below the full price with the price line (costs 100, have 99) without touching the chest, and a give on a chest is refused as not a storage scanner; the loot table drops the scanner on a survival break; the modular storage still answers 0/0 empty no module; a barrel answers not a storage scanner to the same commands; and THE ROUTABLE STAR LIST starts empty (a fresh scanner's tick routes its 64 stone nowhere and still pays one rfPerInsert), routes only the starred chest (B takes 64 while the un-starred A stays empty), still lists the un-starred A's 32 dirt in the scan (the star filters routing, not the list), restores the walk when A is re-starred (A 96), and survives a relaunch (the saved list names A, which then takes another stack, 160); THE EXPORT CHOICE (the GUI's 'Export to current container') sends the in-slot's 64 stone only to the selected inventory (B 64, A 0) for one rfPerInsert, follows the list's row (selecting A makes A 64 while B keeps its 64), saves the choice and the selection with the block so both survive a relaunch, does not fall through to the walk from a selected full barrel (the in-slot keeps its 64 and A and B stay at 64), and 'export first' restores the starred walk, which routes the same stack to B (128); THE ROW CONTENTS VIEW (the GUI list's per-row contents) answers 'contents B' with B's 128 stone and 'contents A' with A's 64 at buffer 0 and leaves the buffer at 0 (a listing is not a request), lists only the starred inventories in 'contents all' (un-starring B leaves A's 64 while B's own row still lists its 128, with nothing starred the all row is 'empty', and starring B alone lists 128), and refuses a cell outside the box, the scanner's own cell and an empty cell with 'is not an inventory in the scan box', also free; THE CRAFTING GRID (the jar's ghost pattern and its four craft buttons, carried as the grid and craft commands) reads a fresh block's pattern as empty and refuses a craft, matches the game's own recipe table (a cobblestone cell is no recipe and takes nothing, one plank is the shapeless oak button, two planks in the stick shape are minecraft:stick x4 and the saved grid key holds the two cells), crafts 4 sticks out of the storage for one set and takes exactly one plank a cell (8 -> 6, player 0 -> 4), takes one set for 4 (4 planks) and two for 8 (0 planks, 16 sticks), answers 'missing cell 1: 16 minecraft:oak_planks, cell 4: 16 minecraft:oak_planks' on an empty storage without taking anything and then crafts a whole stack (64 sticks) from 32 planks, takes the player's 2 planks before the storage's 8 (upstream's first-source order) and leaves the storage at 8, refuses an unlocked storage (missing 1 a cell, the storage keeps its 8) and refuses a cell write while unlocked ('lock the storage to change the pattern'), keeps the pattern and crafts again after a relaunch (4 more sticks), and clears with grid clear (the pattern is empty again); THE ACCESS RULE (slice 16: a scanner belongs to whoever placed it, and every cell a walk touches must be one the caller may act at and must carry no vanilla lock) hides a starred but locked chest from the scan, from the all row and from its own row (refused as is not an inventory in the scan box), refuses to star or select it, pulls nothing from it for a request or a give (nothing to pull, nothing to give, chest and buffer unchanged), routes the insert past it into the open chest (64 -> 128, one rfPerInsert) while it keeps its 32 dirt, refuses every cell to an adventure caller (scan empty, the row refused) and lists them again for a creative one, and lists the chest's 32 dirt only after the lock is removed (the differential), with a failed delivery leaving items and FE whole"

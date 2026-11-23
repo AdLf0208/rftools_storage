@@ -13,7 +13,7 @@ differences, are in [`FINDINGS.md`](FINDINGS.md).
 publishing (ARCHITECTURE.md §8); the port carries the upstream MIT notice in
 [`LICENSE`](LICENSE) and its provenance in [`LICENSE-NOTICE.md`](LICENSE-NOTICE.md).
 
-**Format: the SDK package (2026-11-18), version 0.2.15.** One flat `.hmod` —
+**Format: the SDK package (2026-11-18), version 0.2.16.** One flat `.hmod` —
 `horizon-mod.toml` + `Cargo.toml` + `src/` + `assets/` + `data/` — built by the
 launcher against SDK nightly **`0a875da91dbb0fdcb7ba8c42c11341aa229af51a`** with
 horizon-mixins **`e59da9094f0c2fdda6c627fe9eff22dec6a906f0`** (see
@@ -31,7 +31,8 @@ horizon-mixins **`e59da9094f0c2fdda6c627fe9eff22dec6a906f0`** (see
 [`## Slice 12`](#slice-12--the-scanners-routable-star-list-version-0212),
 [`## Slice 13`](#slice-13--the-scanners-export-choice-version-0213),
 [`## Slice 14`](#slice-14--the-lists-row-contents-view-version-0214),
-[`## Slice 15`](#slice-15--the-crafting-grids-pattern-and-craft-from-storage-version-0215)).
+[`## Slice 15`](#slice-15--the-crafting-grids-pattern-and-craft-from-storage-version-0215),
+[`## Slice 16`](#slice-16--the-access-fix-authorization-on-the-scanned-inventories-version-0216)).
 The retired `.hnmod` container pinned Horizon `1d63e0a5…` / mixins `5a64af93…`;
 `src/runtime.rs` was byte-identical to the retired
 `mixins/rftoolsstorage/runtime.rs` until the 2026-11-18 review fixes gave it the
@@ -81,8 +82,12 @@ matched by the game's recipe table and crafted out of the player's inventory and
 the locked storage by the GUI's four buttons (`/rftoolsstorage craft <1|4|8|stack>`))
 are implemented and
 verified in a launcher-built game at the pin (the legs are listed per slice
-below; `ports/_shared/evidence/rftoolsstorage-e2e/`). The gap list below is the
-rest of the mod.
+below; `ports/_shared/evidence/rftoolsstorage-e2e/`), and slice 16 is the
+**reviewer's blocked finding** fixed: the scanner belongs to its placer, every
+cell a walk touches must be one the caller may act at and must carry no vanilla
+lock, and a delivery that fails keeps its items and its FE (see
+[`## Slice 16`](#slice-16--the-access-fix-authorization-on-the-scanned-inventories-version-0216)).
+The gap list below is the rest of the mod.
 
 ## Class + tier and the approach
 
@@ -262,9 +267,11 @@ None. The two candidates were checked and left alone, on purpose:
   **remote/tablet variant**, the XNet access settings (slice 12 carries the star
   list but not `InventoryAccessSettings`' per-inventory input/output permissions,
   which need the XNet side), and the claimed-land check
-  (`scannerNoRestrictions`; the pin has no `can_entity_destroy` **hook** exists at
-  the pin, but it is a cancellable game event, not a query a mod can ask for a fake
-  player — `blocked(no permission query)`). The **request path** is slice 7, the
+  (`scannerNoRestrictions`; `can_entity_destroy` is a cancellable game event at the
+  pin, not a query a mod can ask for a fake player — `blocked(no permission query)`.
+  Slice 16 fixes the reported hole with what the pin does expose: the scanner's
+  placer is its owner, and a cell must pass `Player.mayUseItemAt` and carry no
+  vanilla lock). The **request path** is slice 7, the
   give-from-screen path is slice 8, the insert-from-screen path is slice 9, the
   search filter is slice 10, the sort is slice 11 and the star list is slice 12;
   `Tag` sorting is `blocked(no item-tag enumeration)`.
@@ -2847,13 +2854,199 @@ answers `not a modular storage`.
    in backticks ran `grid` as a command, printed `command not found` into the log and silently
    dropped the words. The PASS line is plain text now, and the log is checked for that string.
 
+## Slice 16 — the access fix: authorization on the scanned inventories (version 0.2.16)
+
+This slice is a **review fix**, not a new family. The registry reviewer blocked the pull request:
+
+> Blocked: **harmful code**, packaged `src/support.rs:2356` in the unchanged 0.2.6–0.2.12 archives …
+> These versions **can access another player's target inventory without authorization**. … carry
+> forward only a replacement that **checks access to the scanner and target, and leaves items and
+> energy intact if delivery fails**.
+
+### What the cited line is, and what the hole was
+
+`src/support.rs:2356` in the **published** 0.2.12 archive (fetched from the release, 2,713 lines) is
+`let Some(level) = host.level(host.dimension()) else {` inside `on_run_mod_command` — the dispatcher
+that takes a player-chosen `pos` and hands it to the scanner's walks. The code the finding describes
+sits in the helpers those walks run against **another block entity's inventory**:
+
+| helper | what it does to a neighbour |
+|---|---|
+| `scan_found` → `cell_entries` | reads every slot of every inventory in the box (`scan`, `contents`) |
+| `pull_request`, `pull_to_player` | `handler.extract_any(…)` out of every neighbour in the box (`request`, `give`) |
+| `insert_to_inventories`, `inject_stack` | `handler.insert_any(…)` into every neighbour in the box (`insert`, the tick) |
+
+Before 0.2.16 the only gate was `may_touch`: an operator, or a player **within 8 blocks of the
+scanner**. Nothing checked the **cells**. A scanner's box is radius 1..20 — up to 41 × 41 × 41 — so a
+caller allowed to touch the machine could read and drain every inventory it reached, through a wall,
+in another player's sealed base, and a container another player had locked was routed into. There was
+no owner either: any player who walked up to a scanner could drive it.
+
+### What the pin exposes (measured, not guessed)
+
+`ports/_shared/sdk/0a875da/api-source` (extracted at `ports/rftoolsstorage/.horizon/sdk/api/`):
+
+| primitive | what it is | used for |
+|---|---|---|
+| `PlayerRef::may_use_item_at(host, pos, face, stack) -> Option<bool>` | `Player.mayUseItemAt`: `mayBuild` refined in adventure mode by the stack's `can_place_on` — the engine's own "may this player use an item at this block" | the **cell**'s action permission |
+| `PlayerRef::may_build(host) -> Option<bool>` | the same rule with an empty hand | the cell's permission when the hand is empty |
+| `BlockEntityRef::lock(host) -> Option<Compound>` | the container's **vanilla lock** — 1.21.5's `lock` item predicate (`LockCode`), which `BaseContainerBlockEntity.canOpen` tests against the main hand | the **cell**'s per-container authorization |
+| `CommandSource::permission()` / `PlayerRef::permission_level` | the operator level (`LEVEL_ADMINS` = 2) | the scanner and the console |
+| `EntityRef::uuid` + `OnBlockPlacedByEvent::placer` | who placed the block | the scanner's **owner** |
+
+What the pin does **not** expose, and the port does not invent: a claim/ownership query for a
+position (`can_entity_destroy` is a cancellable *hook*, not a query — slice 5's
+`blocked(no permission query)` stands) and any notion of a chest's owner (vanilla containers have
+none; the lock is the only per-container access rule vanilla has). There is no `can_unlock` either,
+so the port cannot ask whether the caller's item *matches* a lock: a locked container is simply closed
+to the scanner (deviation 18).
+
+### The fix
+
+1. **Access to the scanner** (`runtime::scanner_open`). Placing a scanner records the placer's UUID as
+   the block's `owner` (`[hi, lo]` as two longs, written by the scanner's own `ItemPart`). Only that
+   player, or an operator, may drive it — in its level. A scanner with **no** recorded owner
+   (`setblock`, a piston, a dispenser, a pre-0.2.16 block) keeps the reach rule every block had, so an
+   unowned machine is not sealed to everyone. The modular storage keeps the reach rule: its commands
+   touch only the block the caller is standing at.
+2. **Access to the target** (`runtime::target_open`). Every cell a walk touches — the scan's list, the
+   contents rows, the star and select validation, the request/give pull, the insert and the tick —
+   must pass two checks after its item capability answered: the caller may **act** at it
+   (`may_use_item_at` with the stack in hand; `may_build` for an empty hand; a console needs the
+   operator level), and the block entity carries **no lock**. The tick has no player, so only a lock
+   refuses it. A refused cell is skipped; the readouts refuse it with the existing generic line
+   (`… is not an inventory in the scan box`), so the answer does not disclose what is behind it.
+3. **A delivery that fails is refunded** (`runtime::Delivery`). The request's price is now computed from
+   what was **delivered**, not from what was pulled, and the pull and its delivery (the give, or the
+   out slot) run in **one** transaction: a refused give, a refused out-slot write or a stack the game
+   cannot build rolls the whole walk back, so every inventory keeps its stacks and the buffer is
+   untouched. `give` and `insert` already had that shape; `request` did not — it committed the pull,
+   charged the buffer, and only then could fail to build the stack or to give it.
+
+### Deviations this slice adds
+
+16. **The scanner has an owner** (`owner`, two longs). Upstream has no such field: it asks
+    `level.getBlockState(p).canEntityDestroy(level, p, fakePlayer)` and relies on claim mods, which the
+    pin has no query for. With no claim query, the placer is the only recorded authority a machine can
+    carry; the refusal is `You must be an operator or within 8 blocks of the storage.` (unchanged text)
+    and an operator is never refused. A shared base's non-operator second player therefore needs an
+    operator to drive someone else's scanner — a stricter rule than upstream's, chosen because the
+    alternative is the reported hole.
+17. **An adventure or spectator caller may not drive the walks.** `Player.mayUseItemAt` is false for
+    them at a cell unless the held stack's `can_place_on` matches that block. Upstream never asks it
+    (the fake player is in survival, and the result is read as an area claim, not as the caller's game
+    mode). The port asks the engine for the **caller's** answer.
+18. **A locked container is closed to the scanner, even for a player holding the key.** The pin exposes
+    the lock and the engine's `can_unlock` only inside the container-open path, not as a query, so the
+    port cannot evaluate the predicate; refusing every locked cell is the fail-safe reading and is what
+    the reviewer asked for. A player who wants their locked chest routed walks to it and opens it.
+
+### Red → green (the rules)
+
+The three rules were written first and stubbed to the old behaviour (`target_open` → `true`,
+`scanner_open` → the reach rule, `request_charge` ignoring `Delivery`), and the suite was run **before**
+implementing them (`ports/_shared/evidence/rftoolsstorage/slice16-red.log`, `TEST_EXIT:101`):
+
+```
+thread 'runtime::tests::a_delivery_that_failed_costs_nothing_and_takes_nothing' panicked at src/runtime.rs:2160:9:
+assertion `left == right` failed: a refused delivery is never paid for
+  left: Paid(4990)
+ right: Nothing
+
+thread 'runtime::tests::a_scanned_cell_must_be_one_the_caller_may_act_at_and_must_be_unlocked' panicked at src/runtime.rs:2188:9:
+a locked container is closed to the scanner
+
+thread 'runtime::tests::the_scanner_belongs_to_whoever_placed_it' panicked at src/runtime.rs:1727:9:
+the placer drives theirs from across the level
+
+test result: FAILED. 62 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out
+```
+
+**The in-game red is the stronger one**: the new `ACCESS` phase run against the **0.2.15 game** (the
+package this slice replaces) fails on its first assertion
+(`ports/_shared/evidence/rftoolsstorage-e2e/e2e-access-red.log`, `EXIT:1`):
+
+```
+== the scan does not list a cell the caller may not use (the locked chest's 32 dirt stays hidden) ==
+the locked chest's saved lock: {items: "minecraft:dirt"}
+scan: rftoolsstorage:storage_scanner: minecraft:dirt 32, minecraft:stone 64 (4900/50000 FE); buffer now 4900
+FAIL: the scan listed the locked chest's dirt: rftoolsstorage:storage_scanner: minecraft:dirt 32, minecraft:stone 64 (4900/50000 FE)
+```
+
+so the old package read another container's locked inventory, and the 42 legs before it still pass.
+
+### Coverage (the families this slice changes)
+
+| Family | State |
+|---|---|
+| the scanner's owner (written at placement, saved as two longs, survives a relaunch) | **tested** — `the_scanner_belongs_to_whoever_placed_it`, `the_scanners_owner_round_trips_as_two_longs`; the in-game rig's scanner is placed by the player and still answers every walk (the earlier legs) |
+| the scanner refuses a caller who is not its owner and not an operator | **unit only** — the single-player harness has one player and it is the host (operator level 4), so no in-game leg can produce a non-operator caller; the rule is `scanner_open`'s test (the brief allows this: "otherwise state plainly that the unit test is the refusal proof") |
+| a **locked** target is not listed (`scan`, `contents`, `contents all`) | **tested in game** — the locked chest's 32 dirt is absent while the open chest's stone is listed; unlocking it with `/data remove … lock` lists the dirt (the differential, `e2e-access.log`); `a_scanned_cell_must_be_one_the_caller_may_act_at_and_must_be_unlocked` |
+| a locked target is refused as a row, a star and a selection | **tested in game** — `contents <locked>` / `routable … off` / `select` all answer `… is not an inventory in the scan box` (`e2e-access.log`) |
+| a locked target is never pulled from (request, give) | **tested in game** — `nothing to pull` / `nothing to give`, the chest keeps its 32 dirt and the buffer is unchanged (`e2e-access.log`) |
+| a locked target is never routed into (insert, and the tick's walk shares `scan_targets`) | **tested in game** — the insert fills the open chest (64 → 128) and leaves the locked one at 32, one `rfPerInsert` (`e2e-access.log`) |
+| the engine's action permission (`mayUseItemAt`) refuses a cell | **tested in game** — `gamemode adventure` makes `scan` answer `empty` and `contents` refuse, and `gamemode creative` lists the chest again (the differential, `e2e-access.log`) |
+| a refused delivery keeps the items and the buffer | **tested in game** — the refused request/give leave the chest and the buffer unchanged (`e2e-access.log`); `a_delivery_that_failed_costs_nothing_and_takes_nothing` (the request's pull+give is now one transaction) |
+| the 0.2.13–0.2.15 archives carry the same pattern | **yes** — `may_touch` is the only gate in 0.2.13 (2,911 lines), 0.2.14 and 0.2.15 (3,403 lines); the same helpers, the same missing target check. Only 0.2.16 fixes it; 0.2.6–0.2.12 stay removed from the entry |
+| the claimed-land check as upstream asks it (`canEntityDestroy` with a fake player) | **blocked(no permission query)** — unchanged; the owner + cell checks are what the pin exposes |
+
+### Traps this slice paid for
+
+1. **A star outlives the lock.** The `routable` command now refuses a locked cell, so a locked chest
+   cannot be *starred* — the rig stars it first and locks it afterwards (as a dungeon chest someone
+   seals later would be), which is also what makes the walk's own check the thing under test rather
+   than the star's absence.
+2. **`data merge … {lock: …}` is the engine's `LockCode`, not a port key.** It is read back with
+   `/data get block … lock` (`{items: "minecraft:dirt"}`) and removed with `/data remove block … lock`;
+   the removal is the differential that proves the lock, not the access check's mood, is what hid the
+   cell.
+3. **The single-player host is an operator.** `may_touch`/`scanner_open` pass for the harness's only
+   player whatever its UUID does, so the owner half cannot be exercised in game; the adventure-mode
+   leg still proves `mayUseItemAt` on the same one identity (adventure is a game mode, not a second
+   player).
+4. **`scan_targets` asks the capability before the permission.** The box can hold 68,921 positions at
+   radius 20; a host import per empty cell would be 68,921 wasted queries, so the order is capability
+   → access.
+5. **A local enum variant named after an SDK type false-fails `fits`.** The new driver enum's
+   `Driver::Command(&CommandSource)` variant made `cargo horizon-mod fits … --build 0b14f8a` answer
+   *"the type `Command` can no longer be built with a literal, and `src/support.rs:1285` builds it"* —
+   the usage scan reads the local variant as a build of the SDK's `Command` (the campaign's
+   `Block`/`Item` trap, 2026-11-23). Renaming the variant to `Caller` made the same file fit.
+6. **`sdk-test.log` is read by the package gate.** `verify-sdk-package` reports the test count from
+   that log, and a stale copy reports the previous version's count (it said `57 passed` for 0.2.16
+   until the log was regenerated); the 0.2.16 run is the one in the table.
+
 ## Verification
 
-Skills: superpowers/using-superpowers, brainstorming, writing-plans, test-driven-development, systematic-debugging, verification-before-completion; BeautifulRust/rust-best-practices
+Skills: superpowers/using-superpowers, test-driven-development, systematic-debugging, verification-before-completion (and, for the earlier slices, brainstorming, writing-plans); BeautifulRust/rust-best-practices
 
 Full evidence in [`VALIDATION.md`](VALIDATION.md); the e2e logs are in
 `ports/_shared/evidence/rftoolsstorage-e2e/` (the game legs) and
 `ports/_shared/evidence/rftoolsstorage/` (the ladder, package and fits).
+
+**0.2.16 — the access fix (2026-11-23, pin `0a875da`)**
+
+| Step | Command | Result |
+|---|---|---|
+| Red proof (rules) | `cargo test` with `target_open` → `true`, `scanner_open` → the reach rule and `request_charge` ignoring `Delivery` | **FAILED. 62 passed; 3 failed**, `TEST_EXIT:101` (`slice16-red.log`); quoted above |
+| Red proof (in game) | the new `ACCESS` phase on the **0.2.15** game (the package this slice replaces) | **FAIL** + `EXIT:1` — *"the scan listed the locked chest's dirt: … minecraft:dirt 32, minecraft:stone 64 …"* (`rftoolsstorage-e2e/e2e-access-red.log`) |
+| Runtime + glue tests | `cargo test` | **66 passed**, 0 failed (`sdk-test.log`, `slice16-test.log`) — 58 runtime + 8 glue |
+| Lints | `cargo clippy --all-targets -- -D warnings` | `CLIPPY_EXIT:0`, 0 warnings (`slice16-clippy.log`) |
+| Formatting | `rustfmt --edition 2024 --check src/{lib,support,runtime}.rs` | `FMT_EXIT:0` (`slice16-fmt.log`) |
+| SDK gate | `cargo horizon-mod check` | `TREE_CHECK_EXIT:0` — *"RFTools Storage uses 562 items of the API (5 Part kinds, 2 capabilitys, 159 fields or variants, 18 hooks, 53 hook arguments, 2 macros, 174 methods, 29 traits, 120 types). Made for 0a875da."* (`slice16-tree-check.log`) |
+| Package | `rm -f Cargo.lock && cargo horizon-mod build`, twice | **115,966 B**, SHA-256 `68620ecd44b0b2a5422db08185daa6898bb2eeb534dc47fd44ad7656e1427f16`, **`cmp`-identical** (`slice16-build-1.log`, `slice16-build-2.log`); the README and the manifest's description were edited *before* this build, and the gate says `package matches the tree` |
+| Package check | `cargo horizon-mod check rftoolsstorage.hmod` | `rftoolsstorage 0.2.16 (native-mod, format native-1/0a875da…/e59da90…, for 26.3)`, **115,966 bytes**, `68620ecd…7f16`, `FILE_CHECK_EXIT:0` (`slice16-check.log`) |
+| Entries | `unzip -l rftoolsstorage.hmod` | **67 files**, no `Cargo.lock`; `src/runtime.rs` byte-identical in tree and package (`d04480ab0847`) |
+| fits, the pin | `cargo horizon-mod fits rftoolsstorage.hmod --build 0a875da` | `0a875da  made for`, **FITS_PIN_EXIT:0** (`slice16-fits.log`) |
+| fits, another build | `cargo horizon-mod fits rftoolsstorage.hmod --build 0b14f8a` | `0b14f8a  fits`, **FITS_OTHER_EXIT:0** (`slice16-fits.log`) — after the local `Driver::Command` variant was renamed to `Caller` (see trap 5) |
+| launcher build | `BUILD_LOCAL=1 ports/tools/launcher-game.sh build rftoolsstorage` | `Compiling rftoolsstorage (1 of 1)`, tag `native-0a875da-3034e5efc5e3`, exit 0 (`slice16-launcher-build.log`) |
+| in game | `build-slot.sh run --job W1-rftoolsstorage --step e2e -- bash ports/rftoolsstorage/tools/e2e.sh` (`CONTROL_GAME=`) | **PASS** + `EXIT:0` (`rftoolsstorage-e2e/e2e-access.log`) — all 42 earlier legs and the new ACCESS phase |
+| control | the same leg on the Nightly **without** the package | **FAIL** + `EXIT:1` (`{"error":"unknown item rftoolsstorage:storage_scanner"}`, `e2e-access-control.log`) |
+| selftest (this slice) | `ACCESS_SELFTEST=1` (asserts the scan DID list the locked chest's dirt) | **FAIL** + `EXIT:1` — *"the scan listed the open chest's stone and NOT the locked chest's 32 dirt …, so this inverted assertion fails as it must"* (`e2e-access-selftest.log`) |
+| e2e gate | `python3 ports/tools/check-e2e-logs.py rftoolsstorage-e2e --strict` | `logs=46  ok=46  missing-exit=0  bad-exit=0`, exit 0 |
+| package gate | `python3 ports/tools/verify-sdk-package.py rftoolsstorage` | `1/1 package(s) verified`, exit 0 (all checks `ok`, `package matches the tree` and `66 passed` included) |
+| recipe types | `python3 ports/tools/check-recipe-types.py rftoolsstorage` | `rftoolsstorage: ok`, exit 0 |
+| skills gate | `python3 ports/tools/check-skills.py --notes ports/rftoolsstorage --strict` | PASS |
 
 **0.2.15 — the crafting grid's pattern and craft-from-storage (2026-11-23, pin `0a875da`)**
 

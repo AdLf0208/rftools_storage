@@ -25,19 +25,19 @@ use std::time::{Duration, Instant};
 use mod_api::item::containers::{ModBlockEntityFields, ModEnergyBuffer};
 use mod_api::{
     self, BlockDropsEvent, BlockEntityEvent, BlockEntityPart, BlockEntityRef, BlockEntityTickEvent,
-    BlockEntityTickReply, BlockEntityTicksEvent, BlockKey, BlockPart, ClientHost, Command,
-    CommandArgumentValue, CommandSource, Compound, Flow, Hand, Host, HostSide, HostTransaction,
-    ITEMS, Identifier, InteractionResult, ItemKey, ItemPart, ItemResource, ItemStack, LevelHost,
-    LevelRef, LevelSide, MenuButtonEvent, MenuContainer, MenuPart, MenuSlotRulesEvent,
-    ModContainer, OnBlockPlacedByEvent, OnDestroyedByPlayerEvent, PlayerContainerOpenEvent,
-    PlayerRef, RecipeInput, RecipeMatch, RegisterCommandsEvent, Registrar, RegistrationContext,
-    RightClickBlockEvent, RunModCommandEvent, Screen, ScreenClickEvent, ScreenDrawEvent,
-    ScreenEvent, ServerHost, Tag, Text, Transaction,
+    BlockEntityTickReply, BlockEntityTicksEvent, BlockFace, BlockKey, BlockPart, ClientHost,
+    Command, CommandArgumentValue, CommandSource, Compound, Flow, Hand, Host, HostSide,
+    HostTransaction, ITEMS, Identifier, InteractionResult, ItemKey, ItemPart, ItemResource,
+    ItemStack, LevelHost, LevelRef, LevelSide, MenuButtonEvent, MenuContainer, MenuPart,
+    MenuSlotRulesEvent, ModContainer, OnBlockPlacedByEvent, OnDestroyedByPlayerEvent,
+    PlayerContainerOpenEvent, PlayerRef, RecipeInput, RecipeMatch, RegisterCommandsEvent,
+    Registrar, RegistrationContext, RightClickBlockEvent, RunModCommandEvent, Screen,
+    ScreenClickEvent, ScreenDrawEvent, ScreenEvent, ServerHost, Tag, Text, Transaction,
 };
 
 use crate::runtime::{
-    Batch, CraftPlan, ExportMode, ExportRoute, Found, GiveAmount, Held, InjectSlot, InsertCharge,
-    Kind, LEVEL_ADMINS, LockPress, PATTERN_CELLS, RequestCharge, SCANNER_AUTO_SLOT,
+    Batch, CraftPlan, Delivery, ExportMode, ExportRoute, Found, GiveAmount, Held, InjectSlot,
+    InsertCharge, Kind, LEVEL_ADMINS, LockPress, PATTERN_CELLS, RequestCharge, SCANNER_AUTO_SLOT,
     SCANNER_IN_SLOT, SCANNER_MAX_ENERGY, SCANNER_OUT_SLOT, SCANNER_RECEIVE_PER_TICK,
     SCANNER_RF_PER_INSERT, SCANNER_SLOTS, SLOT_LIMIT, STORAGE_SCANNER, Slot, SortingMode, Storage,
     card_accepts, carried_slot_in, clamp_radius, contents_line, contents_refused_line,
@@ -45,12 +45,12 @@ use crate::runtime::{
     export_line, export_route, gave_line, give_amount, give_nothing_line, give_price, inject_plan,
     injectable_at, insert_amount, insert_charge, insert_line, insert_nothing_line,
     insert_partial_line, insert_price, is_modular_storage, is_routable, is_storage_scanner,
-    lock_press, matches_search, may_inspect, merge_counts, missing_line, module_id, module_tier,
-    no_power_line, no_recipe_line, no_routable_line, out_slot_room, pattern_line,
-    pattern_locked_line, pattern_needs, request_amount, request_charge, request_line,
-    request_no_power_line, request_nothing_line, request_out_slot_line, request_price,
-    restored_count, routable_line, routing_target, scan_line, scan_positions, scanner_radius,
-    search_name, search_namespace, selection_line, slot_accepts, sort_found, spend_power, star,
+    lock_press, matches_search, merge_counts, missing_line, module_id, module_tier, no_power_line,
+    no_recipe_line, no_routable_line, out_slot_room, pattern_line, pattern_locked_line,
+    pattern_needs, request_amount, request_charge, request_line, request_no_power_line,
+    request_nothing_line, request_out_slot_line, request_price, restored_count, routable_line,
+    routing_target, scan_line, scan_positions, scanner_open, scanner_radius, search_name,
+    search_namespace, selection_line, slot_accepts, sort_found, spend_power, star, target_open,
 };
 
 /// The block this slice implements, exactly as the content declares it.
@@ -90,6 +90,14 @@ const KEY_ENERGY: &str = "energy";
 const KEY_MODULE: &str = "module";
 /// The saved compound key of the lock (a byte, as upstream's lockable entity).
 const KEY_LOCKED: &str = "locked";
+/// The saved compound key of the **scanner's owner**: the UUID of the player who
+/// placed the block, as two longs (`[hi, lo]`). Upstream keeps no owner — it leaves
+/// "may this player use this machine" to claim mods (slice 5's
+/// `blocked(no permission query)`) — and the pin has no claim query, so the placer
+/// is the only recorded authority a block can carry. The key is absent on a scanner
+/// placed by `setblock`, a piston or a pre-0.2.16 block, which keeps the old reach
+/// rule (`runtime::scanner_open`).
+const KEY_OWNER: &str = "owner";
 /// No module recorded in the saved compound. A stored sentinel rather than a
 /// missing key: `merge_data` sets a key but cannot remove one, and the round trip
 /// is internal — [`legacy_tier`] reads any value outside `0..=3` as no module.
@@ -245,6 +253,10 @@ fn register_scanner(registrar: &mut dyn Registrar) {
     };
     registrar.block_energy(&scanner, energy);
     registrar.block_container(&scanner, scanner_container());
+    // The scanner's own item: its placement records the owner (slice 16's access
+    // rule), so a scanner belongs to whoever put it down.
+    let item = registrar.item_key(STORAGE_SCANNER);
+    registrar.item_part(item, ScannerItem);
 }
 
 /// `StorageScannerContainer`: three slots — the GUI's input, the out slot a request
@@ -403,6 +415,36 @@ impl ItemPart for StorageItem {
             return;
         }
         restore_carried(host, event.pos);
+    }
+}
+
+/// The storage scanner's own item: placing it records who placed it, so the block
+/// knows whose scanner it is (`runtime::scanner_open`). Upstream keeps no owner —
+/// it leaves the question to claim mods — and the pin has no claim query, so the
+/// placer is the only recorded authority a machine can carry. A scanner placed by
+/// anything but a player (`setblock`, a piston, a dispenser) keeps no owner and
+/// stays under the reach rule.
+pub(crate) struct ScannerItem;
+
+#[mod_api::horizon_part]
+impl ItemPart for ScannerItem {
+    fn on_block_placed_by(&self, host: &mut dyn ServerHost, event: &mut OnBlockPlacedByEvent<'_>) {
+        let block = event.state.block().id(&*host);
+        if block != STORAGE_SCANNER {
+            return;
+        }
+        let Some(placer) = event.placer else {
+            return;
+        };
+        let Some(uuid) = placer.entity().uuid(host) else {
+            return;
+        };
+        let Some(entity) = entity_at(&*host, event.pos) else {
+            return;
+        };
+        let mut data = Compound::new();
+        data.insert(KEY_OWNER.into(), owner_tag(uuid));
+        let _ = entity.merge_data(host, data);
     }
 }
 
@@ -1151,22 +1193,32 @@ fn mutate<R>(
     })
 }
 
-/// Whether this command source may read or lock the storage at `pos`: an
-/// operator (permission ≥ 2), or a player in the same level within
+/// Whether this command source may read or lock the block at `pos`: an operator
+/// (permission ≥ 2), the player who placed a **scanner** — or, for a scanner nobody
+/// owns and for every modular storage, a player in the same level within
 /// [`INSPECT_RANGE`](crate::runtime::INSPECT_RANGE) of the block.
+///
+/// The scanner half is the finding's first check (`runtime::scanner_open`): its
+/// box reaches 20 blocks, further than its driver can walk, so "near the machine"
+/// is not an authorization for what the machine reaches.
 fn may_touch(
-    host: &dyn ServerHost,
+    host: &mut dyn ServerHost,
     source: &CommandSource,
     level: LevelRef,
     pos: [i32; 3],
 ) -> bool {
     let op = source.permission().level() >= LEVEL_ADMINS;
+    let owner = if is_storage_scanner(&block_id_at(&*host, pos)) {
+        scanner_entity(&*host, pos).and_then(|entity| saved_owner(entity.data(&*host).as_ref()))
+    } else {
+        None
+    };
     match source {
         CommandSource::Player { player, .. } => {
-            let same_level = player.level(host) == Some(level);
+            let same_level = player.level(&*host) == Some(level);
             let distance = player
                 .entity()
-                .position(host)
+                .position(&*host)
                 .map(|at| {
                     let block = [
                         f64::from(pos[0]) + 0.5,
@@ -1179,10 +1231,88 @@ fn may_touch(
                         .sqrt()
                 })
                 .unwrap_or(f64::MAX);
-            may_inspect(op, same_level, distance)
+            let caller = player.entity().uuid(host);
+            scanner_open(op, owner, caller, same_level, distance)
         }
         _ => op,
     }
+}
+
+/// The saved UUID of the player who placed a scanner: two longs, `[hi, lo]`. A
+/// malformed or absent pair is no owner — the block keeps the reach rule.
+fn saved_owner(data: Option<&Compound>) -> Option<u128> {
+    let Some(Tag::LongArray(parts)) = field(data, KEY_OWNER) else {
+        return None;
+    };
+    let [hi, lo] = [parts.first()?, parts.get(1)?];
+    Some((u128::from(*hi as u64) << 64) | u128::from(*lo as u64))
+}
+
+/// The saved shape of a scanner's owner: the UUID as two longs, so the value rides
+/// the block's compound like every other key.
+fn owner_tag(owner: u128) -> Tag {
+    Tag::LongArray(vec![(owner >> 64) as u64 as i64, owner as u64 as i64])
+}
+
+/// Who is driving a walk over the scanned inventories: the caller of a command, or
+/// the block's own tick, which has no player to ask.
+#[derive(Clone, Copy)]
+enum Driver<'a> {
+    /// A command, with the source that sent it. (The variant is `Caller`, not
+    /// `Command`: the SDK usage scan reads a local variant's name as a *build of
+    /// the SDK type of that name* and `fits` then false-fails `Command` — the
+    /// campaign's `Block`/`Item` trap, `src/support.rs:1285` on 2026-11-23.)
+    Caller(&'a CommandSource),
+    /// The scanner's own tick (`block_entity_tick`): no player is acting.
+    Automation,
+}
+
+/// Whether this driver may read, pull out of or push into the container at `at`:
+/// the finding's second check (`runtime::target_open`). A container carrying the
+/// vanilla `Lock` is closed to the scanner — it opens only for a matching item in
+/// hand, and a machine presents none — and a player must pass the engine's own
+/// `Player.mayUseItemAt` at the cell. The tick has no player, so only a lock
+/// refuses it.
+fn may_use_target(
+    host: &mut dyn ServerHost,
+    driver: Driver<'_>,
+    level: LevelRef,
+    at: [i32; 3],
+) -> bool {
+    let locked = host
+        .block_entity(level, at)
+        .and_then(|entity| entity.lock(&*host))
+        .is_some();
+    let may_act = match driver {
+        Driver::Automation => true,
+        Driver::Caller(source) => may_act_at(&*host, source, at),
+    };
+    target_open(may_act, locked)
+}
+
+/// The caller's action permission at a cell: `Player.mayUseItemAt` with the stack
+/// in the player's hand (the engine's own use rule, which an adventure player only
+/// passes with a matching `can_place_on`), `mayBuild` when the hand is empty — the
+/// same rule before that refinement — and the operator level for a console.
+fn may_act_at(host: &dyn Host, source: &CommandSource, at: [i32; 3]) -> bool {
+    match source {
+        CommandSource::Player { player, .. } => match held_stack(host, *player) {
+            Some(stack) => player.may_use_item_at(host, at, BlockFace::Up, &stack) == Some(true),
+            None => player.may_build(host) == Some(true),
+        },
+        _ => source.permission().level() >= LEVEL_ADMINS,
+    }
+}
+
+/// The stack in the player's main hand, as a use at a block would read it: the
+/// selected hotbar slot's stack, or none for an empty slot.
+fn held_stack(host: &dyn Host, player: PlayerRef) -> Option<ItemStack> {
+    let slot = u32::try_from(player.selected_slot(host)?).ok()?;
+    player
+        .inventory_slots(host)?
+        .into_iter()
+        .find(|(at, _)| *at == slot)
+        .map(|(_, stack)| stack)
 }
 
 /// A storage as it stands, with the stacks behind it.
@@ -1617,7 +1747,12 @@ fn selection_tag(at: [i32; 3]) -> Tag {
 /// is read or spent. The search costs the same: upstream's filter narrows the
 /// list the request is made from, and this readout is that list (slice 5's
 /// deviation 1), so a filtered scan is charged like an unfiltered one.
-fn scan_readout(host: &mut dyn ServerHost, pos: [i32; 3], query: &str) -> String {
+fn scan_readout(
+    host: &mut dyn ServerHost,
+    source: &CommandSource,
+    pos: [i32; 3],
+    query: &str,
+) -> String {
     let block = block_id_at(&*host, pos);
     if !is_storage_scanner(&block) {
         return format!("{block}: not a storage scanner");
@@ -1630,7 +1765,13 @@ fn scan_readout(host: &mut dyn ServerHost, pos: [i32; 3], query: &str) -> String
     let Some(after) = spend_power(stored) else {
         return format!("{block}: {}", no_power_line(stored));
     };
-    let found = scan_found(host, pos, saved_radius(data.as_ref()), query);
+    let found = scan_found(
+        host,
+        Driver::Caller(source),
+        pos,
+        saved_radius(data.as_ref()),
+        query,
+    );
     let found = sort_found(saved_sort(data.as_ref()), &found);
     if let Ok(after) = i32::try_from(after) {
         let mut spent = Compound::new();
@@ -1671,13 +1812,27 @@ fn cell_entries(host: &mut dyn ServerHost, level: LevelRef, at: [i32; 3]) -> Vec
 /// place answers nothing. `query` is the GUI search box, `scan`'s optional term:
 /// a kind the search rejects is left out of the list, exactly as `getMatcher`
 /// narrows the widget's cache (`matches_search`).
-fn scan_found(host: &mut dyn ServerHost, pos: [i32; 3], radius: i32, query: &str) -> Vec<Found> {
+fn scan_found(
+    host: &mut dyn ServerHost,
+    driver: Driver<'_>,
+    pos: [i32; 3],
+    radius: i32,
+    query: &str,
+) -> Vec<Found> {
     let Some(level) = host.level(host.dimension()) else {
         return Vec::new();
     };
     let mut entries: Vec<(String, u32)> = Vec::new();
     for at in scan_positions(pos, radius) {
         if at == pos || level.block(&*host, at) == Some(scanner_key()) {
+            continue;
+        }
+        // The finding: a cell is listed only when the caller may use it, and only
+        // after the capability says there is something there (so an empty cell
+        // costs no permission query).
+        if level.capability(&mut *host, &ITEMS, at, None).is_none()
+            || !may_use_target(host, driver, level, at)
+        {
             continue;
         }
         for (id, count) in cell_entries(host, level, at) {
@@ -1707,7 +1862,12 @@ fn scan_found(host: &mut dyn ServerHost, pos: [i32; 3], radius: i32, query: &str
 /// A row listing is **not a request**, so nothing is charged: upstream's
 /// `getInventoryForBlock` never calls `consumeEnergy`, and the GUI lists for free.
 /// The saved sort choice orders the listing as it orders `scan`'s.
-fn contents_readout(host: &mut dyn ServerHost, pos: [i32; 3], target: Option<[i32; 3]>) -> String {
+fn contents_readout(
+    host: &mut dyn ServerHost,
+    source: &CommandSource,
+    pos: [i32; 3],
+    target: Option<[i32; 3]>,
+) -> String {
     let block = block_id_at(&*host, pos);
     if !is_storage_scanner(&block) {
         return format!("{block}: not a storage scanner");
@@ -1729,7 +1889,12 @@ fn contents_readout(host: &mut dyn ServerHost, pos: [i32; 3], target: Option<[i3
             let scanner_there = level.block(&*host, at) == Some(scanner_key());
             let has_inventory =
                 !scanner_there && level.capability(&mut *host, &ITEMS, at, None).is_some();
-            if !contents_row(pos, radius, at, scanner_there, has_inventory) {
+            // A row the caller may not use is not a row: the same generic refusal
+            // a cell outside the box gets, so the answer does not disclose what is
+            // behind the refusal (the finding's information half).
+            if !contents_row(pos, radius, at, scanner_there, has_inventory)
+                || !may_use_target(host, Driver::Caller(source), level, at)
+            {
                 return format!("{block}: {}", contents_refused_line(at));
             }
             cell_entries(host, level, at)
@@ -1737,7 +1902,14 @@ fn contents_readout(host: &mut dyn ServerHost, pos: [i32; 3], target: Option<[i3
         None => {
             let routable = saved_routable(data.as_ref());
             let mut entries = Vec::new();
-            for at in scan_targets(&*host, level, pos, radius, &routable) {
+            for at in scan_targets(
+                &mut *host,
+                level,
+                pos,
+                radius,
+                &routable,
+                Driver::Caller(source),
+            ) {
                 entries.extend(cell_entries(host, level, at));
             }
             entries
@@ -1805,10 +1977,31 @@ fn request_readout(
         return format!("{block}: {}", request_out_slot_line(stored, &held));
     };
     let wanted = wanted.min(room);
-    let pulled = pull_request(host, pos, radius, &routable, &resource, wanted);
-    let RequestCharge::Paid(after) = request_charge(stored, price, pulled) else {
-        // The buffer was checked above; a walk that pulled nothing is the only
-        // other refusal, and it spends nothing.
+    // The walk and its delivery commit together (the finding's second half): a
+    // refused give or a refused out-slot write leaves every inventory as it was,
+    // and the price is charged only for what reached its destination.
+    let delivered = deliver_request(
+        host,
+        source,
+        RequestWalk {
+            own: pos,
+            radius,
+            routable: &routable,
+            resource: &resource,
+            amount: wanted,
+            out_slot,
+            out_count,
+        },
+        &entity,
+    );
+    let (pulled, delivery) = match delivered {
+        Some(pulled) => (pulled, Delivery::Delivered),
+        None => (0, Delivery::Refused),
+    };
+    let RequestCharge::Paid(after) = request_charge(stored, price, pulled, delivery) else {
+        // The buffer was checked above; a walk that pulled nothing (or whose
+        // delivery was refused and rolled back) is the only other refusal, and it
+        // spends nothing.
         return format!("{block}: {}", request_nothing_line(stored, &item));
     };
     let mut spent = Compound::new();
@@ -1817,42 +2010,56 @@ fn request_readout(
         Tag::Int(i32::try_from(after).unwrap_or(i32::MAX)),
     );
     let _ = entity.merge_data(&mut *host, spent);
-    let Some(stack) = resource.to_stack(out_count.saturating_add(pulled)) else {
-        return format!("{block}: {}", request_line(pulled, &item, after));
-    };
-    // The reference's `requestStraightToInventory` default: into the player, and
-    // the out slot stays empty. A console's request (or a refused give) keeps the
-    // stack in the out slot instead.
-    let given = match source {
-        CommandSource::Player { player, .. } => {
-            player.give_stack(&mut *host, stack.clone()).is_ok()
-        }
-        _ => false,
-    };
-    let out_after = if given { None } else { Some(stack) };
-    let _ = host.transaction(|host, tx| entity.set_item_slot(host, tx, out_slot, out_after));
     format!("{block}: {}", request_line(pulled, &item, after))
 }
 
-/// Pulls up to `amount` of `resource` out of the scanned inventories, in scan
-/// order, the own cell and another scanner skipped as the inject walk skips them.
-/// One transaction: a handler that refuses part-way leaves the inventories as
-/// they were and nothing is pulled.
-fn pull_request(
-    host: &mut dyn ServerHost,
+/// A screen request as the walk needs it: the cell the walk starts from, its
+/// radius and stars, the resource to pull and how much, and the out slot a
+/// console's request (or a refused give) falls back to.
+struct RequestWalk<'a> {
     own: [i32; 3],
     radius: i32,
-    routable: &[[i32; 3]],
-    resource: &ItemResource,
+    routable: &'a [[i32; 3]],
+    resource: &'a ItemResource,
     amount: u32,
-) -> u32 {
+    out_slot: u32,
+    out_count: u32,
+}
+
+/// Pulls up to [`RequestWalk::amount`] of the resource out of the scanned inventories
+/// and **delivers it in the same transaction**: to the player
+/// (`requestStraightToInventory`'s default, a give), or — for a console, or when
+/// the give is refused — into the out slot (the reference's own fallback). `None`
+/// when nothing was pulled or the delivery was refused; in both cases every write
+/// is rolled back, so the inventories keep their stacks and the buffer is never
+/// charged.
+fn deliver_request(
+    host: &mut dyn ServerHost,
+    source: &CommandSource,
+    delivery: RequestWalk<'_>,
+    entity: &BlockEntityRef,
+) -> Option<u32> {
+    let RequestWalk {
+        own,
+        radius,
+        routable,
+        resource,
+        amount,
+        out_slot,
+        out_count,
+    } = delivery;
     if amount == 0 {
-        return 0;
+        return None;
     }
-    let Some(level) = host.level(host.dimension()) else {
-        return 0;
-    };
-    let targets = scan_targets(&*host, level, own, radius, routable);
+    let level = host.level(host.dimension())?;
+    let targets = scan_targets(
+        &mut *host,
+        level,
+        own,
+        radius,
+        routable,
+        Driver::Caller(source),
+    );
     host.transaction(|host, tx| -> Result<u32, ()> {
         let mut pulled = 0_u32;
         for at in &targets {
@@ -1865,35 +2072,65 @@ fn pull_request(
             pulled =
                 pulled.saturating_add(handler.extract_any(host, tx, resource, amount - pulled));
         }
+        if pulled == 0 {
+            return Ok(0);
+        }
+        // A stack the game cannot build rolls the walk back rather than dropping
+        // what the inventories gave up.
+        let stack = resource
+            .to_stack(out_count.saturating_add(pulled))
+            .ok_or(())?;
+        let given = match source {
+            CommandSource::Player { player, .. } => player.give_stack(host, stack.clone()).is_ok(),
+            _ => false,
+        };
+        if given {
+            return Ok(pulled);
+        }
+        entity
+            .set_item_slot(host, tx, out_slot, Some(stack))
+            .map_err(|_| ())?;
         Ok(pulled)
     })
-    .unwrap_or(0)
+    .ok()
+    .filter(|pulled| *pulled > 0)
 }
 
 /// The positions a routing walk may use: the scanner's box in scan order, its own
 /// cell and another storage scanner skipped (`injectable_at`, upstream's
-/// `findInventories`), and only the cells the player has **starred**
-/// (`isRoutable`) — upstream's `injectStackInternal`/`requestItem` filter. The
-/// scan list itself does not use this: it lists every inventory in the box, as
-/// upstream's `getInventoryForBlock` does with `starred = false`.
+/// `findInventories`), only the cells the player has **starred** (`isRoutable`) —
+/// upstream's `injectStackInternal`/`requestItem` filter — and only those the
+/// driver may use (`may_use_target`: an inventory, not locked, and a cell a player
+/// caller may act at). The scan list itself does not use this: it lists every
+/// inventory in the box, as upstream's `getInventoryForBlock` does with
+/// `starred = false`.
 fn scan_targets(
-    host: &dyn Host,
+    host: &mut dyn ServerHost,
     level: LevelRef,
     own: [i32; 3],
     radius: i32,
     routable: &[[i32; 3]],
+    driver: Driver<'_>,
 ) -> Vec<[i32; 3]> {
-    scan_positions(own, radius)
-        .into_iter()
-        .filter(|at| {
-            routing_target(
-                own,
-                *at,
-                scanner_stands(host, level, *at),
-                is_routable(routable, *at),
-            )
-        })
-        .collect()
+    let mut targets = Vec::new();
+    for at in scan_positions(own, radius) {
+        if !routing_target(
+            own,
+            at,
+            scanner_stands(&*host, level, at),
+            is_routable(routable, at),
+        ) {
+            continue;
+        }
+        // Ask the capability first: an empty cell costs no permission query.
+        if level.capability(&mut *host, &ITEMS, at, None).is_none()
+            || !may_use_target(host, driver, level, at)
+        {
+            continue;
+        }
+        targets.push(at);
+    }
+    targets
 }
 
 /// `/rftoolsstorage give <pos> <item> [single]`: the storage control screen module's
@@ -1940,11 +2177,22 @@ fn give_readout(
         );
     }
     let resource = ItemResource::of(requested);
-    let Some(pulled) = pull_to_player(host, pos, radius, &routable, &resource, wanted, *player)
-    else {
+    let Some(pulled) = pull_to_player(
+        host,
+        GiveWalk {
+            driver: Driver::Caller(source),
+            own: pos,
+            radius,
+            routable: &routable,
+            resource: &resource,
+            amount: wanted,
+            player: *player,
+        },
+    ) else {
         return format!("{block}: {}", give_nothing_line(stored, &item));
     };
-    let RequestCharge::Paid(after) = request_charge(stored, price, pulled) else {
+    let RequestCharge::Paid(after) = request_charge(stored, price, pulled, Delivery::Delivered)
+    else {
         return format!("{block}: {}", give_nothing_line(stored, &item));
     };
     let mut spent = Compound::new();
@@ -1960,20 +2208,33 @@ fn give_readout(
 /// `player`, in **one** transaction: a give the player refuses aborts the whole walk,
 /// so no inventory loses a stack that never reached them. `None` when the level is
 /// gone, or when the walk pulled nothing.
-fn pull_to_player(
-    host: &mut dyn ServerHost,
+/// A give's walk: where it starts, whose stars it uses, what to pull and who
+/// receives it. (Grouped so the walk keeps a readable signature.)
+struct GiveWalk<'a> {
+    driver: Driver<'a>,
     own: [i32; 3],
     radius: i32,
-    routable: &[[i32; 3]],
-    resource: &ItemResource,
+    routable: &'a [[i32; 3]],
+    resource: &'a ItemResource,
     amount: u32,
     player: PlayerRef,
-) -> Option<u32> {
+}
+
+fn pull_to_player(host: &mut dyn ServerHost, walk: GiveWalk<'_>) -> Option<u32> {
+    let GiveWalk {
+        driver,
+        own,
+        radius,
+        routable,
+        resource,
+        amount,
+        player,
+    } = walk;
     if amount == 0 {
         return None;
     }
     let level = host.level(host.dimension())?;
-    let targets = scan_targets(&*host, level, own, radius, routable);
+    let targets = scan_targets(&mut *host, level, own, radius, routable, driver);
     host.transaction(|host, tx| -> Result<u32, ()> {
         let mut pulled = 0_u32;
         for at in &targets {
@@ -2062,11 +2323,12 @@ fn insert_readout(
             request_no_power_line(stored, price, wanted, &item)
         );
     }
-    if !has_routable(host, pos, radius, &routable) {
+    if !has_routable(host, Driver::Caller(source), pos, radius, &routable) {
         return format!("{block}: {}", no_routable_line(stored));
     }
     let Some(inserted) = insert_to_inventories(
         host,
+        Driver::Caller(source),
         *player,
         slot,
         &stack,
@@ -2129,6 +2391,7 @@ fn player_stack(
 /// inventory that has since gone does not count.
 fn has_routable(
     host: &mut dyn ServerHost,
+    driver: Driver<'_>,
     own: [i32; 3],
     radius: i32,
     routable: &[[i32; 3]],
@@ -2136,10 +2399,7 @@ fn has_routable(
     let Some(level) = host.level(host.dimension()) else {
         return false;
     };
-    let targets = scan_targets(&*host, level, own, radius, routable);
-    targets
-        .iter()
-        .any(|at| level.capability(host, &ITEMS, *at, None).is_some())
+    !scan_targets(host, level, own, radius, routable, driver).is_empty()
 }
 
 /// Hands `amount` of `resource` from the player's slot `slot` to the scanned
@@ -2149,6 +2409,7 @@ fn has_routable(
 /// the level is gone or the amount is nothing.
 fn insert_to_inventories(
     host: &mut dyn ServerHost,
+    driver: Driver<'_>,
     player: PlayerRef,
     slot: u32,
     stack: &ItemStack,
@@ -2165,7 +2426,7 @@ fn insert_to_inventories(
         return None;
     }
     let level = host.level(host.dimension())?;
-    let targets = scan_targets(&*host, level, own, radius, routable);
+    let targets = scan_targets(&mut *host, level, own, radius, routable, driver);
     host.transaction(|host, tx| -> Result<Inserted, ()> {
         let mut moved = 0_u32;
         for at in &targets {
@@ -2253,6 +2514,7 @@ fn sort_readout(host: &mut dyn ServerHost, pos: [i32; 3], wanted: &str) -> Strin
 /// the scan box, with an item capability, never the scanner's own cell.
 fn routable_readout(
     host: &mut dyn ServerHost,
+    source: &CommandSource,
     pos: [i32; 3],
     target: [i32; 3],
     on: bool,
@@ -2274,7 +2536,9 @@ fn routable_readout(
     let Some(level) = host.level(host.dimension()) else {
         return format!("{block}: {tx} {ty} {tz} is not an inventory in the scan box");
     };
-    if level.capability(&mut *host, &ITEMS, target, None).is_none() {
+    if level.capability(&mut *host, &ITEMS, target, None).is_none()
+        || !may_use_target(host, Driver::Caller(source), level, target)
+    {
         return format!("{block}: {tx} {ty} {tz} is not an inventory in the scan box");
     }
     let next = star(&routable, target, on);
@@ -2314,7 +2578,12 @@ fn export_readout(host: &mut dyn ServerHost, pos: [i32; 3], wanted: &str) -> Str
 /// capability, never the scanner's own cell or another scanner. Upstream keeps
 /// the selection in a transient field; this port saves it with the block, so a
 /// relaunch does not silently change where items go (notes.md, deviation 11).
-fn select_readout(host: &mut dyn ServerHost, pos: [i32; 3], target: [i32; 3]) -> String {
+fn select_readout(
+    host: &mut dyn ServerHost,
+    source: &CommandSource,
+    pos: [i32; 3],
+    target: [i32; 3],
+) -> String {
     let block = block_id_at(&*host, pos);
     if !is_storage_scanner(&block) {
         return format!("{block}: not a storage scanner");
@@ -2333,6 +2602,7 @@ fn select_readout(host: &mut dyn ServerHost, pos: [i32; 3], target: [i32; 3]) ->
     };
     if level.capability(&mut *host, &ITEMS, target, None).is_none()
         || level.block(&*host, target) == Some(scanner_key())
+        || !may_use_target(host, Driver::Caller(source), level, target)
     {
         return format!("{block}: {tx} {ty} {tz} is not an inventory in the scan box");
     }
@@ -2721,10 +2991,17 @@ fn inject_stack(
 ) -> Option<ItemStack> {
     let resource = ItemResource::of(&stack);
     let total = stack.count();
+    // The tick has no player: only a target's vanilla lock can refuse its walk
+    // (`Driver::Automation`), and the selected-container route asks the same.
     let targets = match route {
-        ExportRoute::Walk => scan_targets(&*host, level, own, radius, routable),
+        ExportRoute::Walk => {
+            scan_targets(&mut *host, level, own, radius, routable, Driver::Automation)
+        }
         ExportRoute::Only(at) => {
-            if injectable_at(own, at, scanner_stands(&*host, level, at)) {
+            if injectable_at(own, at, scanner_stands(&*host, level, at))
+                && level.capability(&mut *host, &ITEMS, at, None).is_some()
+                && may_use_target(host, Driver::Automation, level, at)
+            {
                 vec![at]
             } else {
                 Vec::new()
@@ -2864,7 +3141,7 @@ pub(crate) fn on_run_mod_command(
     // The readout and the lock are player commands, not administrative ones:
     // gate them like a reach, so another player's storage is not read or
     // changed from across the world.
-    if !may_touch(&*host, event.source, level, pos) {
+    if !may_touch(host, event.source, level, pos) {
         feedback(
             host,
             &format!(
@@ -2924,7 +3201,7 @@ pub(crate) fn on_run_mod_command(
                 Some(CommandArgumentValue::String(text)) => text.as_str(),
                 _ => "",
             };
-            scan_readout(host, pos, query)
+            scan_readout(host, event.source, pos, query)
         }
         "contents" => {
             // The list's rows: a cell, or `all` — the list's first "All routable"
@@ -2932,7 +3209,7 @@ pub(crate) fn on_run_mod_command(
             // argument is the row. Both are free: a listing is not a request.
             match event.command.argument("target") {
                 Some(CommandArgumentValue::BlockPos(target)) => {
-                    contents_readout(host, pos, Some(*target))
+                    contents_readout(host, event.source, pos, Some(*target))
                 }
                 Some(_) => {
                     feedback(
@@ -2941,7 +3218,7 @@ pub(crate) fn on_run_mod_command(
                     );
                     return Flow::Cancel;
                 }
-                None => contents_readout(host, pos, None),
+                None => contents_readout(host, event.source, pos, None),
             }
         }
         "request" => {
@@ -3112,7 +3389,7 @@ pub(crate) fn on_run_mod_command(
                     return Flow::Cancel;
                 }
             };
-            routable_readout(host, pos, *target, on)
+            routable_readout(host, event.source, pos, *target, on)
         }
         "export" => {
             let Some(CommandArgumentValue::String(mode)) = event.command.argument("mode") else {
@@ -3133,7 +3410,7 @@ pub(crate) fn on_run_mod_command(
                 );
                 return Flow::Cancel;
             };
-            select_readout(host, pos, *target)
+            select_readout(host, event.source, pos, *target)
         }
         _ => return Flow::Continue,
     };
@@ -3250,6 +3527,39 @@ mod tests {
         assert!(carried_payload(&plain, BE_TYPE).is_none());
         let emptied = Compound::from_iter([(KEY_CARRIED.into(), Tag::List(Vec::new()))]);
         assert!(carried_payload(&emptied, BE_TYPE).is_none());
+    }
+
+    #[test]
+    fn the_scanners_owner_round_trips_as_two_longs() {
+        // The placer's UUID is saved as `[hi, lo]` so the block keeps it across a
+        // relaunch; a malformed or partial pair is no owner at all (the reach rule
+        // then applies), never a wrong one.
+        let uuid: u128 = 0x0123_4567_89ab_cdef_1122_3344_5566_7788;
+        let saved = Compound::from_iter([(KEY_OWNER.into(), owner_tag(uuid))]);
+        assert_eq!(
+            owner_tag(uuid),
+            Tag::LongArray(vec![0x0123_4567_89ab_cdef, 0x1122_3344_5566_7788]),
+            "the written shape is the UUID as two longs"
+        );
+        assert_eq!(
+            saved_owner(Some(&saved)),
+            Some(uuid),
+            "the owner reads back"
+        );
+        assert_eq!(saved_owner(None), None, "no compound, no owner");
+        assert_eq!(
+            saved_owner(Some(&Compound::new())),
+            None,
+            "a compound without the key is an unowned scanner"
+        );
+        let one_long = Compound::from_iter([(KEY_OWNER.into(), Tag::LongArray(vec![7]))]);
+        assert_eq!(
+            saved_owner(Some(&one_long)),
+            None,
+            "half a UUID is no owner"
+        );
+        let wrong_kind = Compound::from_iter([(KEY_OWNER.into(), Tag::Int(7))]);
+        assert_eq!(saved_owner(Some(&wrong_kind)), None, "not a long array");
     }
 
     #[test]

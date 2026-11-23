@@ -100,7 +100,17 @@ batch the sources cannot cover takes nothing and answers what is missing per cel
 | `/rftoolsstorage grid <x> <y> <z> clear` | empties the whole pattern |
 | `/rftoolsstorage craft <x> <y> <z> <1\|4\|8\|stack>` | the GUI's four craft buttons: crafts the pattern out of the player's inventory and then the locked storage, handing the result over |
 
-They need an operator or a player within 8 blocks of the block.
+They need an operator or a player within 8 blocks of the block — except a
+**scanner**, which belongs to the player who placed it (an operator may always
+drive it, and a scanner placed by anything but a player keeps the reach rule).
+The scanner's walks also check every **cell** they touch: an inventory is read,
+pulled from or pushed into only when the caller may act at it
+(`Player.mayUseItemAt`: a spectator or an adventure player without a matching
+`can_place_on` is refused) and when it carries no vanilla **lock** — a locked
+container opens only for a matching item in hand, which a remote machine cannot
+present, so it is skipped, listed nowhere and never routed into. A delivery that
+fails (a refused give, a refused out-slot write, a walk whose stack cannot be
+built) puts every item back and charges no FE.
 
 ## What is not ported
 
@@ -111,8 +121,10 @@ per-row contents as `contents`; compact, cycle and visible size are not) and the
 out slot's fill for the
 no-player fallback, the XNet access settings (per-path input/output permissions), the storage control screen module (the give path's own
 caller; its behaviour is carried as `/rftoolsstorage give`),
-the scanner's remote/tablet variant, the claimed-land check
-(the pin has no claim API), storage tiers 2-4, the remote module and block, the
+the scanner's remote/tablet variant, the claimed-land check as upstream asks it
+(`canEntityDestroy` with a fake player: the pin has no claim query — the scan is
+guarded by the scanner's owner and by the cell's own `mayUseItemAt`/vanilla lock
+instead, which is all the pin exposes), storage tiers 2-4, the remote module and block, the
 type/filter/dump/control modules, the tablet, the crafting grid's **six saved
 recipes** and its visual ghost panel (the pattern and the four craft buttons are
 carried; the pin has no ghost slot kind, so there is no panel to show it in), the
@@ -133,7 +145,7 @@ the old `.hnmod` pin (`1d63e0a5…` / `5a64af93…`) is retired with the format.
 
 ```sh
 cd ports/rftoolsstorage
-cargo test                                    # the pure rules: 55 runtime tests + 7 glue tests (62)
+cargo test                                    # the pure rules: 58 runtime tests + 8 glue tests (66)
 cargo clippy --all-targets -- -D warnings
 rustfmt --edition 2024 --check src/lib.rs src/support.rs src/runtime.rs
 cargo horizon-mod check                       # the SDK gate: format, manifest, code, API usage
