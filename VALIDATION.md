@@ -2,10 +2,11 @@
 
 Slice 1 (the `modular_storage` block with a tier-1 storage module).
 
-**Version 0.2.11 is the current SDK package (2026-11-23):** one flat `.hmod`, SDK
+**Version 0.2.12 is the current SDK package (2026-11-23):** one flat `.hmod`, SDK
 nightly `0a875da91dbb0fdcb7ba8c42c11341aa229af51a`, mixins
-`e59da9094f0c2fdda6c627fe9eff22dec6a906f0`. **§0k is this slice's evidence (the
-scan list's sort choice) and is where the in-game legs are**; §0j is slice 10's
+`e59da9094f0c2fdda6c627fe9eff22dec6a906f0`. **§0l is this slice's evidence (the
+scanner's routable star list) and is where the in-game legs are**; §0k is slice
+11's (the scan list's sort choice), §0j is slice 10's
 (the scan's search filter), §0i is
 slice 9's (the scanner's insert-from-screen path), §0h slice 8's (the
 give-from-screen path), §0f slice 7's (the request path), §0e
@@ -19,6 +20,69 @@ history. The 0.2.x `tools/e2e.sh` runs on a launcher-built game
 Every command below ran through `ports/tools/build-slot.sh` (a lease per step);
 in 0.1.0 compile steps forwarded to the second machine and game legs ran locally
 because the script uses `--offscreen`.
+
+## 0l. The scanner's routable star list — version 0.2.12 (2026-11-23)
+
+Slice 12: the GUI's per-inventory star (`GuiStorageScanner.addStorageLine`'s
+"Routable: Yes/No") reached as `/rftoolsstorage routable <pos> <target> <on|off>`.
+The set is upstream's `routable` list in the scanner's saved compound, one
+`{c: [I; x, y, z]}` compound a starred cell, and it starts **empty**
+(`StorageScannerTileEntity`'s `routable = new HashSet<>()`): a fresh scanner routes
+nothing until an inventory is starred, while `scan` still lists every inventory in
+the box (`getInventoryForBlock`/`countItems` pass `starred = false`). Every routing
+walk (`scan_targets`: the tick, the request, the give and the insert's
+`checkForRoutableInventories`) filters by the set. The XNet per-path
+`InventoryAccessSettings` stay a gap. The slice plan, with the gap line and the
+upstream reading, is `ports/_shared/evidence/rftoolsstorage/SLICE-12-PLAN.md`.
+Ladder and package logs: `ports/_shared/evidence/rftoolsstorage/`; game legs:
+`ports/_shared/evidence/rftoolsstorage-e2e/`.
+
+| Step | Command | Result | Log |
+|---|---|---|---|
+| red proof | `cargo test` with `is_routable`/`star`/`routable_line` stubbed and `routing_target` ignoring the star | **FAILED. 46 passed; 3 failed**, `TEST_EXIT:101` | `slice12-red.log` |
+| tests | `cargo test` | `running 50 tests` → **50 passed**, 0 failed, `TEST_EXIT:0` (45 runtime + 5 glue) | `sdk-test.log`, `slice12-test.log` |
+| lints | `cargo clippy --all-targets -- -D warnings` | `Finished`, **CLIPPY_EXIT:0**, 0 warnings | `sdk-clippy.log`, `slice12-clippy.log` |
+| format | `rustfmt --edition 2024 --check src/{lib,support,runtime}.rs` | `FMT_EXIT:0` after the two wrapping diffs the first check listed were formatted | `slice12-fmt.log` |
+| SDK gate | `cargo horizon-mod check` | **TREE_CHECK_EXIT:0** — *"… 540 items of the API (5 Part kinds, 2 capabilitys, 149 fields or variants, 18 hooks, 52 hook arguments, 2 macros, 168 methods, 29 traits, 115 types). Made for 0a875da."* | `slice12-tree-check.log` |
+| package | `rm -f Cargo.lock && cargo horizon-mod build`, twice | **95,274 B**, SHA-256 `d194c73b31d2d3e2b3bf60e9ed3b727a2feac90e26ff33cf2234fbd3df47991b`, **`cmp`-identical** | `slice12-build-1.log`, `slice12-build-2.log` |
+| package check | `cargo horizon-mod check rftoolsstorage.hmod` | `rftoolsstorage 0.2.12 (native-mod, format native-1/0a875da…/e59da90…, for 26.3)`, **95,274 bytes**, `d194c73b…991b`, **FILE_CHECK_EXIT:0** | `slice12-check.log` |
+| entries | `unzip -l rftoolsstorage.hmod` | **67 files**, no `Cargo.lock`; `src/runtime.rs` byte-identical in tree and package (`7522c53c…a7c`) | — |
+| fits, the pin | `cargo horizon-mod fits rftoolsstorage.hmod --build 0a875da` | `0a875da  made for`, **FITS_PIN_EXIT:0** | `slice12-fits.log` |
+| fits, another build | `cargo horizon-mod fits rftoolsstorage.hmod --build 0b14f8a` | `0b14f8a  fits`, **FITS_OTHER_EXIT:0** | `slice12-fits.log` |
+| launcher build | `BUILD_LOCAL=1 ports/tools/launcher-game.sh build rftoolsstorage` | `Compiling rftoolsstorage (1 of 1)`, tag `native-0a875da-d4df6925a64a`, **LAUNCHER_BUILD_EXIT:0** | `slice12-launcher-build.log` |
+| in game | `build-slot.sh run --job e2e-rftoolsstorage --step e2e -- bash ports/rftoolsstorage/tools/e2e.sh` (`CONTROL_GAME=`) | **PASS** + `EXIT:0` | `rftoolsstorage-e2e/e2e-routable.log` |
+| control | the same leg on the Nightly **without** the package | **FAIL** + `EXIT:1` (`{"error":"unknown item rftoolsstorage:storage_scanner"}`) | `e2e-routable-control.log` |
+| selftest (this slice) | `ROUTABLE_SELFTEST=1` (asserts the un-starred chest DID take the stack) | **FAIL** + `EXIT:1` — *"the un-starred chest A stayed empty (0) and the starred B took the 64 stone (energy 4980) …"* | `e2e-routable-selftest.log` |
+| e2e gate | `python3 ports/tools/check-e2e-logs.py rftoolsstorage-e2e --strict` | `logs=32  ok=32  missing-exit=0  bad-exit=0`, exit 0 | — |
+| package gate | `python3 ports/tools/verify-sdk-package.py rftoolsstorage` | `1/1 package(s) verified`, exit 0 | — |
+| skills gate | `python3 ports/tools/check-skills.py --notes ports/rftoolsstorage --strict` | PASS | — |
+
+The default leg's star phase (abridged; the log has every `ctl` reply):
+
+```
+saved routable (default): Found no elements matching routable
+no star: in-slot 64, A 0, B 0, energy 0
+star B: rftoolsstorage:storage_scanner: routable 12 102 3 on
+star A: rftoolsstorage:storage_scanner: routable 14 102 1 on
+un-star A: rftoolsstorage:storage_scanner: routable 14 102 1 off
+saved routable (B only): 12, 102, 1 has the following block data: [{c: [I; 12, 102, 3]}]
+B starred, A unstarred: in-slot '', A 0, B 64, energy 4980
+scan with A unstarred: rftoolsstorage:storage_scanner: minecraft:dirt 32, minecraft:stone 64 (4900/50000 FE)
+A re-starred, B unstarred: in-slot '', A 96, B 64, energy 4980
+saved routable after the relaunch: 12, 102, 1 has the following block data: [{c: [I; 14, 102, 1]}]
+after the relaunch: in-slot '', A 160, B 64, energy 4980
+```
+
+The brief's rig: scanner at S, radius 2, two empty chests two blocks away — A at
+S+2 on x, B at S+2 on z (different axes, so they do not join into a double chest;
+B is first in the x-major walk). The default set is empty, so the tick's one paid
+attempt (`energy: 20` → 0) moves nothing; starring B and un-starring A routes the
+very stack that stayed to B (64) for one `rfPerInsert` (5,000 → 4,980); A's 32
+dirt, seeded after the walk, is still in the scan (the star filters routing, not
+the list); re-starring A and un-starring B makes A the recipient (96) while B stays
+64; and the saved list (`[{c: [I; 14, 102, 1]}]`, A only) and the walk both
+survive a relaunch (A 160). `ROUTABLE_SELFTEST=1` inverts the routing assertion and
+the run ends `FAIL:` + `EXIT:1`.
 
 ## 0k. The scan list's sort choice — version 0.2.11 (2026-11-23)
 

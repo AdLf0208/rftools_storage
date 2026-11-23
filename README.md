@@ -40,6 +40,14 @@ give-from-screen path, which never uses the out slot. `/rftoolsstorage insert
 <x> <y> <z> <item> [n]` is the screen's insert button: it pushes a stack out of
 the player's inventory into those inventories and charges one `rfPerInsert`, but
 **only when the stack went in whole** — a partial insert is free.
+`/rftoolsstorage sort <x> <y> <z> <mode>` is the GUI list's order (`Amount+`,
+`Amount-`, `Mod`, `Name`; `Tag` needs an item's tags, which this build does not
+list), saved with the block. `/rftoolsstorage routable <x> <y> <z> <tx> <ty> <tz>
+<on|off>` is the list's per-inventory **star**: only a starred inventory is routed
+into — the tick, a request, a give or an insert — while `scan` still lists every
+inventory in the box. A fresh scanner starts with **nothing** starred (as the jar's
+empty `HashSet` does), so star the inventories you want it to use; the set is saved
+with the block and survives a relaunch.
 
 ## Commands
 
@@ -49,6 +57,8 @@ the player's inventory into those inventories and charges one `rfPerInsert`, but
 | `/rftoolsstorage lock <x> <y> <z>` | toggles a storage's lock (the GUI's padlock) |
 | `/rftoolsstorage scan <x> <y> <z> [query]` | what the inventories in the scanner's box hold (the search box's filter when a query is given), and the FE left |
 | `/rftoolsstorage radius <x> <y> <z> <n>` | sets the scanner's radius (1..20) |
+| `/rftoolsstorage sort <x> <y> <z> <mode>` | the scan list's order: `Amount+`, `Amount-`, `Mod`, `Name` (`Tag` is unavailable here), saved with the block |
+| `/rftoolsstorage routable <x> <y> <z> <tx> <ty> <tz> <on\|off>` | stars (or un-stars) an inventory in the box: only starred inventories are routed into |
 | `/rftoolsstorage request <x> <y> <z> <item> [n]` | pulls a kind out of the scanned inventories into the player (a tenth price for an explicit count) |
 | `/rftoolsstorage give <x> <y> <z> <item> [single]` | hands a whole stack (or one item with `single`) straight to the player for the full price; no out slot |
 | `/rftoolsstorage insert <x> <y> <z> <item> [n]` | pushes the player's stack (or `n` of it) into the scanned inventories; one `rfPerInsert`, charged only when the stack emptied |
@@ -58,9 +68,10 @@ They need an operator or a player within 8 blocks of the block.
 ## What is not ported
 
 The crafting manager (a WIP in the jar itself), the storage scanner's GUI **list
-widget** (search is carried as `scan`'s query; sort, compact, cycle and visible
-size are not) and the out slot's fill for the
-no-player fallback, the `routable` star list, the storage control screen module (the give path's own
+widget** (its search is carried as `scan`'s query, its sort as `sort`, and its
+per-inventory star as `routable`; compact, cycle and visible size are not) and the
+out slot's fill for the
+no-player fallback, the XNet access settings (per-path input/output permissions), the storage control screen module (the give path's own
 caller; its behaviour is carried as `/rftoolsstorage give`),
 the scanner's remote/tablet variant, the claimed-land check
 (the pin has no claim API), storage tiers 2-4, the remote module and block, the

@@ -40,13 +40,13 @@ use crate::runtime::{
     SCANNER_AUTO_SLOT, SCANNER_IN_SLOT, SCANNER_MAX_ENERGY, SCANNER_OUT_SLOT,
     SCANNER_RECEIVE_PER_TICK, SCANNER_RF_PER_INSERT, SCANNER_SLOTS, SLOT_LIMIT, STORAGE_SCANNER,
     Slot, SortingMode, Storage, card_accepts, carried_slot_in, clamp_radius, gave_line,
-    give_amount, give_nothing_line, give_price, inject_plan, injectable_at, insert_amount,
-    insert_charge, insert_line, insert_nothing_line, insert_partial_line, insert_price,
+    give_amount, give_nothing_line, give_price, inject_plan, insert_amount, insert_charge,
+    insert_line, insert_nothing_line, insert_partial_line, insert_price, is_routable,
     is_storage_scanner, lock_press, matches_search, may_inspect, merge_counts, module_id,
     module_tier, no_power_line, no_routable_line, out_slot_room, request_amount, request_charge,
     request_line, request_no_power_line, request_nothing_line, request_out_slot_line,
-    request_price, restored_count, scan_line, scan_positions, scanner_radius, search_name,
-    search_namespace, slot_accepts, sort_found, spend_power,
+    request_price, restored_count, routable_line, routing_target, scan_line, scan_positions,
+    scanner_radius, search_name, search_namespace, slot_accepts, sort_found, spend_power, star,
 };
 
 /// The block this slice implements, exactly as the content declares it.
@@ -62,6 +62,11 @@ const KEY_RADIUS: &str = "radius";
 /// upstream's own `Value.createEnum("sortMode", …)` key, so the order survives a
 /// relaunch. The value is the enum's serialized name (`AMOUNT_DESCENDING`).
 const KEY_SORT: &str = "sortMode";
+/// The saved compound key of the scanner's routable set: upstream's
+/// `routable` list, one `{c: [I; x, y, z]}` compound a starred inventory
+/// (`BlockPosTools.write`). Nothing writes it until the player stars a cell, so
+/// a fresh scanner has no routable inventory at all.
+const KEY_ROUTABLE: &str = "routable";
 /// The saved compound key of a machine's FE buffer: the name the game's own
 /// energy handler reads and writes (`ModEnergyBuffer`).
 const KEY_ENERGY: &str = "energy";
@@ -1518,6 +1523,44 @@ fn saved_sort(data: Option<&Compound>) -> SortingMode {
     }
 }
 
+/// The scanner's saved routable set: upstream's `routable` list, one compound a
+/// cell whose `c` is the int array `[x, y, z]` (`BlockPosTools.write`). A block
+/// that has never starred anything has no list, which is the **empty** set — a
+/// fresh scanner routes nothing. An entry with no `c`, a short array or a
+/// repeated cell is skipped, as `BlockPosTools.read` drops an unreadable one and
+/// upstream's set holds a position once.
+fn saved_routable(data: Option<&Compound>) -> Vec<[i32; 3]> {
+    let Some(Tag::List(entries)) = field(data, KEY_ROUTABLE) else {
+        return Vec::new();
+    };
+    let mut set: Vec<[i32; 3]> = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let Some(Tag::IntArray(xyz)) = entry.get("c") else {
+            continue;
+        };
+        let [x, y, z] = match xyz.as_slice() {
+            [x, y, z, ..] => [*x, *y, *z],
+            _ => continue,
+        };
+        let cell = [x, y, z];
+        if !set.contains(&cell) {
+            set.push(cell);
+        }
+    }
+    set
+}
+
+/// The saved shape of a routable set: the same `routable` list
+/// [`saved_routable`] reads, so a block keeps its stars across a relaunch and a
+/// foreign save reads back unchanged (upstream's `saveAdditional`).
+fn routable_tag(set: &[[i32; 3]]) -> Tag {
+    let entries = set
+        .iter()
+        .map(|cell| Tag::compound([("c", Tag::IntArray(cell.to_vec()))]))
+        .collect();
+    Tag::List(entries)
+}
+
 /// `/rftoolsstorage scan <pos> [query]`: what the inventories in the scanner's box
 /// hold, filtered by the GUI list's search box when the command names one.
 ///
@@ -1620,6 +1663,7 @@ fn request_readout(
     let data = entity.data(&*host);
     let stored = saved_count(data.as_ref(), KEY_ENERGY);
     let radius = saved_radius(data.as_ref());
+    let routable = saved_routable(data.as_ref());
     let max_stack = max_stack_of(&*host, requested);
     let item = requested.item().id(&*host);
     let Some(wanted) = request_amount(explicit, max_stack) else {
@@ -1649,7 +1693,7 @@ fn request_readout(
         return format!("{block}: {}", request_out_slot_line(stored, &held));
     };
     let wanted = wanted.min(room);
-    let pulled = pull_request(host, pos, radius, &resource, wanted);
+    let pulled = pull_request(host, pos, radius, &routable, &resource, wanted);
     let RequestCharge::Paid(after) = request_charge(stored, price, pulled) else {
         // The buffer was checked above; a walk that pulled nothing is the only
         // other refusal, and it spends nothing.
@@ -1686,6 +1730,7 @@ fn pull_request(
     host: &mut dyn ServerHost,
     own: [i32; 3],
     radius: i32,
+    routable: &[[i32; 3]],
     resource: &ItemResource,
     amount: u32,
 ) -> u32 {
@@ -1695,7 +1740,7 @@ fn pull_request(
     let Some(level) = host.level(host.dimension()) else {
         return 0;
     };
-    let targets = scan_targets(&*host, level, own, radius);
+    let targets = scan_targets(&*host, level, own, radius, routable);
     host.transaction(|host, tx| -> Result<u32, ()> {
         let mut pulled = 0_u32;
         for at in &targets {
@@ -1713,13 +1758,29 @@ fn pull_request(
     .unwrap_or(0)
 }
 
-/// The positions a pull may take from: the scanner's box in scan order, its own cell
-/// and another storage scanner skipped (`injectable_at`, upstream's
-/// `findInventories`).
-fn scan_targets(host: &dyn Host, level: LevelRef, own: [i32; 3], radius: i32) -> Vec<[i32; 3]> {
+/// The positions a routing walk may use: the scanner's box in scan order, its own
+/// cell and another storage scanner skipped (`injectable_at`, upstream's
+/// `findInventories`), and only the cells the player has **starred**
+/// (`isRoutable`) — upstream's `injectStackInternal`/`requestItem` filter. The
+/// scan list itself does not use this: it lists every inventory in the box, as
+/// upstream's `getInventoryForBlock` does with `starred = false`.
+fn scan_targets(
+    host: &dyn Host,
+    level: LevelRef,
+    own: [i32; 3],
+    radius: i32,
+    routable: &[[i32; 3]],
+) -> Vec<[i32; 3]> {
     scan_positions(own, radius)
         .into_iter()
-        .filter(|at| injectable_at(own, *at, scanner_stands(host, level, *at)))
+        .filter(|at| {
+            routing_target(
+                own,
+                *at,
+                scanner_stands(host, level, *at),
+                is_routable(routable, *at),
+            )
+        })
         .collect()
 }
 
@@ -1755,6 +1816,7 @@ fn give_readout(
     let data = entity.data(&*host);
     let stored = saved_count(data.as_ref(), KEY_ENERGY);
     let radius = saved_radius(data.as_ref());
+    let routable = saved_routable(data.as_ref());
     let max_stack = max_stack_of(&*host, requested);
     let item = requested.item().id(&*host);
     let wanted = give_amount(mode, max_stack);
@@ -1766,7 +1828,8 @@ fn give_readout(
         );
     }
     let resource = ItemResource::of(requested);
-    let Some(pulled) = pull_to_player(host, pos, radius, &resource, wanted, *player) else {
+    let Some(pulled) = pull_to_player(host, pos, radius, &routable, &resource, wanted, *player)
+    else {
         return format!("{block}: {}", give_nothing_line(stored, &item));
     };
     let RequestCharge::Paid(after) = request_charge(stored, price, pulled) else {
@@ -1789,6 +1852,7 @@ fn pull_to_player(
     host: &mut dyn ServerHost,
     own: [i32; 3],
     radius: i32,
+    routable: &[[i32; 3]],
     resource: &ItemResource,
     amount: u32,
     player: PlayerRef,
@@ -1797,7 +1861,7 @@ fn pull_to_player(
         return None;
     }
     let level = host.level(host.dimension())?;
-    let targets = scan_targets(&*host, level, own, radius);
+    let targets = scan_targets(&*host, level, own, radius, routable);
     host.transaction(|host, tx| -> Result<u32, ()> {
         let mut pulled = 0_u32;
         for at in &targets {
@@ -1870,6 +1934,7 @@ fn insert_readout(
     let data = entity.data(&*host);
     let stored = saved_count(data.as_ref(), KEY_ENERGY);
     let radius = saved_radius(data.as_ref());
+    let routable = saved_routable(data.as_ref());
     let resource = ItemResource::of(requested);
     let item = requested.item().id(&*host);
     let Some((slot, stack)) = player_stack(&*host, *player, &resource) else {
@@ -1885,7 +1950,7 @@ fn insert_readout(
             request_no_power_line(stored, price, wanted, &item)
         );
     }
-    if !has_routable(host, pos, radius) {
+    if !has_routable(host, pos, radius, &routable) {
         return format!("{block}: {}", no_routable_line(stored));
     }
     let Some(inserted) = insert_to_inventories(
@@ -1899,6 +1964,7 @@ fn insert_readout(
             resource: &resource,
             amount: wanted,
         },
+        &routable,
     ) else {
         return format!("{block}: {}", insert_nothing_line(stored, &item));
     };
@@ -1945,15 +2011,20 @@ fn player_stack(
     stacks.into_iter().find(|(_, stack)| holds(stack))
 }
 
-/// Upstream's `checkForRoutableInventories`: at least one scanned cell has an
-/// inventory. The port reads "routable" as every scanned inventory (slice 6's
-/// deviation 1 — there is no star list), and `scan_targets` already skips its own
-/// cell and another storage scanner.
-fn has_routable(host: &mut dyn ServerHost, own: [i32; 3], radius: i32) -> bool {
+/// Upstream's `checkForRoutableInventories`: at least one scanned cell is
+/// **starred** and has an inventory. `scan_targets` already skips the scanner's
+/// own cell, another storage scanner and every unstarred cell, so a star on an
+/// inventory that has since gone does not count.
+fn has_routable(
+    host: &mut dyn ServerHost,
+    own: [i32; 3],
+    radius: i32,
+    routable: &[[i32; 3]],
+) -> bool {
     let Some(level) = host.level(host.dimension()) else {
         return false;
     };
-    let targets = scan_targets(&*host, level, own, radius);
+    let targets = scan_targets(&*host, level, own, radius, routable);
     targets
         .iter()
         .any(|at| level.capability(host, &ITEMS, *at, None).is_some())
@@ -1970,6 +2041,7 @@ fn insert_to_inventories(
     slot: u32,
     stack: &ItemStack,
     insertion: &Insertion<'_>,
+    routable: &[[i32; 3]],
 ) -> Option<Inserted> {
     let Insertion {
         own,
@@ -1981,7 +2053,7 @@ fn insert_to_inventories(
         return None;
     }
     let level = host.level(host.dimension())?;
-    let targets = scan_targets(&*host, level, own, radius);
+    let targets = scan_targets(&*host, level, own, radius, routable);
     host.transaction(|host, tx| -> Result<Inserted, ()> {
         let mut moved = 0_u32;
         for at in &targets {
@@ -2060,6 +2132,46 @@ fn sort_readout(host: &mut dyn ServerHost, pos: [i32; 3], wanted: &str) -> Strin
     format!("{block}: sort {}", mode.description())
 }
 
+/// `/rftoolsstorage routable <pos> <target> <on|off>`: the GUI's per-inventory
+/// star (`GuiStorageScanner.addStorageLine`'s "Routable: Yes/No", under the list's
+/// "All routable inventories" label) reached through a command, since the port has
+/// no list widget. The set is upstream's `routable` list, saved in the scanner's
+/// compound; it starts **empty**, so a fresh scanner routes nothing until an
+/// inventory is starred. The target must be a cell the GUI's list could show — in
+/// the scan box, with an item capability, never the scanner's own cell.
+fn routable_readout(
+    host: &mut dyn ServerHost,
+    pos: [i32; 3],
+    target: [i32; 3],
+    on: bool,
+) -> String {
+    let block = block_id_at(&*host, pos);
+    if !is_storage_scanner(&block) {
+        return format!("{block}: not a storage scanner");
+    }
+    let Some(entity) = scanner_entity(&*host, pos) else {
+        return format!("{block}: not a storage scanner");
+    };
+    let data = entity.data(&*host);
+    let radius = saved_radius(data.as_ref());
+    let [tx, ty, tz] = target;
+    if target == pos || !scan_positions(pos, radius).contains(&target) {
+        return format!("{block}: {tx} {ty} {tz} is not an inventory in the scan box");
+    }
+    let routable = saved_routable(data.as_ref());
+    let Some(level) = host.level(host.dimension()) else {
+        return format!("{block}: {tx} {ty} {tz} is not an inventory in the scan box");
+    };
+    if level.capability(&mut *host, &ITEMS, target, None).is_none() {
+        return format!("{block}: {tx} {ty} {tz} is not an inventory in the scan box");
+    }
+    let next = star(&routable, target, on);
+    let mut written = Compound::new();
+    written.insert(KEY_ROUTABLE.into(), routable_tag(&next));
+    let _ = entity.merge_data(host, written);
+    format!("{block}: {}", routable_line(target, on))
+}
+
 /// The level that is ticking: a block entity's tick runs with its own level in
 /// place, which is not necessarily the dimension a command would act in.
 fn ticking_level(host: &dyn ServerHost) -> Option<LevelRef> {
@@ -2092,6 +2204,7 @@ fn tick_scanner(
     };
     let stored = saved_count(data, KEY_ENERGY);
     let radius = saved_radius(data);
+    let routable = saved_routable(data);
     let in_filled = items.get(SCANNER_IN_SLOT).is_some_and(Option::is_some);
     let auto_filled = items.get(SCANNER_AUTO_SLOT).is_some_and(Option::is_some);
     let plan = inject_plan(stored, in_filled, auto_filled);
@@ -2112,7 +2225,7 @@ fn tick_scanner(
         if stack.count() == 0 {
             continue;
         }
-        *cell = inject_stack(host, level, pos, radius, stack);
+        *cell = inject_stack(host, level, pos, radius, &routable, stack);
         left = left.saturating_sub(SCANNER_RF_PER_INSERT);
     }
     if let Tag::Compound(nbt) = saved
@@ -2134,11 +2247,12 @@ fn inject_stack(
     level: LevelRef,
     own: [i32; 3],
     radius: i32,
+    routable: &[[i32; 3]],
     stack: ItemStack,
 ) -> Option<ItemStack> {
     let resource = ItemResource::of(&stack);
     let total = stack.count();
-    let targets = scan_targets(&*host, level, own, radius);
+    let targets = scan_targets(&*host, level, own, radius, routable);
     let outcome = host.transaction(|host, tx| -> Result<Option<ItemStack>, ()> {
         let mut moved = 0_u32;
         for at in &targets {
@@ -2207,6 +2321,9 @@ pub(crate) fn on_register_commands(event: &mut RegisterCommandsEvent<'_>) {
         "rftoolsstorage sort <pos:block_pos> <mode:word>",
     ));
     event.commands.push(Command::new(
+        "rftoolsstorage routable <pos:block_pos> <target:block_pos> <state:word>",
+    ));
+    event.commands.push(Command::new(
         "rftoolsstorage request <pos:block_pos> <item:item> [count:integer]",
     ));
     event.commands.push(Command::new(
@@ -2231,7 +2348,7 @@ pub(crate) fn on_run_mod_command(
     let Some(CommandArgumentValue::BlockPos(pos)) = event.command.argument("pos") else {
         feedback(
             host,
-            "usage: /rftoolsstorage info|lock|scan|radius|sort|request|give|insert <x> <y> <z> …",
+            "usage: /rftoolsstorage info|lock|scan|radius|sort|routable|request|give|insert <x> <y> <z> …",
         );
         return Flow::Cancel;
     };
@@ -2388,6 +2505,28 @@ pub(crate) fn on_run_mod_command(
             };
             sort_readout(host, pos, mode)
         }
+        "routable" => {
+            let Some(CommandArgumentValue::BlockPos(target)) = event.command.argument("target")
+            else {
+                feedback(
+                    host,
+                    "usage: /rftoolsstorage routable <x> <y> <z> <target x> <target y> <target z> <on|off>",
+                );
+                return Flow::Cancel;
+            };
+            let on = match event.command.argument("state") {
+                Some(CommandArgumentValue::String(state)) if state == "on" => true,
+                Some(CommandArgumentValue::String(state)) if state == "off" => false,
+                _ => {
+                    feedback(
+                        host,
+                        "usage: /rftoolsstorage routable <x> <y> <z> <target x> <target y> <target z> <on|off>",
+                    );
+                    return Flow::Cancel;
+                }
+            };
+            routable_readout(host, pos, *target, on)
+        }
         _ => return Flow::Continue,
     };
     feedback(host, &line);
@@ -2498,6 +2637,50 @@ mod tests {
         assert!(
             container.menu.is_none(),
             "the GUI's list is a later slice; the slots' consumer is the tick"
+        );
+    }
+
+    #[test]
+    fn the_routable_set_is_upstreams_list_of_int_array_compounds() {
+        // `saveAdditional`: `tag.put("routable", list)` with `BlockPosTools.write(c)`
+        // → one compound a cell whose `c` is `[I; x, y, z]`. `loadAdditional` reads
+        // the same list; `BlockPosTools.read` returns null for an empty array, so a
+        // malformed entry is dropped.
+        let saved = Compound::from_iter([(
+            KEY_ROUTABLE.into(),
+            routable_tag(&[[8, 102, 3], [9, 102, 3]]),
+        )]);
+        assert_eq!(
+            saved_routable(Some(&saved)),
+            vec![[8, 102, 3], [9, 102, 3]],
+            "the saved list is the set, in its saved order"
+        );
+        assert_eq!(
+            routable_tag(&[[8, 102, 3]]),
+            Tag::List(vec![Tag::compound([("c", Tag::IntArray(vec![8, 102, 3]))])]),
+            "the written shape is upstream's `c` int-array compound"
+        );
+        assert!(
+            saved_routable(None).is_empty(),
+            "a fresh scanner has no list, and the set is empty"
+        );
+        assert!(
+            saved_routable(Some(&Compound::new())).is_empty(),
+            "a compound without the key is still the empty set"
+        );
+        let broken = Compound::from_iter([(
+            KEY_ROUTABLE.into(),
+            Tag::List(vec![
+                Tag::compound([("c", Tag::IntArray(Vec::new()))]),
+                Tag::compound([("c", Tag::IntArray(vec![1, 2, 3]))]),
+                Tag::compound([("d", Tag::IntArray(vec![4, 5, 6]))]),
+                Tag::compound([("c", Tag::IntArray(vec![1, 2, 3]))]),
+            ]),
+        )]);
+        assert_eq!(
+            saved_routable(Some(&broken)),
+            vec![[1, 2, 3]],
+            "an empty array, a missing `c` and a repeated cell are dropped"
         );
     }
 

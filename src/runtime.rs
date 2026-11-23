@@ -759,6 +759,45 @@ pub fn injectable_at(centre: [i32; 3], at: [i32; 3], scanner_there: bool) -> boo
     at != centre && !scanner_there
 }
 
+/// Whether `at` is in the scanner's saved routable set: upstream's
+/// `isRoutable(p)`, the GUI's per-inventory star. A scanner that has never starred
+/// anything has an **empty** set — `StorageScannerTileEntity` declares
+/// `routable = new HashSet<>()` and nothing seeds it — so a fresh scanner routes
+/// nothing until the player stars an inventory.
+#[must_use]
+pub fn is_routable(saved: &[[i32; 3]], at: [i32; 3]) -> bool {
+    saved.contains(&at)
+}
+
+/// The routable set a star press leaves: `at` added (`on`) or removed, and
+/// nothing else changed. Upstream's `toggleRoutable` is a set membership, so the
+/// port's `on`/`off` are idempotent; the order of the other cells is kept.
+#[must_use]
+pub fn star(saved: &[[i32; 3]], at: [i32; 3], on: bool) -> Vec<[i32; 3]> {
+    let mut next: Vec<[i32; 3]> = saved.iter().copied().filter(|cell| *cell != at).collect();
+    if on {
+        next.push(at);
+    }
+    next
+}
+
+/// Whether the inject/request/give/insert walk may use `at`: upstream's
+/// `injectStackInternal` filter is `!p.equals(getBlockPos()) && isRoutable(p)`
+/// (plus the access and matcher tests the glue applies), so an inventory the
+/// player has not starred is skipped even when the scan found it.
+#[must_use]
+pub fn routing_target(centre: [i32; 3], at: [i32; 3], scanner_there: bool, starred: bool) -> bool {
+    injectable_at(centre, at, scanner_there) && starred
+}
+
+/// The reply to `/rftoolsstorage routable <pos> <target> <on|off>`: the cell and
+/// the state it now has, in the readout's voice.
+#[must_use]
+pub fn routable_line(at: [i32; 3], on: bool) -> String {
+    let [x, y, z] = at;
+    format!("routable {x} {y} {z} {}", if on { "on" } else { "off" })
+}
+
 // --- the scanner's request path (slice 7) ---------------------------------
 
 /// The price of a request (`StorageScannerTileEntity.requestStack`): an explicit
@@ -1928,6 +1967,64 @@ mod tests {
             ],
             "Mod groups minecraft before rftoolsstorage"
         );
+    }
+
+    #[test]
+    fn a_fresh_scanners_star_list_is_empty_and_a_star_switches_one_cell() {
+        let fresh: [[i32; 3]; 0] = [];
+        assert!(
+            !is_routable(&fresh, [8, 102, 3]),
+            "StorageScannerTileEntity's routable set is a fresh HashSet: nothing is starred"
+        );
+        let starred = star(&fresh, [8, 102, 3], true);
+        assert_eq!(starred, vec![[8, 102, 3]], "a press adds the cell");
+        assert!(is_routable(&starred, [8, 102, 3]));
+        assert!(!is_routable(&starred, [1, 2, 3]), "only the pressed cell");
+        assert_eq!(
+            star(&starred, [8, 102, 3], true),
+            starred,
+            "starring a starred cell changes nothing"
+        );
+        let other = star(&starred, [1, 2, 3], true);
+        assert_eq!(
+            other,
+            vec![[8, 102, 3], [1, 2, 3]],
+            "a second star keeps the first"
+        );
+        let unstarred = star(&other, [8, 102, 3], false);
+        assert_eq!(unstarred, vec![[1, 2, 3]], "an off removes just that cell");
+        assert_eq!(
+            star(&fresh, [8, 102, 3], false),
+            fresh,
+            "un-starring an unstarred cell changes nothing"
+        );
+    }
+
+    #[test]
+    fn the_walk_skips_a_cell_that_is_not_starred() {
+        let centre = [8, 102, 3];
+        assert!(
+            routing_target(centre, [10, 102, 3], false, true),
+            "a starred inventory in the box is routable"
+        );
+        assert!(
+            !routing_target(centre, [10, 102, 3], false, false),
+            "an unstarred inventory is not routable even though the scan lists it"
+        );
+        assert!(
+            !routing_target(centre, centre, false, true),
+            "the scanner's own cell is never routable"
+        );
+        assert!(
+            !routing_target(centre, [9, 102, 3], true, true),
+            "another storage scanner is never routable"
+        );
+    }
+
+    #[test]
+    fn the_star_reply_names_the_cell_and_its_state() {
+        assert_eq!(routable_line([8, 102, 3], true), "routable 8 102 3 on");
+        assert_eq!(routable_line([8, 102, 3], false), "routable 8 102 3 off");
     }
 
     #[test]

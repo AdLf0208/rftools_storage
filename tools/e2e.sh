@@ -83,6 +83,15 @@
 #      chest's `rftoolsstorage:storage_module0` sorts after both `minecraft:`
 #      kinds under `Mod`; and the saved `Amount-` order is read back after a
 #      relaunch (the search phase's rig restored first).
+#  19. **the routable star list (slice 12)**: the GUI's per-inventory star, as a
+#      saved set. A fresh scanner's set is empty (`StorageScannerTileEntity`'s
+#      `routable = new HashSet<>()`), so a tick with 64 stone in the in-slot and
+#      two empty chests two blocks away (A at S+2 on x, B at S+2 on z) routes
+#      nothing and still charges its 20 FE; starring B and un-starring A sends the
+#      next stack to B while A stays empty; `scan` still lists A's 32 dirt and B's
+#      64 stone (the star filters routing, not the list); re-starring A (and
+#      un-starring B) makes A the recipient (A 96); and the saved `routable` list
+#      keeps A across a relaunch, after which A takes another stack (160).
 #
 # SELFTEST=1 keeps the scenario and asserts that the tick did NOT push the stone
 # into the chest, so the run MUST fail with a `FAIL:` verdict (the assertion the
@@ -91,8 +100,9 @@
 # give path (the give must NOT have handed the stone over), INSERT_SELFTEST=1
 # for the insert path (the chest must NOT have received the 64 stone),
 # SCAN_SELFTEST=1 for the scan filter (the `dirt` query must NOT list the stone)
-# and SORT_SELFTEST=1 for the sort (the `Amount-` reply must NOT start with
-# stone).
+# SORT_SELFTEST=1 for the sort (the `Amount-` reply must NOT start with stone),
+# and ROUTABLE_SELFTEST=1 for the star list (the un-starred chest must NOT have
+# received the stack).
 # COUNTERFACTUAL=1 puts a vanilla barrel where the scanner would be and proves the
 # same commands answer `not a storage scanner` on it. CONTROL_GAME runs the same
 # rig on the Nightly without the package and fails there (`EXIT:1`): the block and
@@ -123,6 +133,7 @@ GIVE_SELFTEST=${GIVE_SELFTEST:-0}
 INSERT_SELFTEST=${INSERT_SELFTEST:-0}
 SCAN_SELFTEST=${SCAN_SELFTEST:-0}
 SORT_SELFTEST=${SORT_SELFTEST:-0}
+ROUTABLE_SELFTEST=${ROUTABLE_SELFTEST:-0}
 
 SCANNER=rftoolsstorage:storage_scanner
 STORAGE=rftoolsstorage:modular_storage
@@ -209,6 +220,12 @@ sort_cmd() { # x y z mode
     local line
     line=$(reply sort "$1" "$2" "$3" "$4")
     [ -n "$line" ] || fail "the sort command at $1,$2,$3 answered nothing: $(ctl messages 6 | jq -c '.chat')"
+    echo "$line"
+}
+routable_cmd() { # x y z target-x target-y target-z on|off
+    local line
+    line=$(reply routable "$1" "$2" "$3" "$4" "$5" "$6" "$7")
+    [ -n "$line" ] || fail "the routable command at $1,$2,$3 answered nothing: $(ctl messages 6 | jq -c '.chat')"
     echo "$line"
 }
 request_cmd() { # x y z item [count]
@@ -721,13 +738,155 @@ echo "relaunch: buffer $before -> $after, radius $saved_radius, sort $saved_sort
 echo "$line" | grep -q "^$SCANNER: minecraft:stone 64, minecraft:dirt 32 (" \
     || fail "the scan after the relaunch answered: $line"
 
+say "THE ROUTABLE STAR LIST: a fresh scanner routes nothing, the star filters routing but not the list"
+# Two chests two blocks away on different axes — A at S+2 on x, B at S+2 on z —
+# so neither joins the other (two adjacent chests are one double chest). The walk
+# is x, then y, then z, so B comes before A; a phase with only one of them starred
+# cannot be explained by the order.
+ROUTABLE_A=$((SX + 2))
+ROUTABLE_B=$((SZ + 2))
+line=$(sort_cmd "$SX" "$SY" "$SZ" Name)
+echo "sort Name: $line"
+ctl setblock "$FAR_X" "$SY" "$SZ" minecraft:air >/dev/null
+ctl setblock "$ROUTABLE_A" "$SY" "$SZ" minecraft:air >/dev/null
+ctl setblock "$ROUTABLE_A" "$SY" "$SZ" minecraft:chest >/dev/null
+ctl setblock "$SX" "$SY" "$ROUTABLE_B" minecraft:air >/dev/null
+ctl setblock "$SX" "$SY" "$ROUTABLE_B" minecraft:chest >/dev/null
+ctl wait 4
+line=$(radius_cmd "$SX" "$SY" "$SZ" 2)
+echo "radius: $line"
+seed_slots "$SX" "$SY" "$SZ" ''
+saved=$(data_reply "$SX" "$SY" "$SZ" routable)
+echo "saved routable (default): $saved"
+case "$saved" in
+    *"Found no elements"*) ;;
+    *) fail "a fresh scanner has a routable list: $saved" ;;
+esac
+# 20 FE pays exactly one attempt (the tick charges even when nothing accepts the
+# stack — slice 6), so the assertion does not depend on how many ticks the reads
+# cost: the stack must still be in the slot and both chests empty.
+ctl command "data merge block $SX $SY $SZ {energy: 20}" >/dev/null
+seed_slots "$SX" "$SY" "$SZ" '{Slot: 0b, id: "minecraft:stone", count: 64}'
+ctl wait 10
+in_slot=$(slot_count "$SX" "$SY" "$SZ" 0)
+a_total=$(inv_total "$ROUTABLE_A" "$SY" "$SZ")
+b_total=$(inv_total "$SX" "$SY" "$ROUTABLE_B")
+energy=$(energy_of "$SX" "$SY" "$SZ")
+echo "no star: in-slot ${in_slot}, A ${a_total}, B ${b_total}, energy ${energy}"
+[ "$in_slot" = 64 ] || fail "with no star the in-slot holds '$in_slot', expected its 64 stone"
+[ "$a_total" = 0 ] || fail "with no star chest A took $a_total"
+[ "$b_total" = 0 ] || fail "with no star chest B took $b_total"
+[ "$energy" = 0 ] || fail "the unstarred attempt left $energy, expected 20 - 20 (one paid attempt)"
+
+line=$(routable_cmd "$SX" "$SY" "$SZ" "$SX" "$SY" "$ROUTABLE_B" on)
+echo "star B: $line"
+echo "$line" | grep -q "^$SCANNER: routable $SX $SY $ROUTABLE_B on$" || fail "the star command answered: $line"
+line=$(routable_cmd "$SX" "$SY" "$SZ" "$ROUTABLE_A" "$SY" "$SZ" on)
+echo "star A: $line"
+echo "$line" | grep -q "^$SCANNER: routable $ROUTABLE_A $SY $SZ on$" || fail "the star command answered: $line"
+line=$(routable_cmd "$SX" "$SY" "$SZ" "$ROUTABLE_A" "$SY" "$SZ" off)
+echo "un-star A: $line"
+echo "$line" | grep -q "^$SCANNER: routable $ROUTABLE_A $SY $SZ off$" || fail "the un-star command answered: $line"
+saved=$(data_reply "$SX" "$SY" "$SZ" routable)
+echo "saved routable (B only): $saved"
+case "$saved" in
+    *"[I; $SX, $SY, $ROUTABLE_B]"*) ;;
+    *) fail "the saved routable list does not name B: $saved" ;;
+esac
+case "$saved" in
+    *"[I; $ROUTABLE_A, $SY, $SZ]"*) fail "the un-starred A is still in the saved list: $saved" ;;
+    *) ;;
+esac
+
+# The 64 stone the unstarred tick could not move is still in the in-slot: the
+# star is what lets the very same stack go, for one rfPerInsert.
+ctl command "data merge block $SX $SY $SZ {energy: 5000}" >/dev/null
+ctl wait 10
+in_slot=$(slot_count "$SX" "$SY" "$SZ" 0)
+a_total=$(inv_total "$ROUTABLE_A" "$SY" "$SZ")
+b_total=$(inv_total "$SX" "$SY" "$ROUTABLE_B")
+energy=$(energy_of "$SX" "$SY" "$SZ")
+echo "B starred, A unstarred: in-slot '${in_slot}', A ${a_total}, B ${b_total}, energy ${energy}"
+[ "$in_slot" = "" ] || fail "the starred walk left $in_slot stone in the in-slot"
+[ "$a_total" = 0 ] || fail "the un-starred chest A took $a_total stone"
+[ "$b_total" = 64 ] || fail "the starred chest B holds $b_total, expected 64"
+[ "$energy" = "$((5000 - 20))" ] || fail "the starred walk left $energy, expected one rfPerInsert off 5000"
+
+if [ "$ROUTABLE_SELFTEST" = 1 ]; then
+    say "ROUTABLE_SELFTEST: assert the un-starred chest DID take the stack (must fail)"
+    fail "the un-starred chest A stayed empty (${a_total}) and the starred B took the 64 stone (energy ${energy}), so the star filtered routing; this inverted assertion fails as it must"
+fi
+
+say "the scan still lists the un-starred inventory: the star filters routing, not the list"
+fill_chest "$ROUTABLE_A" "$SY" "$SZ" minecraft:dirt 32
+ctl command "data merge block $SX $SY $SZ {energy: 5000}" >/dev/null
+line=$(scan "$SX" "$SY" "$SZ")
+spent=$(energy_of "$SX" "$SY" "$SZ")
+echo "scan with A unstarred: $line; buffer now $spent"
+echo "$line" | grep -q "^$SCANNER: minecraft:dirt 32, minecraft:stone 64 (4900/$MAX_FE FE)$" \
+    || fail "the scan of the un-starred chest answered: $line"
+[ "$spent" = "$((5000 - PRICE))" ] || fail "the scan left $spent FE, expected its $PRICE"
+
+say "re-starring A makes it the walk's recipient again"
+line=$(routable_cmd "$SX" "$SY" "$SZ" "$ROUTABLE_A" "$SY" "$SZ" on)
+echo "star A again: $line"
+line=$(routable_cmd "$SX" "$SY" "$SZ" "$SX" "$SY" "$ROUTABLE_B" off)
+echo "un-star B: $line"
+ctl command "data merge block $SX $SY $SZ {energy: 5000}" >/dev/null
+seed_slots "$SX" "$SY" "$SZ" '{Slot: 0b, id: "minecraft:stone", count: 64}'
+ctl wait 10
+in_slot=$(slot_count "$SX" "$SY" "$SZ" 0)
+a_total=$(inv_total "$ROUTABLE_A" "$SY" "$SZ")
+b_total=$(inv_total "$SX" "$SY" "$ROUTABLE_B")
+energy=$(energy_of "$SX" "$SY" "$SZ")
+echo "A re-starred, B unstarred: in-slot '${in_slot}', A ${a_total}, B ${b_total}, energy ${energy}"
+[ "$in_slot" = "" ] || fail "the re-starred walk left $in_slot stone in the in-slot"
+[ "$a_total" = "$((32 + 64))" ] || fail "the re-starred chest A holds $a_total, expected its 32 dirt and 64 stone"
+[ "$b_total" = 64 ] || fail "the un-starred chest B changed to $b_total"
+
+say "the saved star list survives a relaunch, and the starred inventory still receives"
+ctl quit >/dev/null 2>&1 || true
+sleep 5
+rm -f "$SOCK"
+launch "$GAME"
+ctl wait 20 >/dev/null
+saved=$(data_reply "$SX" "$SY" "$SZ" routable)
+echo "saved routable after the relaunch: $saved"
+case "$saved" in
+    *"[I; $ROUTABLE_A, $SY, $SZ]"*) ;;
+    *) fail "the relaunch lost the star on A: $saved" ;;
+esac
+case "$saved" in
+    *"[I; $SX, $SY, $ROUTABLE_B]"*) fail "the relaunch kept B's un-star: $saved" ;;
+    *) ;;
+esac
+ctl command "data merge block $SX $SY $SZ {energy: 5000}" >/dev/null
+seed_slots "$SX" "$SY" "$SZ" '{Slot: 0b, id: "minecraft:stone", count: 64}'
+ctl wait 10
+in_slot=$(slot_count "$SX" "$SY" "$SZ" 0)
+a_total=$(inv_total "$ROUTABLE_A" "$SY" "$SZ")
+b_total=$(inv_total "$SX" "$SY" "$ROUTABLE_B")
+energy=$(energy_of "$SX" "$SY" "$SZ")
+echo "after the relaunch: in-slot '${in_slot}', A ${a_total}, B ${b_total}, energy ${energy}"
+[ "$in_slot" = "" ] || fail "the relaunched walk left $in_slot stone in the in-slot"
+[ "$a_total" = "$((32 + 128))" ] || fail "the relaunched chest A holds $a_total, expected 160"
+[ "$b_total" = 64 ] || fail "the relaunched un-starred chest B changed to $b_total"
+# B leaves the box for the rest of the run; A (the chest two away on x) stays
+# starred, so the inject/request/give/insert phases route to it as before.
+ctl setblock "$SX" "$SY" "$ROUTABLE_B" minecraft:air >/dev/null
+ctl wait 4
+
 say "THE INJECT TICK: 64 stone in the in-slot goes to the chest two blocks away, for one rfPerInsert"
 # The chest must be empty (and alone: two adjacent chests are one double chest), so
-# its Items[0] can only be the stack the tick pushed there.
+# its Items[0] can only be the stack the tick pushed there. The star list filters
+# every routing walk (slice 12), so the chest this phase routes into must be
+# starred: A's position already is, and the call is the explicit assertion of it.
 CHEST_X=$((SX + 2))
 ctl setblock "$CHEST_X" "$SY" "$SZ" minecraft:air >/dev/null
 ctl setblock "$CHEST_X" "$SY" "$SZ" minecraft:chest >/dev/null
 ctl wait 4
+line=$(routable_cmd "$SX" "$SY" "$SZ" "$CHEST_X" "$SY" "$SZ" on)
+echo "star the inject chest: $line"
 line=$(radius_cmd "$SX" "$SY" "$SZ" 2)
 echo "radius: $line"
 ctl command "data merge block $SX $SY $SZ {energy: 5000}" >/dev/null
@@ -828,6 +987,8 @@ say "the walk passes a refusing inventory for the one behind it (a full barrel a
 BARREL_X=$((SX + 1))
 ctl setblock "$BARREL_X" "$SY" "$SZ" minecraft:barrel >/dev/null
 ctl wait 4
+line=$(routable_cmd "$SX" "$SY" "$SZ" "$BARREL_X" "$SY" "$SZ" on)
+echo "star the refusing barrel: $line"
 seed_slots "$BARREL_X" "$SY" "$SZ" "$(full_slots minecraft:stone)"
 ctl wait 4
 ctl setblock "$CHEST_X" "$SY" "$SZ" minecraft:air >/dev/null
@@ -1235,4 +1396,4 @@ echo "give rftoolsbase:machine_frame: $frame"
 echo "$frame" | grep -q 'unknown item' || fail "this build has rftoolsbase:machine_frame, so the recipe is not blocked and must be crafted: $frame"
 
 ctl close >/dev/null 2>&1 || true
-echo "PASS: the storage scanner places and reads back with its facing; a fresh one has no power (no power (0/50000 FE)) and reads nothing; at its default radius 1 it finds nothing two blocks away; /rftoolsstorage radius 2 widens the box and the scan answers minecraft:stone 64 for a chest two blocks away while the chest three away (minecraft:dirt 32) is outside it; radius 3 lists both, one entry a kind; every scan costs rfPerRequest (5,000 -> 4,900 -> 4,800 -> 4,700, printed in the reply); THE SCAN FILTER (the GUI's search box) keeps '@minecraft' listing both kinds, narrows 'dirt' to minecraft:dirt 32 and 'stone' to minecraft:stone 64, answers 'empty' for '@nomatch' with the price still paid (4,600), and leaves the unfiltered scan listing both (4,500) as the differential; THE SORT CHOICE orders the list (Amount- = dirt 64, stone 32, Amount+ = stone 32, dirt 64, Name = dirt 64, stone 32, Mod puts rftoolsstorage:storage_module0 after both minecraft kinds), and the saved AMOUNT_DESCENDING mode orders the list after a relaunch too (stone 64, dirt 32); an emptied buffer refuses with no power and reads nothing, and charging it again makes the scan answer again; scan and radius refuse a chest and the modular storage (not a storage scanner); the radius and the buffer survive a relaunch; THE INJECT TICK pushes 64 stone from the in-slot into the empty chest two blocks away so its Items[0] reads minecraft:stone x64 while the buffer drops by exactly one rfPerInsert (5000 -> 4980), and with the buffer at 0 the next stack stays in the slot and the chest keeps its 64, recharging proving the stall was the power (chest 128); the auto slot routes too (chest 160); items the game puts in the container are routed for one rfPerInsert; a stack nothing accepts is still charged one attempt (20 FE pays one, 19 pays none) and stays in the slot; the walk passes a full barrel for the chest behind it; the tick never writes the out slot; THE REQUEST PATH pulls 32 stone from a chest of 128 into the player's inventory (the reference's straight-to-inventory default), leaving the chest at 96 and the buffer at 4,990 for an explicit count, refuses a kind nothing holds and charges nothing, refuses below the price with the price line (costs 10, have 9), sends a ctl command's 16-stone request straight to the player too, and refuses a request whose out slot holds another kind without pulling or charging; THE INSERT PATH pushes the player's 64 stone into the chest two blocks away so its Items[0] reads minecraft:stone x64 and empties the player's stack for exactly one rfPerInsert (5000 -> 4980), inserts an explicit 10 of 64 for one more rfPerInsert, takes only the 32 a nearly-full barrel has room for and charges NOTHING for the partial insert, moves nothing and charges nothing against a full barrel (the player keeps 64), refuses a box with no routable inventory (there are no routable inventories, no charge) and refuses a chest (not a storage scanner); THE GIVE PATH hands the whole stack (64) straight to the player from a chest of 64, empties the chest and charges the FULL rfPerRequest (5000 -> 4900) with the out slot still holding the request counterfactual's dirt (it has no out slot), hands exactly one item with [single] (chest 3 -> 2, buffer 4900 -> 4800), refuses a kind nothing holds and charges nothing, and refuses below the full price with the price line (costs 100, have 99) without touching the chest, and a give on a chest is refused as not a storage scanner; the loot table drops the scanner on a survival break; the modular storage still answers 0/0 empty no module; and a barrel answers not a storage scanner to the same commands"
+echo "PASS: the storage scanner places and reads back with its facing; a fresh one has no power (no power (0/50000 FE)) and reads nothing; at its default radius 1 it finds nothing two blocks away; /rftoolsstorage radius 2 widens the box and the scan answers minecraft:stone 64 for a chest two blocks away while the chest three away (minecraft:dirt 32) is outside it; radius 3 lists both, one entry a kind; every scan costs rfPerRequest (5,000 -> 4,900 -> 4,800 -> 4,700, printed in the reply); THE SCAN FILTER (the GUI's search box) keeps '@minecraft' listing both kinds, narrows 'dirt' to minecraft:dirt 32 and 'stone' to minecraft:stone 64, answers 'empty' for '@nomatch' with the price still paid (4,600), and leaves the unfiltered scan listing both (4,500) as the differential; THE SORT CHOICE orders the list (Amount- = dirt 64, stone 32, Amount+ = stone 32, dirt 64, Name = dirt 64, stone 32, Mod puts rftoolsstorage:storage_module0 after both minecraft kinds), and the saved AMOUNT_DESCENDING mode orders the list after a relaunch too (stone 64, dirt 32); an emptied buffer refuses with no power and reads nothing, and charging it again makes the scan answer again; scan and radius refuse a chest and the modular storage (not a storage scanner); the radius and the buffer survive a relaunch; THE INJECT TICK pushes 64 stone from the in-slot into the empty chest two blocks away so its Items[0] reads minecraft:stone x64 while the buffer drops by exactly one rfPerInsert (5000 -> 4980), and with the buffer at 0 the next stack stays in the slot and the chest keeps its 64, recharging proving the stall was the power (chest 128); the auto slot routes too (chest 160); items the game puts in the container are routed for one rfPerInsert; a stack nothing accepts is still charged one attempt (20 FE pays one, 19 pays none) and stays in the slot; the walk passes a full barrel for the chest behind it; the tick never writes the out slot; THE REQUEST PATH pulls 32 stone from a chest of 128 into the player's inventory (the reference's straight-to-inventory default), leaving the chest at 96 and the buffer at 4,990 for an explicit count, refuses a kind nothing holds and charges nothing, refuses below the price with the price line (costs 10, have 9), sends a ctl command's 16-stone request straight to the player too, and refuses a request whose out slot holds another kind without pulling or charging; THE INSERT PATH pushes the player's 64 stone into the chest two blocks away so its Items[0] reads minecraft:stone x64 and empties the player's stack for exactly one rfPerInsert (5000 -> 4980), inserts an explicit 10 of 64 for one more rfPerInsert, takes only the 32 a nearly-full barrel has room for and charges NOTHING for the partial insert, moves nothing and charges nothing against a full barrel (the player keeps 64), refuses a box with no routable inventory (there are no routable inventories, no charge) and refuses a chest (not a storage scanner); THE GIVE PATH hands the whole stack (64) straight to the player from a chest of 64, empties the chest and charges the FULL rfPerRequest (5000 -> 4900) with the out slot still holding the request counterfactual's dirt (it has no out slot), hands exactly one item with [single] (chest 3 -> 2, buffer 4900 -> 4800), refuses a kind nothing holds and charges nothing, and refuses below the full price with the price line (costs 100, have 99) without touching the chest, and a give on a chest is refused as not a storage scanner; the loot table drops the scanner on a survival break; the modular storage still answers 0/0 empty no module; a barrel answers not a storage scanner to the same commands; and THE ROUTABLE STAR LIST starts empty (a fresh scanner's tick routes its 64 stone nowhere and still pays one rfPerInsert), routes only the starred chest (B takes 64 while the un-starred A stays empty), still lists the un-starred A's 32 dirt in the scan (the star filters routing, not the list), restores the walk when A is re-starred (A 96), and survives a relaunch (the saved list names A, which then takes another stack, 160)"

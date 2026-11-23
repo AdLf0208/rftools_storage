@@ -13,7 +13,7 @@ differences, are in [`FINDINGS.md`](FINDINGS.md).
 publishing (ARCHITECTURE.md §8); the port carries the upstream MIT notice in
 [`LICENSE`](LICENSE) and its provenance in [`LICENSE-NOTICE.md`](LICENSE-NOTICE.md).
 
-**Format: the SDK package (2026-11-18), version 0.2.11.** One flat `.hmod` —
+**Format: the SDK package (2026-11-18), version 0.2.12.** One flat `.hmod` —
 `horizon-mod.toml` + `Cargo.toml` + `src/` + `assets/` + `data/` — built by the
 launcher against SDK nightly **`0a875da91dbb0fdcb7ba8c42c11341aa229af51a`** with
 horizon-mixins **`e59da9094f0c2fdda6c627fe9eff22dec6a906f0`** (see
@@ -27,7 +27,8 @@ horizon-mixins **`e59da9094f0c2fdda6c627fe9eff22dec6a906f0`** (see
 [`## Slice 8`](#slice-8--the-scanners-give-from-screen-path-version-028),
 [`## Slice 9`](#slice-9--the-scanners-insert-from-screen-path-version-029),
 [`## Slice 10`](#slice-10--the-scans-search-filter-version-0210),
-[`## Slice 11`](#slice-11--the-scanner-lists-sort-choice-version-0211)).
+[`## Slice 11`](#slice-11--the-scanner-lists-sort-choice-version-0211),
+[`## Slice 12`](#slice-12--the-scanners-routable-star-list-version-0212)).
 The retired `.hnmod` container pinned Horizon `1d63e0a5…` / mixins `5a64af93…`;
 `src/runtime.rs` was byte-identical to the retired
 `mixins/rftoolsstorage/runtime.rs` until the 2026-11-18 review fixes gave it the
@@ -56,7 +57,11 @@ search box as `scan`'s optional term — every word a case-insensitive name cont
 or `@modid` a namespace prefix) and slice 11 (the scan list's **sort choice**:
 `/rftoolsstorage sort <pos> <mode>` sets the GUI list's order — `Amount+`, `Amount-`,
 `Mod` or `Name`, saved with the block so it survives a relaunch; `Tag` is
-`blocked(no item-tag enumeration)`) are implemented and verified
+`blocked(no item-tag enumeration)`) and slice 12 (the scanner's **routable star
+list**: `/rftoolsstorage routable <pos> <target> <on|off>` saves the GUI's
+per-inventory star, and only a starred inventory is routed into while the scan
+still lists every inventory in the box; a fresh scanner starts with nothing
+starred, exactly as upstream's empty `HashSet` does) are implemented and verified
 in a launcher-built game at the pin (the legs are listed per slice below;
 `ports/_shared/evidence/rftoolsstorage-e2e/`). The gap list below is the rest of
 the mod.
@@ -193,16 +198,19 @@ None. The two candidates were checked and left alone, on purpose:
 - `crafting_manager` (the jar's own lang calls it "WIP! … not functional yet") and
   the **storage scanner's remaining half**: the GUI list widget's **compact, cycle
   and visible-size controls** (its **search** is slice 10, carried as `scan`'s
-  optional query, and its **sort** is slice 11, carried as `sort`'s saved mode and
-  `scan`'s order), the **remote/tablet variant**, the XNet
-  access settings and its `routable` star list (the port treats every scanned
-  inventory as routable — slice 6's deviation 1), and the claimed-land check
+  optional query, its **sort** is slice 11, carried as `sort`'s saved mode and
+  `scan`'s order, and its **routable star list** is slice 12, carried as
+  `/rftoolsstorage routable <pos> <target> <on|off>` — the set is saved and filters
+  every routing walk, while the scan still lists every inventory), the
+  **remote/tablet variant**, the XNet access settings (slice 12 carries the star
+  list but not `InventoryAccessSettings`' per-inventory input/output permissions,
+  which need the XNet side), and the claimed-land check
   (`scannerNoRestrictions`; the pin has no `can_entity_destroy` **hook** exists at
   the pin, but it is a cancellable game event, not a query a mod can ask for a fake
   player — `blocked(no permission query)`). The **request path** is slice 7, the
   give-from-screen path is slice 8, the insert-from-screen path is slice 9, the
-  search filter is slice 10 and the sort is slice 11; `Tag` sorting is
-  `blocked(no item-tag enumeration)`.
+  search filter is slice 10, the sort is slice 11 and the star list is slice 12;
+  `Tag` sorting is `blocked(no item-tag enumeration)`.
 - Storage tiers 2-4 (`storage_module1..3`; their recipes need McJtyLib's
   `mcjtylib:copy_components` recipe type, which the pin does not have), the
   remote module (`storage_module6`, "DO NOT USE" in the jar's lang) and the
@@ -230,11 +238,11 @@ retired helper files and their mapping are in
 | Hook (SDK 0.2) | What it does |
 |---|---|
 | `register` → `Registrar` | declares the block-entity type `rftoolsstorage:storage_block_entity` over the block, attaches its `BlockEntityPart`, declares the menu's `MenuPart`, and declares the block's container (100 slots, every face, inputs and outputs) with its menu; **also** the scanner's type `rftoolsstorage:storage_scanner_block_entity` with its Part and `block_energy` (50,000 FE, 500 a move, no external drain) |
-| `BlockEntityPart::block_entity` | gives `rftoolsstorage:modular_storage` a block entity with empty saved data (the module tier and the lock live in its compound; `Items` are the container's), and `rftoolsstorage:storage_scanner` one whose compound holds `energy` and `radius` |
+| `BlockEntityPart::block_entity` | gives `rftoolsstorage:modular_storage` a block entity with empty saved data (the module tier and the lock live in its compound; `Items` are the container's), and `rftoolsstorage:storage_scanner` one whose compound holds `energy`, `radius`, the list's `sortMode` and the `routable` star list (slice 12: one `{c: [I; x, y, z]}` compound a starred cell, upstream's shape; the key is absent until the first star) |
 | `right_click_block` (cancel) | install / insert / seal / withdraw, and the action-bar readout |
-| `register_commands` | `/rftoolsstorage info <pos>`, `lock <pos>`, `scan <pos> [query]`, `radius <pos> <radius>`, `request <pos> <item> [<count>]` (`block_pos`, `item`, `integer`), `give <pos> <item> [single]` (`block_pos`, `item`, `word`) and `insert <pos> <item> [<count>]` (`block_pos`, `item`, `integer`) |
-| `run_mod_command` | their answers (the scan costs `rfPerRequest`; its optional `query` is the GUI list's search box — every word a case-insensitive name contains or `@modid` a namespace prefix, `getMatcher`; the radius is the GUI slider's 1..20; the request prices an explicit count at a tenth of `rfPerRequest`, checks the out slot and the buffer, pulls from the scanned inventories and gives the stack to the player, or leaves it in the out slot when there is no player; the give prices one item or a stack at the whole `rfPerRequest`, has **no** out slot, and pulls straight into the player in one transaction; the insert pushes the player's stack out, pricing the walk at one `rfPerInsert` and charging it **only when the stack emptied**) |
-| `block_entity_ticks` / `block_entity_tick` (BlockEntityPart) | the scanner ticks: the GUI input, then the automation input, each an `rfPerInsert` attempt into the scanned inventories (slice 6) |
+| `register_commands` | `/rftoolsstorage info <pos>`, `lock <pos>`, `scan <pos> [query]`, `radius <pos> <radius>`, `sort <pos> <mode>`, `routable <pos> <target> <on\|off>` (`block_pos`, `block_pos`, `word`), `request <pos> <item> [<count>]` (`block_pos`, `item`, `integer`), `give <pos> <item> [single]` (`block_pos`, `item`, `word`) and `insert <pos> <item> [<count>]` (`block_pos`, `item`, `integer`) |
+| `run_mod_command` | their answers (the scan costs `rfPerRequest`; its optional `query` is the GUI list's search box — every word a case-insensitive name contains or `@modid` a namespace prefix, `getMatcher`; the radius is the GUI slider's 1..20; the request prices an explicit count at a tenth of `rfPerRequest`, checks the out slot and the buffer, pulls from the scanned inventories and gives the stack to the player, or leaves it in the out slot when there is no player; the give prices one item or a stack at the whole `rfPerRequest`, has **no** out slot, and pulls straight into the player in one transaction; the insert pushes the player's stack out, pricing the walk at one `rfPerInsert` and charging it **only when the stack emptied**; `routable` is the GUI's per-inventory star, saved under upstream's `routable` key — it starts empty, and only a starred cell is routed into) |
+| `block_entity_ticks` / `block_entity_tick` (BlockEntityPart) | the scanner ticks: the GUI input, then the automation input, each an `rfPerInsert` attempt into the **starred** scanned inventories (slice 6; the star filter is slice 12) |
 | `Registrar::block_container` | the scanner's three slots (`SLOT_IN` 0, `SLOT_OUT` 1, `SLOT_IN_AUTO` 2): automation inserts into the auto slot only, every slot extractable, no menu |
 | `screen` / `screen_draw` / `screen_click` (BlockEntityPart, API 19/20) | the menu's 366 x 210 layout, the title, the inventory label and the padlock; a press on the padlock's rectangle answers button 0 |
 | `menu_button` (BlockEntityPart, API 20) | the padlock: flip the lock of a storage that has a module, answer on the action bar, push the state into the menu's data slot |
@@ -288,6 +296,19 @@ Slice 10: `StorageScannerTileEntity.java` again (`getMatcher`, `makeSearchPredic
 `performSearch`) and `GuiStorageScanner.java` (`startSearch`, the search field's caller and
 the client-side filter), read from the repository's raw URLs at the same commit into
 `/tmp/opencode` and deleted after the findings were recorded.
+Slice 11: the same `StorageScannerTileEntity.java` (`getSortMode`/`setSortMode`),
+`SortingMode.java`, `StorageScannerData.java` (`DEFAULT.sortingMode`) and
+`GuiStorageScanner.java` (`updateContentsList`, the comparators), read from the raw URLs
+into `/tmp/opencode` and deleted after the findings were recorded.
+Slice 12: `StorageScannerTileEntity.java` again (`routable`'s field, `isRoutable`,
+`toggleRoutable`, the `isRoutable` filters in `injectStackInternal`/`requestItem`/
+`checkForRoutableInventories`/`countItems`, and `saveAdditional`/`loadAdditional`),
+`modules/scanner/tools/InventoryAccessSettings.java` (the XNet half, read to separate it
+from the star), `GuiStorageScanner.java` (`addStorageLine`'s "Routable: Yes/No" choice and
+the "All routable inventories" label), and **McJtyLib** `1.21_neo` @
+`ef393e608eebc188a6e1decbf110506a55cc0725` `varia/BlockPosTools.java` (the `c` int-array
+entry shape). Read from the raw URLs into `/tmp/opencode` and deleted after the findings
+were recorded.
 
 ## Migration to the SDK format — version 0.2.0
 
@@ -1147,11 +1168,13 @@ would fight the machine.
 
 ### Deviations this slice adds
 
-1. **Every scanned inventory is routable.** Upstream filters the walk with `isRoutable(p)`, the GUI's
-   **star** set (`GuiStorageScanner`'s "All routable inventories" toggle), which starts empty — so an
-   upstream scanner pushes nothing until the player stars an inventory. The port has no list widget
-   (the gap), so it treats every inventory the scan finds as starred. That is the only reading under
-   which the family is observable at all, and it matches the slice's brief.
+1. ~~**Every scanned inventory is routable.**~~ **Closed by slice 12**, which carries the list's
+   per-inventory star: the walk skips an inventory the player has not starred, and the set starts
+   empty. The slice-6 text is kept for the record: *upstream filters the walk with `isRoutable(p)`,
+   the GUI's star set (`GuiStorageScanner`'s "All routable inventories" toggle), which starts empty —
+   so an upstream scanner pushes nothing until the player stars an inventory; with no list widget
+   the slice-6 port treated every inventory the scan finds as starred, the only reading under which
+   the family was observable at all.*
 2. **The walk order is the scan's order** (`x`, then `y`, then `z`), not the GUI's reorderable list
    order (up/down/top/bottom are list commands). Without the list there is nothing to reorder.
 3. **The GUI's insert/request paths are not carried**, only the tick. `injectStackFromScreen`,
@@ -1646,8 +1669,8 @@ the run ends `FAIL:` + `EXIT:1`.
    the same stack whenever the player holds the item in hand. Item and components
    match, as the request path does (`ItemResource`); upstream's insert has no matcher
    at all — it inserts the very stack it was handed.
-3. **Every scanned inventory is routable**, already slice 6's deviation 1: there is no
-   star list, so `checkForRoutableInventories` means "the box holds an inventory".
+3. ~~**Every scanned inventory is routable**~~ — slice 6's deviation 1, closed by slice 12:
+   `checkForRoutableInventories` now means "the box holds a **starred** inventory".
 4. **A console source is refused** before anything is pulled: the path hands a
    player's stack over, and a console has no inventory. (The request path's out-slot
    fallback stays `blocked(no console source)`; the insert has no fallback by
@@ -1992,6 +2015,211 @@ run ends `FAIL:` + `EXIT:1`.
 5. **The version bump is what forces the launcher to recompile.** With `0.2.11` the build printed
    `Compiling rftoolsstorage (1 of 1)` and a new build tag; without it the cached 0.2.10 package runs.
 
+## Slice 12 — the scanner's routable star list (version 0.2.12)
+
+The gap line slice 11 left, verbatim from [`## Gaps`](#gaps-the-rest-of-the-mod) and slice 6's
+deviation 1:
+
+> the XNet access settings and its `routable` star list (the port treats every scanned
+> inventory as routable — slice 6's deviation 1)
+
+The slice is the **star half**: the GUI's per-inventory "Routable: Yes/No" choice
+(`GuiStorageScanner.addStorageLine`, under the list's "All routable inventories" label), carried as
+`/rftoolsstorage routable <pos> <target> <on|off>`. It fits the **machines** tier: one more key in
+the scanner's saved compound, the same routing walks and the same item capability — no renderer, no
+screen, no new vanilla hook. The XNet **access settings** (`InventoryAccessSettings`: per-inventory
+input/output permissions per path) stay the gap: they are a different feature, fed by XNet, and no
+part of the star list. Upstream read at `fc1b18a7f070d0030671e1db1d3aab90699fd160`
+(`StorageScannerTileEntity.java`, `GuiStorageScanner.java`, `InventoryAccessSettings.java`) and
+McJtyLib `ef393e60` `BlockPosTools.java`; the raw files were read into `/tmp/opencode` and deleted
+after the findings were recorded.
+
+**Pin:** Horizon `0a875da91dbb0fdcb7ba8c42c11341aa229af51a`, horizon-mixins
+`e59da9094f0c2fdda6c627fe9eff22dec6a906f0`, mod API 0.2, game 26.3. **Version 0.2.12.**
+
+### The artefact's rules (read, not guessed)
+
+- **The default is an empty set.** `private final Set<BlockPos> routable = new HashSet<>();` — a
+  field, not part of `StorageScannerData` (which holds `radius`, `exportC`, `wideview` and
+  `sortingMode` only). Nothing seeds it, so **a freshly scanned inventory is not routable**: an
+  upstream scanner pushes nothing, requests nothing and refuses an insert with *"There are no
+  routable inventories!"* until the player stars an inventory. The port starts the same way; a
+  block saved with no `routable` key reads as the empty set.
+- **The saved shape is a list of int-array compounds.** `saveAdditional` writes
+  `tag.put("routable", list)` where each entry is `BlockPosTools.write(c)`:
+  `{c: [I; x, y, z]}`. `loadAdditional` reads the same list, and `BlockPosTools.read` returns null
+  for an empty array, so an unreadable entry is dropped; a `Set` also holds a position once. The
+  port writes and reads exactly that (in game: `routable` reads back as
+  `[{c: [I; 12, 102, 3]}]`, and the key is simply absent before the first star).
+- **The star filters routing, not the list.** `injectStackInternal` (the tick and the screen insert),
+  `requestItem` (the request/give pulls) and `checkForRoutableInventories` all test
+  `isRoutable(p)`; `getInventoryForBlock`/`countItems(..., starred=false)` do **not** — the GUI's
+  list shows every inventory in the box regardless of its star. The port's `scan_targets` (the one
+  walk every routing path uses) filters by the set, and `scan_found` (the readout) does not.
+- **The GUI's toggle is a set membership**, one inventory at a time ("Routable: Yes/No"), and
+  `toggleRoutable` calls `setChanged()`. The port's `on`/`off` are idempotent and save the set with
+  the block, so it survives a relaunch (`block_entity` saved compound).
+- **A stale star is inert.** The set keeps a position whose inventory is gone; the walk tests the
+  capability at the cell, so nothing happens until an inventory is back — `checkForRoutableInventories`
+  too (upstream's `level.getBlockEntity(p) != null`).
+
+### What the slice does
+
+- **`runtime`** (pure, tested): [`is_routable`] (the set's `contains`), [`star`] (add/remove one cell,
+  idempotent, other cells kept), [`routing_target`] (`injectable_at` **and** starred — upstream's
+  `!p.equals(getBlockPos()) && isRoutable(p)`), [`routable_line`] (the reply).
+- **`support`**: `KEY_ROUTABLE = "routable"`, `saved_routable` (the list → a de-duplicated set, the
+  malformed entries dropped), `routable_tag` (the set → the same list), the command
+  `routable <pos> <target> <on|off>` (the target must be a cell the GUI's list could show: in the
+  scan box, with an item capability, never the scanner itself), and the `routable: &[[i32; 3]]`
+  parameter on `scan_targets`, `pull_request`, `pull_to_player`, `insert_to_inventories`,
+  `has_routable` and `inject_stack`.
+- **Unchanged**: the readout (`scan`) lists every inventory in the box, the scan's price, the sort,
+  the inject tick's per-attempt `rfPerInsert` (paid even when nothing is routable, as upstream's
+  tick pays it), the request/give prices and the insert's pay-only-when-emptied rule.
+- **The earlier legs keep their behaviour by starring their chests**: the inject/request/give/insert
+  phases now call `routable … on` for the chest (and the refusing barrel) they route into, which is
+  what a player does in the GUI. The star is a real behaviour change from 0.2.11 — a scanner with
+  nothing starred routes nothing — and the e2e proves both sides.
+
+### Red → green (the rules)
+
+The three rules were written first with `is_routable`/`star`/`routable_line` stubbed
+(`false`/`Vec::new()`/`""`) and `routing_target` ignoring the star, and the suite was run
+**before** implementing them (`ports/_shared/evidence/rftoolsstorage/slice12-red.log`,
+`TEST_EXIT:101`):
+
+```
+---- runtime::tests::a_fresh_scanners_star_list_is_empty_and_a_star_switches_one_cell stdout ----
+
+thread 'runtime::tests::a_fresh_scanners_star_list_is_empty_and_a_star_switches_one_cell' (85089) panicked at src/runtime.rs:1979:9:
+assertion `left == right` failed: a press adds the cell
+  left: []
+ right: [[8, 102, 3]]
+...
+thread 'runtime::tests::the_walk_skips_a_cell_that_is_not_starred' (85130) panicked at src/runtime.rs:2009:9:
+an unstarred inventory is not routable even though the scan lists it
+...
+thread 'runtime::tests::the_star_reply_names_the_cell_and_its_state' (85127) panicked at src/runtime.rs:2025:9:
+assertion `left == right` failed
+  left: ""
+ right: "routable 8 102 3 on"
+...
+test result: FAILED. 46 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out
+TEST_EXIT:101
+```
+
+Implemented, then **50 passed, 0 failed** (`sdk-test.log`, `slice12-test.log`): the runtime's 45
+(42 + the three star rules) and the five glue tests, one of them new
+(`the_routable_set_is_upstreams_list_of_int_array_compounds` — the saved shape and its malformed
+entries). `uses.json` grew from 537 to **540 API items** (the `BlockPos` argument's pattern, the
+`Tag::IntArray` and one more method).
+
+### In game (`ports/_shared/evidence/rftoolsstorage-e2e/`)
+
+| Leg | Log | Verdict |
+|---|---|---|
+| default, the launcher-built 0.2.12 package | `e2e-routable.log` | **PASS** + `EXIT:0` |
+| control (the same Nightly without the package) | `e2e-routable-control.log` | **FAIL** + `EXIT:1` — `{"error":"unknown item rftoolsstorage:storage_scanner"}` |
+| `ROUTABLE_SELFTEST=1` (the un-starred chest must *not* have taken the stack) | `e2e-routable-selftest.log` | **FAIL** + `EXIT:1` — *"the un-starred chest A stayed empty (0) and the starred B took the 64 stone (energy 4980), so the star filtered routing; this inverted assertion fails as it must"* |
+| the first reaching run (kept: it found the tick-charge trap) | `e2e-routable-first-run.log` | **FAIL** + `EXIT:1` — *"the unstarred attempt left 0, expected one rfPerInsert off 5000 (4980)"* |
+
+`e2e-routable.log` re-runs every earlier phase (slices 1–11 still pass, with the routing phases
+starring their chests), then asserts the brief's rig — scanner at S, radius 2, two empty chests two
+blocks away (A at S+2 on **x**, B at S+2 on **z**), sort `Name`, buffer 20 for the first attempt —
+with every `ctl` reply in the log:
+
+```
+saved routable (default): Found no elements matching routable
+no star: in-slot 64, A 0, B 0, energy 0
+star B: rftoolsstorage:storage_scanner: routable 12 102 3 on
+star A: rftoolsstorage:storage_scanner: routable 14 102 1 on
+un-star A: rftoolsstorage:storage_scanner: routable 14 102 1 off
+saved routable (B only): 12, 102, 1 has the following block data: [{c: [I; 12, 102, 3]}]
+B starred, A unstarred: in-slot '', A 0, B 64, energy 4980
+chest at 14,102,1: 32 x minecraft:dirt
+scan with A unstarred: rftoolsstorage:storage_scanner: minecraft:dirt 32, minecraft:stone 64 (4900/50000 FE); buffer now 4900
+star A again: rftoolsstorage:storage_scanner: routable 14 102 1 on
+un-star B: rftoolsstorage:storage_scanner: routable 12 102 3 off
+A re-starred, B unstarred: in-slot '', A 96, B 64, energy 4980
+saved routable after the relaunch: 12, 102, 1 has the following block data: [{c: [I; 14, 102, 1]}]
+after the relaunch: in-slot '', A 160, B 64, energy 4980
+```
+
+Five facts make that evidence rather than a print: **the default set is empty** — `data get` answers
+`Found no elements matching routable`, and with `energy: 20` the tick pays exactly one attempt
+(→ 0) while the 64 stone stays in the in-slot and **both** chests read 0; **the star is what lets
+the same stack go** — after starring B and un-starring A the very stack that stayed is routed to B
+(64) for one `rfPerInsert` (5,000 → 4,980), A still 0; **the scan still lists the un-starred
+inventory** — A, seeded with 32 dirt after the walk, is in the reply
+(`minecraft:dirt 32, minecraft:stone 64`), so the set filtered routing, not the list; **the
+membership is the rule, not the walk order** (B is first in scan order, so re-starring A and
+un-starring B makes A the recipient — the dirt chest's 96 is its 32 dirt plus the new 64 stone,
+B unchanged); and **the saved list survives a relaunch** — the block reads back
+`[{c: [I; 14, 102, 1]}]` (A only) after quit and re-entry, and the next stack still goes to A
+(160) while the un-starred B stays at 64. The one paid attempt with nothing starred is the tick's
+own rule (slice 6), not a gap: upstream charges `rfPerInsert` after `injectStackInternal` whatever
+the walk did.
+
+### Deviations this slice adds
+
+1. **A command, not a screen.** Upstream's star is the list line's "Routable: Yes/No" choice
+   (`GuiStorageScanner.addStorageLine`); the port's list is still a gap (slice 5's deviation 1), so
+   the same set membership is `/rftoolsstorage routable <pos> <target> <on|off>`. The command takes
+   `on`/`off` rather than toggling, because a command should be idempotent; `runtime::star` is the
+   set operation either way.
+2. **The target must be an inventory in the current box.** The GUI can only star a line its list
+   shows, and the list is every inventory in the box: the command refuses the scanner's own cell, a
+   cell outside the box and a cell with no item capability. Upstream's `toggleRoutable` itself would
+   accept any position; the saved shape and the walk are the same, only the surface is narrower.
+   A star whose inventory later goes away stays saved and is inert (the walk asks the capability).
+3. **The star list is the only half of the XNet surface carried.** The per-inventory
+   `InventoryAccessSettings` (an input/output permission for the GUI, the screen and automation,
+   plus a matcher) arrives from XNet and is still a gap; with no settings the port's access tests
+   are upstream's `!inventoriesFromXNet.contains(p)` (true), so every cell the star allows is open
+   to every path. The scan's list and price are untouched by the star (upstream passes
+   `starred=false` for the list).
+4. **A stale star costs nothing.** Upstream's `findInventories` records the box's inventories each
+   scan; the port walks the box each time and tests the capability, so a saved star on an empty
+   cell is skipped exactly as an unstarred one (the e2e's empty-box insert reaches the refusal with
+   CHEST_X still in the saved list).
+
+### Coverage (the families this slice changes)
+
+| Family | State |
+|---|---|
+| `/rftoolsstorage routable <pos> <target> <on\|off>`, its parsed reply | **tested** — `routable 12 102 3 on`, `routable 14 102 1 on`, `routable 14 102 1 off` (`e2e-routable.log`) |
+| the default: a fresh scanner routes nothing | **tested** — the saved key is absent (`Found no elements matching routable`), the tick pays one `rfPerInsert` and both chests stay empty (`e2e-routable.log`); `a_fresh_scanners_star_list_is_empty_and_a_star_switches_one_cell` |
+| the star filters the routing walks (tick here; the request/give/insert walk uses the same `scan_targets`) | **tested** — only the starred B receives; A stays empty while unstarred (`e2e-routable.log`); `the_walk_skips_a_cell_that_is_not_starred`; the earlier routing phases now star their chests and still pass |
+| the scan still lists an un-starred inventory | **tested** — A's 32 dirt appears beside B's 64 stone with A unstarred (`e2e-routable.log`) |
+| the saved shape (`routable` = `[{c: [I; x, y, z]}]`) and its round trip | **tested** — in game the block reads `[{c: [I; 12, 102, 3]}]`, and after a relaunch `[{c: [I; 14, 102, 1]}]` (`e2e-routable.log`); `the_routable_set_is_upstreams_list_of_int_array_compounds` (malformed entries dropped) |
+| re-starring restores the walk | **tested** — A unstarred → starred becomes the recipient (96), B unstarred (`e2e-routable.log`) |
+| the set survives a relaunch | **tested** — the saved list and the routing both survive (`e2e-routable.log`) |
+| `checkForRoutableInventories` = a **starred**, loaded inventory | **tested by reuse** — the insert's empty-box leg refuses with the saved star on the removed chest (`e2e-routable.log`, the insert phase) |
+| XNet access settings (per-path permissions, the matcher) | **not ported** (needs XNet; the star list is separate — deviation 3) |
+| the GUI list widget itself, compact/cycle/visible-size, the remote/tablet variant, the claimed-land check | **not ported** (the screen is a fixed slot layout; `blocked(no permission query)` for the claim) |
+
+### Traps this slice paid for
+
+1. **The tick charges on every tick while the stack stays.** An unstarred walk moves nothing, so the
+   in-slot keeps its stack and the next tick pays another `rfPerInsert` — 5,000 FE is gone in 250
+   ticks, and the "energy −20" assertion read 0 on the first run. A tick-independent assertion is
+   slice 6's: set `energy: 20`, one attempt is paid (→ 0) and the stack is still there. The failed
+   run is kept as `e2e-routable-first-run.log`.
+2. **The walk is x-major, so the z chest comes first.** The scan order is x, then y, then z: a chest
+   at S+(0, 0, +2) sorts before one at S+(+2, 0, 0). Star exactly one of them for every directed
+   assertion; "both starred" would make every stack go to the z chest and look like a bug.
+3. **`data get` of the key prints differently by state.** Absent: `Found no elements matching
+   routable`. Present: `[{c: [I; 12, 102, 3]}]` (an int array, `I;`, spaces after the commas) —
+   the saved-shape assertion parses exactly that, which is also the upstream `BlockPosTools` shape.
+4. **`fill_chest` recreates the block but not the star.** The star is a position in the scanner's
+   saved compound, so replacing a chest (or chest → barrel → chest) at the same cell keeps it
+   starred — which is why the later inject/insert phases' barrels are still routable.
+5. **The earlier routing legs are a real behaviour change.** With the empty default, every chest the
+   inject/request/give/insert phases route into has to be starred first; the phase adds the calls
+   (and the e2e's own star leg is between the relaunch and the inject phases). A leg that forgets
+   one fails with the chest untouched and the stack still in the slot — not a port bug.
+
 ## Verification
 
 Skills: superpowers/using-superpowers, brainstorming, writing-plans, test-driven-development, systematic-debugging, verification-before-completion; BeautifulRust/rust-best-practices
@@ -1999,6 +2227,28 @@ Skills: superpowers/using-superpowers, brainstorming, writing-plans, test-driven
 Full evidence in [`VALIDATION.md`](VALIDATION.md); the e2e logs are in
 `ports/_shared/evidence/rftoolsstorage-e2e/` (the game legs) and
 `ports/_shared/evidence/rftoolsstorage/` (the ladder, package and fits).
+
+**0.2.12 — the scanner's routable star list (2026-11-23, pin `0a875da`)**
+
+| Step | Command | Result |
+|---|---|---|
+| Red proof | `cargo test` with `is_routable`/`star`/`routable_line` stubbed and `routing_target` ignoring the star | **FAILED. 46 passed; 3 failed**, `TEST_EXIT:101` (`slice12-red.log`); quoted above |
+| Runtime + glue tests | `cargo test` | **50 passed**, 0 failed (`sdk-test.log`, `slice12-test.log`, `TEST_EXIT:0`) — 45 runtime + 5 glue |
+| Lints | `cargo clippy --all-targets -- -D warnings` | `CLIPPY_EXIT:0`, 0 warnings (`sdk-clippy.log`, `slice12-clippy.log`) |
+| Formatting | `rustfmt --edition 2024 --check src/{lib,support,runtime}.rs` | `FMT_EXIT:0` (`slice12-fmt.log`; the first check listed two wrapping diffs, fixed with `rustfmt` on the three files, then re-run green) |
+| SDK gate | `cargo horizon-mod check` | `TREE_CHECK_EXIT:0` — *"…uses 540 items of the API (5 Part kinds, 2 capabilitys, 149 fields or variants, 18 hooks, 52 hook arguments, 2 macros, 168 methods, 29 traits, 115 types). Made for 0a875da."* (`slice12-tree-check.log`) |
+| Package | `rm -f Cargo.lock && cargo horizon-mod build`, twice | **95,274 B**, SHA-256 `d194c73b31d2d3e2b3bf60e9ed3b727a2feac90e26ff33cf2234fbd3df47991b`, **`cmp`-identical** (`slice12-build-1.log`, `slice12-build-2.log`) |
+| Package check | `cargo horizon-mod check rftoolsstorage.hmod` | `rftoolsstorage 0.2.12 (native-mod, format native-1/0a875da…/e59da90…, for 26.3)`, **95,274 bytes**, `d194c73b…991b`, `FILE_CHECK_EXIT:0` (`slice12-check.log`) |
+| Entries | `unzip -l rftoolsstorage.hmod` | **67 files**, no `Cargo.lock`; `src/runtime.rs` byte-identical in tree and package (`7522c53c…a7c`) |
+| Fits the pin | `cargo horizon-mod fits rftoolsstorage.hmod --build 0a875da` | `0a875da  made for`, `FITS_PIN_EXIT:0` (`slice12-fits.log`) |
+| Fits another build | `cargo horizon-mod fits rftoolsstorage.hmod --build 0b14f8a` | `0b14f8a  fits`, `FITS_OTHER_EXIT:0` (`slice12-fits.log`) |
+| Launcher build | `BUILD_LOCAL=1 launcher-game.sh build rftoolsstorage` | `Compiling rftoolsstorage (1 of 1)`, build tag `native-0a875da-d4df6925a64a`, `LAUNCHER_BUILD_EXIT:0` (`slice12-launcher-build.log`) |
+| In game | `build-slot.sh run --step e2e -- bash ports/rftoolsstorage/tools/e2e.sh` (`CONTROL_GAME=`) | **PASS** + `EXIT:0` (`e2e-routable.log`) |
+| Control | the same rig on the Nightly without the package | **FAIL** + `EXIT:1` (`e2e-routable-control.log`) |
+| Selftest | `ROUTABLE_SELFTEST=1` (the un-starred chest must not have taken the stack) | **FAIL** + `EXIT:1` (`e2e-routable-selftest.log`) |
+| e2e gate | `check-e2e-logs.py rftoolsstorage-e2e --strict` | `logs=32  ok=32  missing-exit=0  bad-exit=0`, exit 0 |
+| Package gate | `verify-sdk-package.py rftoolsstorage` | `1/1 package(s) verified`, exit 0 |
+| Skills gate | `check-skills.py --notes ports/rftoolsstorage --strict` | `Skills line present`, PASS |
 
 **0.2.11 — the scanner list's sort choice (2026-11-23, pin `0a875da`)**
 
